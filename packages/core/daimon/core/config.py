@@ -1724,10 +1724,26 @@ class FleetSettings(BaseModel):
 
 
 class WatchesSettings(BaseModel):
+    @field_validator("executor_secret", mode="before")
+    @classmethod
+    def empty_executor_secret(cls, value: object) -> object:
+        return None if value == "" else value
+
+    executor_secret: SecretStr | None = Field(
+        default=None,
+        min_length=32,
+        max_length=256,
+        description=(
+            "Private poll executor shared secret, also supplied as "
+            "DAIMON_SIDECAR__EXECUTOR_SECRET. Unset disables executor transport. "
+            "Never expose the private listener through the public proxy."
+        ),
+    )
     enabled: bool = Field(
         default=False,
         description=(
-            "Enable OS-signed page-event watch producers and dispatch. Keep disabled "
+            "Enable OS-signed page-event and reviewed READ-tool polling producers and dispatch. "
+            "Keep disabled "
             "until the execution-bound unattended origin grants, non-gateable cleanup "
             "and watch release are reviewed. "
             "The database global gate must also be explicitly enabled by an operator."

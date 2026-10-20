@@ -1271,7 +1271,8 @@ class TestOnReadySweepWidenedReconcile:
 
     async def test_a_repeated_on_ready_redoes_only_what_has_not_succeeded(
         self,
-        db_session_factory: async_sessionmaker[AsyncSession],
+        db_engine: AsyncEngine,
+        db_clean: None,
     ) -> None:
         """on_ready re-fires after a failed RESUME. A tenant whose reconcile succeeded
         and every synced scope are done once per process; a tenant whose reconcile
@@ -1280,6 +1281,11 @@ class TestOnReadySweepWidenedReconcile:
         from daimon.core.defaults.report import Action, ApplyReport, ResourceOutcome
         from daimon.core.ma_identity import derive_tenant_uuid
 
+        # The two guilds' seeds run at once. On `db_session_factory`'s single
+        # connection their transactions interleave, and the one left open holds
+        # locks that hang a later test in this worker; give each its own pooled
+        # connection, as the bot's engine does.
+        db_session_factory = async_sessionmaker(bind=db_engine, expire_on_commit=False)
         ok_id, flaky_id = 900000020, 900000021
         for guild_id in (ok_id, flaky_id):
             await provision_tenant(

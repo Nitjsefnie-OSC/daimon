@@ -2243,6 +2243,97 @@
         'type': 'object',
       }),
     }),
+    'create_watch': dict({
+      'description': '''
+        Watch an OS page event or a reviewed OS read tool from this conversation.
+        <blank line>
+        Binds the current human owner, tenant, agent and exact Discord thread.
+        Requires an attended turn origin and verified owner card approval.
+        Backends without tool confirmation refuse enrollment.
+        Polls run without an AI turn; firings
+        use unattended read-and-report turns and current access/spend checks.
+        Poll arguments must explicitly name a source different from the reporting thread.
+        Only read_thread and read_channel are pollable; no URLs or outside tools.
+        Projection supports `.`, `.field.nested` and `.rows[0].field`; other jq
+        expressions are refused. Polls start with a saved baseline and compare
+        change, added array elements, or updated object keys every 60–86400 seconds.
+        Lifetime is 1–30 days. Producers remain disabled until both operator gates
+        are enabled. Page signing keys are sent privately to the owner once and
+        never returned here; install them on the OS host and sidecar privately.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'arguments': dict({
+            'anyOf': list([
+              dict({
+                'additionalProperties': True,
+                'type': 'object',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'instructions': dict({
+            'type': 'string',
+          }),
+          'interval': dict({
+            'default': 300,
+            'type': 'integer',
+          }),
+          'lifetime_days': dict({
+            'default': 7,
+            'type': 'integer',
+          }),
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'page_id': dict({
+            'anyOf': list([
+              dict({
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+          'projection': dict({
+            'default': '.',
+            'type': 'string',
+          }),
+          'rule': dict({
+            'default': 'change',
+            'enum': list([
+              'change',
+              'added',
+              'updated',
+            ]),
+            'type': 'string',
+          }),
+          'source': dict({
+            'enum': list([
+              'page_event',
+              'poll',
+            ]),
+            'type': 'string',
+          }),
+          'tool': dict({
+            'default': 'read_thread',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'origin_context_id',
+          'instructions',
+          'source',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'delete_message': dict({
       'description': '''
         Delete one message you posted, or on Discord one of your replies or status cards.
@@ -2397,6 +2488,24 @@
         }),
         'required': list([
           'thread_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'delete_watch': dict({
+      'description': '''
+        Delete your watch and its retained evidence after cancelling queued wakes; admins may
+        delete within their workspace.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'watch_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'watch_id',
         ]),
         'type': 'object',
       }),
@@ -4154,6 +4263,18 @@
         'type': 'object',
       }),
     }),
+    'list_watches': dict({
+      'description': '''
+        List your watches in this workspace, including paused imports and expiry; no signing
+        secrets.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
     'microsoft_get': dict({
       'description': '''
         GET a Microsoft Graph v1.0 path as the person, e.g. /me/drive/root/children.
@@ -4433,6 +4554,24 @@
         }),
         'required': list([
           'url',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'pause_watch': dict({
+      'description': '''
+        Pause your watch and cancel its queued wakes. Workspace admins may pause another
+        owner's watch.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'watch_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'watch_id',
         ]),
         'type': 'object',
       }),
@@ -5415,6 +5554,31 @@
         'type': 'object',
       }),
     }),
+    'resume_watch': dict({
+      'description': '''
+        Resume your paused watch from an attended owner turn after fresh access checks.
+        Only the owner may resume; an admin cannot override the owner pause.
+        Server-side owner card proof is required, including with tool safety off.
+        Backends without tool confirmation refuse.
+        Imported watches require operator confirmation; source_unmapped never resumes.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'watch_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'watch_id',
+          'origin_context_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'revoke_promo_code': dict({
       'description': '''
         Stop a promo code from being redeemed again. Operator-only.
@@ -5430,6 +5594,30 @@
         }),
         'required': list([
           'promo_code_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'rotate_watch_key': dict({
+      'description': '''
+        Rotate an OS page signing key, revoke the old key and cancel queued wakes. The fresh
+        key goes to its owner by private DM once. Requires an attended owner turn;
+        an admin cannot rotate another owner's key. Server-side owner card proof is
+        required; backends without tool confirmation refuse.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'origin_context_id': dict({
+            'type': 'string',
+          }),
+          'watch_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'watch_id',
+          'origin_context_id',
         ]),
         'type': 'object',
       }),
@@ -6383,6 +6571,24 @@
         }),
         'required': list([
           'repo_name',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'show_watch': dict({
+      'description': '''
+        Show your watch's immutable destination, source, status and expiry. Admins may inspect
+        within their workspace.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'watch_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'watch_id',
         ]),
         'type': 'object',
       }),

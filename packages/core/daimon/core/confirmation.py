@@ -31,6 +31,7 @@ from typing import TYPE_CHECKING, Final, Literal, cast
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
+    WATCH_CONFIRMED_TOOLS,
     ToolCall,
     microsoft_send_tools,
 )
@@ -427,8 +428,10 @@ def prompt_for_tool_call(
 
 def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     """Daimon's tools this turn's session asks before, from already-injected selectors."""
-    return backend_switch_tools(enabled=deps.backend_selection_enabled) | microsoft_send_tools(
-        enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled
+    return (
+        WATCH_CONFIRMED_TOOLS
+        | backend_switch_tools(enabled=deps.backend_selection_enabled)
+        | microsoft_send_tools(enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled)
     )
 
 

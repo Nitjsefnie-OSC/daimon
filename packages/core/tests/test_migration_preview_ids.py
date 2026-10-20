@@ -37,8 +37,9 @@ FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
 PREVIOUS_HEAD = "0117_clear_legacy_routine_output"
 LEAD_HEAD = "0118_lead_intake"
-WATCHES = "0119_watches"
-HEAD = "0120_routine_sandbox_tools"
+WATCH_HEAD = "0119_watches"
+WATCH_POLLING = "0120_watch_polling"
+HEAD = "0121_routine_sandbox_tools"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
@@ -49,7 +50,8 @@ CHAIN = [
     "0116_thread_model_settings",
     PREVIOUS_HEAD,
     LEAD_HEAD,
-    WATCHES,
+    WATCH_HEAD,
+    WATCH_POLLING,
     HEAD,
 ]
 # Added by HEAD, so absent from every older revision the chain is checked at.
@@ -140,7 +142,7 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
 
     compared_tables = (
         TABLES
-        if expected in (LEAD_HEAD, WATCHES, HEAD)
+        if expected in (LEAD_HEAD, WATCH_HEAD, WATCH_POLLING, HEAD)
         else {name for name in TABLES if not name.startswith("lead_")}
     )
 
@@ -314,7 +316,7 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 sync.execute(text("DELETE FROM routines"))
                 sync.commit()
             # Each new revision reverses, including Microsoft's tables.
-            for target in reversed([FORK, *CHAIN[:-3]]):
+            for target in reversed([FORK, *CHAIN[: CHAIN.index(PREVIOUS_HEAD) + 1]]):
                 command.downgrade(config, target)
                 assert sync.scalar(text("SELECT version_num FROM alembic_version")) == target
                 inspector = inspect(sync)
@@ -348,11 +350,11 @@ async def test_deployed_upgrade_and_downgrade_paths(
             )
             sync.commit()
             # The sandbox opt-in reverses; the watch evidence below it does not.
-            command.downgrade(config, WATCHES)
-            _assert_head(sync, WATCHES)
+            command.downgrade(config, WATCH_POLLING)
+            _assert_head(sync, WATCH_POLLING)
             with pytest.raises(NotImplementedError, match="Watch evidence"):
                 command.downgrade(config, LEAD_HEAD)
-            _assert_head(sync, WATCHES)
+            _assert_head(sync, WATCH_POLLING)
             command.upgrade(config, "head")
             _assert_head(sync)
 

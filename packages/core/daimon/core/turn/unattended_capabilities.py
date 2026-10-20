@@ -58,6 +58,7 @@ from daimon.core.stores.thread_sessions import invalidate_session_tools
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     SERVER_SEPARATOR,
+    WATCH_CONFIRMED_TOOLS,
     ToolCall,
     ToolSafetyPolicy,
     backend_switch_tools,
@@ -152,6 +153,7 @@ def protected_tools(policy: ToolSafetyPolicy) -> frozenset[str]:
     """
     return (
         frozenset({"lead_intake_resolve"})
+        | WATCH_CONFIRMED_TOOLS
         | backend_switch_tools(enabled=True)
         | microsoft_send_tools(enabled=True, tool_safety_on=policy.enabled)
     )

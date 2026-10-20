@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
 from typing import cast
@@ -39,9 +40,16 @@ def discord_budget_notifier(
                 log.info("channel_budget.notice_undelivered", err_type="ClientClosed")
                 break
             try:
-                dm = await open_dm(int(notice.workspace_id), int(user_id))
-                await dm.send(text, allowed_mentions=discord.AllowedMentions.none())
-                delivered += 1
+                landed = await send_member_notice(
+                    runtime,
+                    open_dm,
+                    is_closed,
+                    tenant_id=notice.tenant_id,
+                    workspace_id=notice.workspace_id,
+                    recipient_id=user_id,
+                    text=text,
+                )
+                delivered += int(landed)
             except (discord.HTTPException, LookupError, ValueError) as exc:
                 log.info("channel_budget.notice_undelivered", err_type=type(exc).__name__)
             except RuntimeError as exc:
@@ -76,3 +84,25 @@ def with_budget_notifier(
             budget_notifier=discord_budget_notifier(real, open_dm, is_closed),
         ),
     )
+
+
+async def send_member_notice(
+    runtime: DiscordRuntime,
+    open_dm: OpenDm,
+    is_closed: Callable[[], bool],
+    *,
+    tenant_id: uuid.UUID,
+    workspace_id: str,
+    recipient_id: str,
+    text: str,
+) -> bool:
+    """Existing private member-notice transport, also used for watch migration DMs."""
+    policy = runtime.settings.direct_message_policies.get(tenant_id, DirectMessagePolicy())
+    if is_closed() or not policy.allows(recipient_id):
+        return False
+    try:
+        dm = await open_dm(int(workspace_id), int(recipient_id))
+        await dm.send(text, allowed_mentions=discord.AllowedMentions.none())
+        return True
+    except (discord.HTTPException, LookupError, ValueError):
+        return False
