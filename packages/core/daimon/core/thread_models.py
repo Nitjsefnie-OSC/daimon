@@ -24,7 +24,7 @@ import uuid
 from collections.abc import Mapping
 from dataclasses import dataclass
 from datetime import datetime
-from typing import Final, Literal
+from typing import Final
 
 from anthropic.types.beta import BetaManagedAgentsAgent, BetaManagedAgentsModelConfig
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
@@ -39,8 +39,6 @@ from daimon.core.stores.thread_models import (
     set_thread_model,
 )
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
-
-type ModelChoice = Literal["haiku", "sonnet", "opus", "default"]
 
 # What someone can pick, by the word they would use. "default" is the agent's own.
 THREAD_MODEL_CHOICES: Final[Mapping[str, str]] = {
@@ -175,13 +173,7 @@ async def may_choose_thread_model(
 def with_model_override(
     agent: BetaManagedAgentsAgent, model_override: str | None
 ) -> BetaManagedAgentsAgent:
-    """The agent as a turn runs it: the stored agent with the conversation's model, if any.
-
-    Every place that re-reads the stored agent for an admitted turn (a fleet
-    root restored from its frozen preparation, a fresh source capture) puts
-    the turn's override back, so the effective model is what is compared and
-    run, while any edit to the stored agent itself still shows.
-    """
+    """The agent as a turn runs it: the stored agent with the conversation's model, if any."""
     if model_override is None:
         return agent
     return agent.model_copy(

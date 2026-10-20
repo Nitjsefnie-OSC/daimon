@@ -94,13 +94,18 @@ class NativeLeadPermissions(Protocol):
         ...
 
 
+def actual_thread_id(record: IntakeRecord) -> str | None:
+    """The dossier thread a record's effects created, once its id is known."""
+    return record.progress.discord_thread_id or next(
+        (e.remote_id for e in record.effects if e.step == "thread" and e.remote_id), None
+    )
+
+
 def read_target(record: IntakeRecord) -> LeadReadTarget:
     """A record's readers: its capture-time destination and its dossier thread."""
     if record.destination is None:
         raise LeadReadDenied("lead_destination_missing")
-    thread_id = record.progress.discord_thread_id or next(
-        (e.remote_id for e in record.effects if e.step == "thread" and e.remote_id), None
-    )
+    thread_id = actual_thread_id(record)
     unresolvable = False
     if thread_id is None and any(e.step == "thread" for e in record.effects):
         # Discord creates a message thread at its starter's id. Until an
@@ -202,6 +207,7 @@ __all__ = [
     "LeadReader",
     "NativeChannel",
     "NativeLeadPermissions",
+    "actual_thread_id",
     "authorize_lead_read",
     "discovery_target",
     "read_target",
