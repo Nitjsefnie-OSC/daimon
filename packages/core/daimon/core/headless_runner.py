@@ -301,12 +301,10 @@ async def run_turn_impl(
        even without a per-agent PAT.
     3. The drain is delegated to ``daimon.core.turn.driver.run_turn`` with a
        no-op lifecycle (nothing to render to), ``tool_confirmation`` from
-       ``unattended_posture(tool_safety, ...)`` (with the policy on, reads
-       run and third-party writes are refused unless the operator allowed
-       them in unattended runs; off, ordinary third-party calls are allowed;
-       Daimon's card-only actions are refused — a backend switch and
-       Microsoft mail either way, Microsoft file changes with the policy on;
-       nobody is here to press Approve), each send gated first and sent once
+       ``unattended_posture(tool_safety, ...)`` (nobody is here to press
+       Approve: reads run and writes are refused unless the operator allowed
+       them; ``daimon.core.turn.unattended`` has the rest), each send gated
+       first and sent once
        (`unattended_sends`), ``deadline=effective_deadline``
        (the same instant that bounded step 1/2's assembly, so the driver's own
        ``remaining_s`` naturally subtracts the time assembly already spent —
