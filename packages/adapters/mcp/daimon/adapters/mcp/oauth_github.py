@@ -68,6 +68,9 @@ from starlette.responses import RedirectResponse, Response
 RouteHandler = Callable[[Request], Awaitable[Response]]
 ClientFactory = Callable[[], httpx.AsyncClient]
 _COOKIE = "daimon_gh_connect"
+# GitHub drops `state` from the setup redirect after some installation changes, so the
+# browser keeps it too. It still has to match the flow cookie in `get_flow`.
+_STATE_COOKIE = "daimon_gh_connect_state"
 _log = logging.getLogger(__name__)
 _ADMIN_RETRY = "Couldn't confirm you're still an admin. Try again in a minute."
 # A save posts one `repo=<id>` per addition plus one shared `access=write`,
@@ -850,7 +853,6 @@ _EDITOR_SCRIPT = """
     for (const note of dialog.querySelectorAll(".gh-owner-truncated")) {
       note.hidden = activeOwner !== note.dataset.owner;
     }
-    document.getElementById("no-search-results").hidden = true;
     showSelected.setAttribute("aria-pressed", "false");
     updatePicker();
   }
@@ -886,6 +888,15 @@ _EDITOR_SCRIPT = """
     }
     const count = options.filter(o => checkbox(o).checked).length;
     const shown = options.filter(o => !o.hidden).length;
+    const noResults = document.getElementById("no-search-results");
+    const ownerRepos = options.concat(connected).filter(o => o.dataset.owner === activeOwner);
+    if (activeOwner !== null && !selectedOnly && ownerRepos.length === 0) {
+      noResults.textContent = "No repos to add from " + activeOwner + ".";
+      noResults.hidden = false;
+    } else {
+      noResults.textContent = "No matching repos.";
+      noResults.hidden = !query || shown > 0 || connected.some(o => !o.hidden);
+    }
     stage.disabled = count === 0 && staged.size === 0;
     stage.textContent = "Add " + count + " " + plural(count);
     document.getElementById("picker-count").textContent = count + " selected";
@@ -912,6 +923,7 @@ _EDITOR_SCRIPT = """
   document.getElementById("open-repo-picker").addEventListener("click", event => {
     opener = event.currentTarget;
     activeOwner = readyOwners().length === 1 ? readyOwners()[0].dataset.owner : null;
+    ownerTitle.textContent = activeOwner ? "Add " + activeOwner + " repos" : "Add repos";
     resetPicker();
     ownerChoice.hidden = activeOwner !== null;
     ownerSheet.hidden = activeOwner === null;
@@ -1023,10 +1035,7 @@ _EDITOR_SCRIPT = """
     for (const option of options) checkbox(option).checked = false;
     rememberPicker();
   });
-  search.addEventListener("input", () => {
-    updatePicker();
-    document.getElementById("no-search-results").hidden = options.some(o => !o.hidden);
-  });
+  search.addEventListener("input", updatePicker);
   showSelected.addEventListener("click", () => {
     selectedOnly = !selectedOnly;
     showSelected.setAttribute("aria-pressed", String(selectedOnly));
@@ -2122,14 +2131,15 @@ def build_oauth_github_routes(
             }
         )
         response = RedirectResponse(f"https://github.com/login/oauth/authorize?{params}")
-        response.set_cookie(
-            _COOKIE,
-            cookie,
-            max_age=900,
-            httponly=True,
-            secure=root.startswith("https://"),
-            samesite="lax",
-        )
+        for name, value in ((_COOKIE, cookie), (_STATE_COOKIE, state)):
+            response.set_cookie(
+                name,
+                value,
+                max_age=900,
+                httponly=True,
+                secure=root.startswith("https://"),
+                samesite="lax",
+            )
         return response
 
     async def callback(request: Request) -> Response:
@@ -2204,7 +2214,7 @@ def build_oauth_github_routes(
 
     async def setup(request: Request) -> Response:
         # GitHub's installation_id is untrusted. Confirmation always re-lists as the user.
-        state = request.query_params.get("state", "")
+        state = request.query_params.get("state") or request.cookies.get(_STATE_COOKIE, "")
         async with sessionmaker() as session:
             flow = await github_connect.get_flow(
                 session, state=state, cookie=request.cookies.get(_COOKIE, "")
