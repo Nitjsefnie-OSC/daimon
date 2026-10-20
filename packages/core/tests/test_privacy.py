@@ -800,6 +800,7 @@ async def test_collect_purge_preview_matches_purge_account_coverage_field_for_fi
         "cli_principals": "linked_principals",
         "platform_principals": "linked_principals",
         "principal_links": "principal_links",
+        "lead_intakes": "lead_intakes",
         "routines": "routines",
         "user_configs": "user_configs",
         "accounts": "account",

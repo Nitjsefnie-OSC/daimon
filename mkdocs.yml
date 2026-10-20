@@ -12,6 +12,7 @@ docs_dir: docs
 strict: true
 
 nav:
+  - Lead intake: lead-intake.md
   - Home: README.md
   - Architecture: architecture.md
   - Self-hosting: self-hosting.md

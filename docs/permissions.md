@@ -500,9 +500,19 @@ deleting or transferring the bound agent to another tenant, or an unreadable
 private access policy, suppresses replies without choosing a different tenant.
 Billing and operational notices remain separate from these silent access denials.
 
-DM routine delivery derives the recipient from the owner but grants no extra
-private tool authority: these runs use the same tool permissions as channel
-routines and mount no personal memory. Tenant memory is read-only. A source
+DM routines are scheduled owner messages through normal live-DM admission,
+binding and execution, using the owner's ordinary credentials and memory policy
+in a fresh private scope. Each run rechecks current membership, H1 role policy,
+the H1b admin bypass switch, tenant DM controls, recipient policy, agent access
+and creation provenance. Execution is unattended (`attended=False`), Managed
+Agents only, with actual-session S1 gating before every send batch. Rules and
+trusted annotations follow the actual agent and endpoints, including replacement;
+the saved budget channel grants no channel tool allowance. Protected actions
+requiring a card are refused. Nobody watches intermediate actions; permitted
+tools retain the ordinary DM side-effect risk. Crash and stop behaviour matches
+live DMs. A busy owner's scheduled slot is skipped. Private results and diagnostics
+are fenced by producer, destination and revision; agent/destination edits erase
+old content and invalidate deliveries. A source
 thread and its parent are captured at creation and never changed by an edit;
 Daimon checks both at save, fire and before each delivery chunk. Operator source
 IDs must resolve to supported channels or threads in the selected tenant's guild,
@@ -519,3 +529,43 @@ and Teams to match the same invoker lists as other members; restore the pass
 with `--invoker-admin-bypass`. Both empty lists still mean open. This does not
 change writer rules or agent pin/isolation admin exemptions. Text and JSON
 `access-policy get` output include the switch.
+
+## Lead intake
+
+[Lead intake](lead-intake.md) requires live tenant membership, the configured
+agent and ordinary invoker admission on every call, plus current native sales
+channel access and destination/category/agent policy before effects. The sales
+channel must restrict the default guild role. Manual sources require the
+requester's own explicit registration; isolated source data cannot be exported.
+Only configured user mentions are enabled, with no role or everyone pings.
+
+Resolution requires a configured sales resolver or current core-role membership,
+with immutable completed identities and an encrypted evidence audit. Server
+admin status alone is insufficient. `invoker_admin_bypass` governs ordinary
+admission; disabling it gives admins no exception to the core-role/user gate.
+Agent keys and operator tokens cannot impersonate an interactive resolver.
+Routine calls require the exact configured routine, tenant, executing agent,
+creator and a still-live server-issued execution grant. Routines never resolve.
+
+Lead resolution also requires a live interactive session that held the exact
+resolver tool for the requester's approval. Tenant opt-in adds that native
+approval gate even with third-party tool safety off; a role grant or a routine
+allowlist alone cannot approve selections.
+
+Lead intake rechecks the actual dossier thread, its parent and category before
+recovery and each write. Thread creation requires the caller’s native create
+and thread-send permissions.
+
+Reading a lead follows its destination's history. A record keeps the sales
+channel it was captured for; every reader (MCP tools, `/leads`, an approval
+card's Details) needs native view and history on that channel and on its
+dossier thread, private-thread membership where it applies, and the channel
+rules for both, judged with the executing agent and its origin, so an agent
+kept to its own channel reads no lead elsewhere. Reconfiguring intake never
+widens who reads past records. Unclassified discoveries hold no message content
+and are read under the channel configured now. List results omit inaccessible
+records. Read-only tools do not require send permission.
+
+Lead tools use only the origin bound to the caller’s signed session grant and
+require attended provenance for human actions. Concurrent conversations of the
+same user and agent cannot lend their channel read or approval authority.

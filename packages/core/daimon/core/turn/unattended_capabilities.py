@@ -135,8 +135,10 @@ def protected_tools(policy: ToolSafetyPolicy) -> frozenset[str]:
     session that asks on a tool it lacks costs nothing. `microsoft_write`
     asks only with the policy on, as it does in chat.
     """
-    return backend_switch_tools(enabled=True) | microsoft_send_tools(
-        enabled=True, tool_safety_on=policy.enabled
+    return (
+        frozenset({"lead_intake_resolve"})
+        | backend_switch_tools(enabled=True)
+        | microsoft_send_tools(enabled=True, tool_safety_on=policy.enabled)
     )
 
 

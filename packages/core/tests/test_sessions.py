@@ -3361,13 +3361,20 @@ async def test_source_environment_projection_retains_unrepresented_native_policy
     assert [request.method for request in transport.requests] == ["GET"]
 
 
+@pytest.mark.parametrize("routine", [False, True])
 async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
     db_session_factory: async_sessionmaker[AsyncSession],
+    routine: bool,
 ) -> None:
+    import asyncio
+
     import jwt
+    from daimon.core.lead_intake_execution import current_intake_execution
     from daimon.core.mcp_server_url import is_session_mcp_url
     from daimon.core.session_snapshot import snapshot_from_created_session
     from daimon.core.session_update_ops import apply_update_ops
+    from daimon.testing.isolated_sdk import build_async_anthropic
+    from sqlalchemy import text
 
     async with db_session_factory.begin() as db:
         tenant = await make_tenant(db)
@@ -3389,6 +3396,8 @@ async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
     slots: dict[str, list[dict[str, Any]]] = {shared_id: []}
     tokens: list[dict[str, Any]] = []
     sessions: dict[str, dict[str, Any]] = {}
+    execution = (uuid.uuid4(), uuid.uuid4())
+    ready, release = asyncio.Event(), asyncio.Event()
 
     def handler(request: httpx.Request) -> httpx.Response:
         path = request.url.path
@@ -3448,9 +3457,23 @@ async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
         id="agent_scoped", mcp_servers=[{"type": "url", "name": "daimon-mcp", "url": public_url}]
     )
     mcp = McpSettings(jwt_secret=SecretStr("s" * 32), public_url=HttpUrl(public_url))
-    client = build_fake_anthropic_http(combine_handlers(handler, make_fake_memory_store_handler()))
-    created = [
-        await create_session(
+    combined = combine_handlers(handler, make_fake_memory_store_handler())
+
+    async def interleaved(request: httpx.Request) -> httpx.Response:
+        if (
+            routine
+            and request.method == "POST"
+            and request.url.path == "/v1/sessions"
+            and current_intake_execution.get() == execution
+        ):
+            ready.set()
+            await release.wait()
+        return combined(request)
+
+    client = build_async_anthropic(transport=httpx.MockTransport(interleaved))
+
+    async def create() -> BetaManagedAgentsSession:
+        return await create_session(
             client,
             agent=agent,
             environment=ma_environment(),
@@ -3461,8 +3484,36 @@ async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
             mcp_settings=mcp,
             tool_safety=OPEN_TOOL_SAFETY,
         )
-        for _ in range(2)
-    ]
+
+    if routine:
+
+        async def create_routine() -> BetaManagedAgentsSession:
+            context = current_intake_execution.set(execution)
+            try:
+                return await create()
+            finally:
+                current_intake_execution.reset(context)
+
+        pending = asyncio.create_task(create_routine())
+        await asyncio.wait_for(ready.wait(), 20)
+        # The routine has assembled its credentials and released the vault lock,
+        # but its provider session has not been created. Force a human refresh
+        # of the common credential slot inside exactly that concurrency window.
+        shared_jti = slots[shared_id][0]["metadata"]["daimon_chat_jti"]
+        async with db_session_factory.begin() as db:
+            await db.execute(
+                text("UPDATE mcp_tokens SET revoked_at=now() WHERE jti=:jti"),
+                {"jti": uuid.UUID(shared_jti)},
+            )
+        try:
+            human = await create()
+        finally:
+            release.set()
+        first_routine = await pending
+        created = [first_routine, human]
+        assert slots[shared_id][0]["metadata"]["daimon_chat_jti"] != shared_jti
+    else:
+        created = [await create(), await create()]
     first, second = created
     assert first.metadata["daimon_chat_session_id"] != second.metadata["daimon_chat_session_id"]
     assert set(first.vault_ids) & set(second.vault_ids) == {shared_id}
@@ -3475,6 +3526,22 @@ async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
         first.metadata["daimon_chat_session_id"],
         second.metadata["daimon_chat_session_id"],
     }
+    assert all(
+        "routine_id" not in token and "execution_id" not in token
+        for token in tokens
+        if not token.get("chat_session_id")
+    )
+    routine_token = next(
+        token
+        for token in tokens
+        if token.get("chat_session_id") == first.metadata["daimon_chat_session_id"]
+    )
+    if routine:
+        assert (routine_token["routine_id"], routine_token["execution_id"]) == tuple(
+            map(str, execution)
+        )
+    else:
+        assert "execution_id" not in routine_token
     recorded = snapshot_from_created_session(
         first,
         env_sha256=None,
@@ -3503,3 +3570,8 @@ async def test_each_daimon_session_mounts_its_own_signed_origin_credential(
     )
     assert tokens[-2].get("chat_session_id") == first.metadata["daimon_chat_session_id"]
     assert tokens[-1].get("chat_session_id") is None
+
+    if routine:
+        assert (tokens[-2]["routine_id"], tokens[-2]["execution_id"]) == tuple(map(str, execution))
+    assert "routine_id" not in tokens[-1] and "execution_id" not in tokens[-1]
+    await client.close()

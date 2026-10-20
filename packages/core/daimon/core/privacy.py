@@ -35,6 +35,7 @@ from daimon.core.stores import gemini_runtime_state as gemini_state_store
 from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import identity as identity_store
+from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
@@ -96,6 +97,7 @@ class PurgePreview(BaseModel):
     platform_user_names: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     teams_messages: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     microsoft_user_tokens: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
+    lead_intakes: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
 
 
 def summary_line(preview: PurgePreview) -> str:
@@ -103,6 +105,7 @@ def summary_line(preview: PurgePreview) -> str:
     categories = (
         (preview.linked_principals, "linked account"),
         (preview.routines, "routine"),
+        (preview.lead_intakes, "lead intake"),
         (preview.user_configs, "saved settings"),
         (preview.user_skills, "skill you synced"),
         (preview.github_connect_requests, "GitHub setup request"),
@@ -437,6 +440,11 @@ async def collect_purge_preview(
                 teams_messages_total += await teams_admissions_store.count_teams_messages_for_user(
                     session, tenant_id=pp.tenant_id, user_id=pp.external_id
                 )
+        lead_intakes_total = 0
+        for pp in pp_list:
+            lead_intakes_total += await lead_intake_store.count_actor(
+                session, pp.tenant_id, pp.external_id
+            )
         # 20. microsoft_user_tokens — a Teams person's Connect Microsoft token.
         microsoft_user_tokens_total = 0
         for pp in pp_list:
@@ -461,6 +469,7 @@ async def collect_purge_preview(
     return PurgePreview(
         linked_principals=linked_principals,
         principal_links=principal_links,
+        lead_intakes=PurgePreviewRow(count=lead_intakes_total, example=None),
         routines=routines,
         user_configs=user_configs,
         account=account,

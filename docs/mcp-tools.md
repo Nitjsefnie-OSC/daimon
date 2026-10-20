@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 122 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 129 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -234,6 +234,20 @@ Current-place status tool with short text and complete structured facts.
 | --- | --- | --- |
 | `where_am_i` | all callers | Return short /here text and full structured facts. |
 
+## `lead_intake`
+
+First-party lead intake tools; authority derives only from live server context.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `lead_intake_get` | Discord callers | Read one authorized tenant lead, its review state and durable effect progress. |
+| `lead_intake_health` | Discord callers | Read tenant lead counts, oldest pending age and mailbox coverage. |
+| `lead_intake_list` | Discord callers | Read up to 100 tenant leads the caller may read, oldest first. |
+| `lead_intake_read_source` | Discord callers | Read attachment-free original Gmail text for an unexpired discovered message. |
+| `lead_intake_resolve` | Discord callers | Apply evidence-backed human CRM selections as a sales resolver or core-role member. |
+| `lead_intake_resume` | Discord callers | Recover lead effects and mailbox coverage without blindly retrying uncertain creates. |
+| `lead_intake_submit` | Discord callers | Verify and durably register one classified Gmail or own explicit Discord lead. |
+
 ## `media`
 
 Media MCP tools: YouTube transcript and file upload.
@@ -318,7 +332,7 @@ Routines tools: create / list / get / update / delete.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_routine` | all callers | Create a recurring routine with optional channel, thread or owner-DM delivery. |
+| `create_routine` | all callers | Create a recurring routine; owner DMs run as unattended live-DM turns. |
 | `delete_routine` | all callers | Delete a routine (hard delete, tenant-scoped). |
 | `get_routine` | all callers | Get a routine by id. |
 | `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |

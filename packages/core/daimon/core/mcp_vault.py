@@ -28,6 +28,7 @@ from anthropic.types.beta import BetaManagedAgentsVault
 from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_response import (
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
+from daimon.core.lead_intake_execution import current_intake_execution
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
 from daimon.core.mcp_server_url import is_session_mcp_url, same_mcp_url
 from daimon.core.mux_compat import (
@@ -168,8 +169,10 @@ async def chat_mcp_credential(
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
     chat_session_id: str | None = None,
+    routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
 ) -> dict[str, Any]:
     """Build one vault payload and register its individually revocable JWT."""
+    execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
     token, jti, expires_at = await mint_chat_mcp_token(
         session,
         account_id=account_id,
@@ -178,14 +181,19 @@ async def chat_mcp_credential(
         now=now,
         slack_turn_context_id=slack_turn_context_id,
         chat_session_id=chat_session_id,
+        routine_execution=execution,
     )
     metadata = {
         "daimon_chat_identity": str(agent_id),
         "daimon_chat_jti": str(jti),
         "daimon_chat_expires_at": expires_at.isoformat(),
     }
+    if execution is not None:
+        metadata["daimon_routine_id"] = str(execution[0])
+        metadata["daimon_routine_execution"] = str(execution[1])
     if chat_session_id is not None:
         metadata["daimon_chat_session"] = chat_session_id
+
     if slack_turn_context_id is not None:
         metadata["daimon_chat_context"] = str(slack_turn_context_id)
     return {
@@ -207,10 +215,12 @@ async def _refresh_chat_credential_locked(
     scope: Scope,
     slack_turn_context_id: uuid.UUID | None = None,
     chat_session_id: str | None = None,
+    routine_execution: tuple[uuid.UUID, uuid.UUID] | None = None,
     preserve_context: bool = False,
     registered_payload: dict[str, Any] | None = None,
     create_missing: bool = True,
 ) -> None:
+    execution = (routine_execution or current_intake_execution.get()) if chat_session_id else None
     target = None
     metadata: dict[str, str] = {}
     async for cred in list_credentials(client, vault_id, scope=scope):
@@ -225,6 +235,16 @@ async def _refresh_chat_credential_locked(
         metadata = cred.metadata or {}
         if preserve_context:
             chat_session_id = metadata.get("daimon_chat_session")
+        if chat_session_id and metadata.get("daimon_routine_execution"):
+            saved_execution = (
+                uuid.UUID(metadata["daimon_routine_id"]),
+                uuid.UUID(metadata["daimon_routine_execution"]),
+            )
+            if execution is not None and execution != saved_execution:
+                raise ValueError("routine_execution_grant_mismatch")
+            execution = saved_execution
+        if chat_session_id is None:
+            execution = None
         if preserve_context and metadata.get("daimon_chat_context") is not None:
             slack_turn_context_id = uuid.UUID(metadata["daimon_chat_context"])
         raw_jti = metadata.get("daimon_chat_jti")
@@ -236,6 +256,8 @@ async def _refresh_chat_credential_locked(
         identity = await get_account_with_tenant(session, account_id=account_id)
         if (
             identity is not None
+            and metadata.get("daimon_routine_execution")
+            == (str(execution[1]) if execution else None)
             and row is not None
             and row.kind == "agent"
             and row.label == chat_token_label(row.jti)
@@ -266,6 +288,7 @@ async def _refresh_chat_credential_locked(
             now=now,
             slack_turn_context_id=slack_turn_context_id,
             chat_session_id=chat_session_id,
+            routine_execution=execution,
         )
         # A running session can observe the provider write before its response
         # returns. Commit first, then re-lock and re-read so another refresh or
@@ -284,6 +307,7 @@ async def _refresh_chat_credential_locked(
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
             chat_session_id=chat_session_id,
+            routine_execution=execution,
             registered_payload=payload,
             create_missing=create_missing,
         )
@@ -296,7 +320,13 @@ async def _refresh_chat_credential_locked(
         **{
             key: value
             for key, value in metadata.items()
-            if key not in {"daimon_chat_context", "daimon_chat_session"}
+            if key
+            not in {
+                "daimon_chat_context",
+                "daimon_chat_session",
+                "daimon_routine_id",
+                "daimon_routine_execution",
+            }
         },
         **registered_payload["metadata"],
     }

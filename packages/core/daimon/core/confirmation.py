@@ -113,11 +113,19 @@ class ToolRuleCardReference(BaseModel):
     channel_revision: int = Field(default=0, ge=0)
 
 
+#: What a card shows outside Details, in every state.
+MAX_VISIBLE_LINES = 8
+MAX_VISIBLE_LINE_LENGTH = 120
+
+
 class ConfirmationPrompt(BaseModel):
     """What a confirmation card shows, platform-neutral.
 
     `detail_lines` shows short, readable inputs behind Details. Only
-    `requester_platform_user_id` may answer.
+    `requester_platform_user_id` may answer. `visible_lines` stay on the card
+    in every state, so what was approved can be inspected after the answer;
+    `lead_intake_id` makes Details a lead read, refused to whoever may not
+    read that lead. Lead intake runs on Discord, which renders both.
     """
 
     model_config = ConfigDict(frozen=True)
@@ -139,11 +147,22 @@ class ConfirmationPrompt(BaseModel):
         default=None, exclude_if=lambda value: value is None
     )
     tool_rules_enabled: bool = Field(default=False, exclude_if=lambda value: not value)
+    visible_lines: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    lead_intake_id: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
     @model_validator(mode="after")
     def _aware_expiry(self) -> ConfirmationPrompt:
         if self.expires_at.tzinfo is None:
             raise ValueError("expires_at must be timezone-aware")
+        return self
+
+    @model_validator(mode="after")
+    def _bounded_visible_lines(self) -> ConfirmationPrompt:
+        # A card that cannot show every selection is refused, never truncated.
+        if len(self.visible_lines) > MAX_VISIBLE_LINES or any(
+            len(line) > MAX_VISIBLE_LINE_LENGTH or "\n" in line for line in self.visible_lines
+        ):
+            raise ValueError("visible_lines exceed the card's bounds")
         return self
 
 
@@ -208,6 +227,18 @@ def _recipients(value: object) -> str:
         else:
             names.append(str(item))
     return ", ".join(names)
+
+
+_LEAD_SELECTIONS = (
+    ("company_id", "Company"),
+    ("contact_id", "Contact"),
+    ("deal_id", "Deal"),
+    ("discord_message_id", "Starter message"),
+)
+_LEAD_CONFIRMATIONS = (
+    ("separate_opportunity_confirmed", "Separate opportunity"),
+    ("discord_post_absence_confirmed", "Starter post absent"),
+)
 
 
 def prompt_for_tool_call(
@@ -318,6 +349,37 @@ def prompt_for_tool_call(
                 f"Message: {preview or '(empty)'}",
             )
         )
+    elif call.tool_name == "lead_intake_resolve" and server == DAIMON_SERVER_NAME:
+        resolution = data.get("resolution")
+        fields = cast("dict[str, object]", resolution) if isinstance(resolution, dict) else {}
+        action = "Resolve lead"
+        title = "Confirm lead resolution?"
+        denied_action = "Lead resolution not applied"
+        consequence = "Use these selections and resume intake. No email is sent."
+        # The exact selections stay on the card; evidence stays behind Details.
+        visible = (
+            f"Intake: {data.get('intake_id')}",
+            *(
+                f"{label}: {fields[key]}"
+                for key, label in _LEAD_SELECTIONS
+                if fields.get(key) is not None
+            ),
+            *(
+                f"{label}: {'yes' if fields.get(key) else 'no'}"
+                for key, label in _LEAD_CONFIRMATIONS
+            ),
+        )
+        return ConfirmationPrompt(
+            title=title,
+            consequence=consequence,
+            action=action,
+            denied_action=denied_action,
+            detail_lines=(),
+            visible_lines=tuple(str(line) for line in visible),
+            lead_intake_id=str(data.get("intake_id") or ""),
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+        )
     elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:
@@ -368,6 +430,15 @@ def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     return backend_switch_tools(enabled=deps.backend_selection_enabled) | microsoft_send_tools(
         enabled=deps.microsoft_send, tool_safety_on=deps.tool_safety.enabled
     )
+
+
+async def confirmed_tools_for_tenant(deps: TurnDeps, tenant_id: uuid.UUID) -> frozenset[str]:
+    from daimon.core.stores.lead_intake import confirmation_tools
+
+    base = confirmed_tools_for_turn(deps)
+    if not deps.public_url:
+        return base
+    return base | await confirmation_tools(deps.sessionmaker, tenant_id)
 
 
 def backend_switch_callbacks(

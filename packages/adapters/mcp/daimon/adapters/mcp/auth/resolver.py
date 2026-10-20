@@ -47,6 +47,8 @@ class AuthIdentity:
     external_id: str | None = None  # guild snowflake from tenant.external_id
     agent_id: uuid.UUID | None = None
     # Ordinary chat execution identity; consumed only by the Google token broker.
+    routine_id: uuid.UUID | None = None
+    execution_id: uuid.UUID | None = None
     chat_agent_id: uuid.UUID | None = None
     platform_user_id: str | None = None
     # True when the minted JWT carries is_admin=True.

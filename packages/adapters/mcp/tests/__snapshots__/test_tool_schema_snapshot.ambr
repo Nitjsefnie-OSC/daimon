@@ -2029,18 +2029,26 @@
     }),
     'create_routine': dict({
       'description': '''
-        Create a recurring routine with optional channel, thread or owner-DM delivery.
+        Create a recurring routine; owner DMs run as unattended live-DM turns.
         <blank line>
-        DM runs mount no personal memory and retain ordinary channel-routine tool
-        authority. Sources must be supported channels/threads in this tenant's guild;
-        the original thread and parent remain subject to reader restrictions.
+        Owner-DM routines are scheduled live-DM turns, using the owner's normal
+        personal/shared memory, credentials and DM tool authority in a fresh private
+        scope. They support Managed Agents only and run unattended: calls needing
+        a person are refused, and nobody watches intermediate actions. Permitted
+        tools retain ordinary DM side-effect risk. Crash and stop guarantees are
+        exactly those of live DMs. A slot skips if the owner has a DM turn running.
+        All other routines, including destination-free rows, mount shared memory
+        only. Sources must be supported
+        channels/threads in this tenant's guild; the original thread and parent
+        remain subject to reader restrictions.
         <blank line>
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
         <blank line>
         ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
-        optionally name where each run's result goes. The run is told where,
-        and if the agent does not post there itself, daimon posts the end of
-        its final reply there. On Slack a thread is ``<channel id>:<thread
+        optionally name where each run's result goes. Channel/thread runs are
+        told where; if the agent does not post there itself, daimon posts the end
+        of its final reply there. Owner-DM runs queue their successful final reply
+        privately for the owner. On Slack a thread is ``<channel id>:<thread
         ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
         are in. Discord ``dm`` delivers only to the authenticated owner; omit
         ``destination_id`` to derive their user ID. Slack and Teams reject DM
@@ -3227,6 +3235,400 @@
         'required': list([
           'origin_context_id',
           'agent_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_get': dict({
+      'description': '''
+        Read one authorized tenant lead, its review state and durable effect progress.
+        <blank line>
+        Readers are fixed when the lead is captured: those who can read the sales
+        channel it was captured for, and its dossier thread.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'intake_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'intake_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_health': dict({
+      'description': '''
+        Read tenant lead counts, oldest pending age and mailbox coverage.
+        <blank line>
+        Readers are those of the sales channel configured now.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+        }),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_list': dict({
+      'description': '''
+        Read up to 100 tenant leads the caller may read, oldest first.
+        <blank line>
+        Leads the caller may not read are omitted; pass the last listed ID as
+        after_id for the next page.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'after_id': dict({
+            'anyOf': list([
+              dict({
+                'format': 'uuid',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_read_source': dict({
+      'description': '''
+        Read attachment-free original Gmail text for an unexpired discovered message.
+        <blank line>
+        Run resume to discover mail, read each source here, then classify and
+        submit its immutable source ID. Uses the configured tenant mailbox;
+        credentials never enter the result. Does not post, archive or change CRM.
+        Readers are those of the sales channel configured now.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'message_id': dict({
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'message_id',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_resolve': dict({
+      'description': '''
+        Apply evidence-backed human CRM selections as a sales resolver or core-role member.
+        <blank line>
+        Show exact records and proposed writes before approval. Routines never
+        resolve. Completed identities are immutable; uncertain creates must be
+        recovered before selecting replacements. Server admin alone is no grant.
+        The resolver must also be able to read the lead.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'IntakeResolution': dict({
+            'additionalProperties': False,
+            'properties': dict({
+              'company_id': dict({
+                'anyOf': list([
+                  dict({
+                    'maxLength': 20,
+                    'pattern': '^\\d+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'contact_id': dict({
+                'anyOf': list([
+                  dict({
+                    'maxLength': 20,
+                    'pattern': '^\\d+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'deal_id': dict({
+                'anyOf': list([
+                  dict({
+                    'maxLength': 20,
+                    'pattern': '^\\d+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'discord_message_id': dict({
+                'anyOf': list([
+                  dict({
+                    'maxLength': 20,
+                    'pattern': '^\\d+$',
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'discord_post_absence_confirmed': dict({
+                'default': False,
+                'type': 'boolean',
+              }),
+              'evidence': dict({
+                'maxLength': 2000,
+                'minLength': 20,
+                'type': 'string',
+              }),
+              'separate_opportunity_confirmed': dict({
+                'default': False,
+                'type': 'boolean',
+              }),
+            }),
+            'required': list([
+              'evidence',
+            ]),
+            'type': 'object',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'intake_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+          'resolution': dict({
+            '$ref': '#/$defs/IntakeResolution',
+          }),
+        }),
+        'required': list([
+          'intake_id',
+          'resolution',
+        ]),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_resume': dict({
+      'description': '''
+        Recover lead effects and mailbox coverage without blindly retrying uncertain creates.
+        <blank line>
+        Without an ID, resumes up to 25 pending records and scans archived mail
+        from the operator checkpoint. Inspect scan errors and remaining work.
+        Records the caller may not read are omitted from the result.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'intake_id': dict({
+            'anyOf': list([
+              dict({
+                'format': 'uuid',
+                'type': 'string',
+              }),
+              dict({
+                'type': 'null',
+              }),
+            ]),
+            'default': None,
+          }),
+        }),
+        'type': 'object',
+      }),
+    }),
+    'lead_intake_submit': dict({
+      'description': '''
+        Verify and durably register one classified Gmail or own explicit Discord lead.
+        <blank line>
+        Classify spam and out-of-scope messages as other. Capture has no external
+        effects. The service posts a title and threaded dossier, writes only a
+        draft reply, conservatively reuses/creates CRM records, then archives
+        Gmail after dossier delivery. Replay the same immutable source on timeout.
+        The record keeps the sales channel configured now: only people who can
+        read that channel's history, and its dossier thread, can read it later.
+      ''',
+      'parameters': dict({
+        '$defs': dict({
+          'LeadClassification': dict({
+            'enum': list([
+              'consulting',
+              'project',
+              'other',
+            ]),
+            'type': 'string',
+          }),
+          'LeadDraft': dict({
+            'additionalProperties': False,
+            'description': 'Model proposal; original text and verification flags are fetched server-side.',
+            'properties': dict({
+              'classification': dict({
+                '$ref': '#/$defs/LeadClassification',
+              }),
+              'company_domain': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'company_evidence': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'company_name': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'enquirer_email': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'enquirer_evidence': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'enquirer_name': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'opportunity_description': dict({
+                'maxLength': 100000,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              'source': dict({
+                '$ref': '#/$defs/LeadSource',
+              }),
+              'thread_content': dict({
+                'maxLength': 100000,
+                'minLength': 1,
+                'type': 'string',
+              }),
+              'thread_title': dict({
+                'maxLength': 100,
+                'minLength': 1,
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'source',
+              'classification',
+              'opportunity_description',
+              'thread_title',
+              'thread_content',
+            ]),
+            'type': 'object',
+          }),
+          'LeadSource': dict({
+            'description': 'Immutable Gmail message or explicitly registered Discord message.',
+            'properties': dict({
+              'channel_id': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'kind': dict({
+                '$ref': '#/$defs/LeadSourceKind',
+              }),
+              'mailbox': dict({
+                'anyOf': list([
+                  dict({
+                    'type': 'string',
+                  }),
+                  dict({
+                    'type': 'null',
+                  }),
+                ]),
+                'default': None,
+              }),
+              'message_id': dict({
+                'maxLength': 100000,
+                'minLength': 1,
+                'type': 'string',
+              }),
+            }),
+            'required': list([
+              'kind',
+              'message_id',
+            ]),
+            'type': 'object',
+          }),
+          'LeadSourceKind': dict({
+            'enum': list([
+              'gmail',
+              'manual',
+            ]),
+            'type': 'string',
+          }),
+        }),
+        'additionalProperties': False,
+        'properties': dict({
+          'draft': dict({
+            '$ref': '#/$defs/LeadDraft',
+          }),
+        }),
+        'required': list([
+          'draft',
         ]),
         'type': 'object',
       }),
