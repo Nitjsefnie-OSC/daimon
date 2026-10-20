@@ -2338,7 +2338,7 @@ and discards results invalidated while in flight. `require_fresh=True` bypasses
 completed cache entries. Unknown evidence cannot satisfy a role gate.
 
 
-### Owner-DM routine delivery
+## Owner-DM routine delivery
 
 Discord `/routines` includes an owner-only delivery choice and delivery failure
 reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
