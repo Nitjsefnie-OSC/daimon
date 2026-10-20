@@ -2,8 +2,9 @@
 
 from __future__ import annotations
 
+import posixpath
 import uuid
-from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
+from urllib.parse import parse_qsl, unquote, urlencode, urlsplit, urlunsplit
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -66,3 +67,29 @@ def is_session_mcp_url(candidate: str, public_url: str) -> bool:
         parts._replace(query=urlencode([(k, v) for k, v in query if k != "daimon_session"]))
     )
     return same_mcp_url(base, public_url)
+
+
+def same_mcp_endpoint(candidate: str, public_url: str) -> bool:
+    """Conservative exclusion comparison, never a credential-trust predicate.
+
+    Query selectors do not change the HTTP endpoint. Normalize path aliases as
+    a proxy/router may, so renamed management servers cannot evade exclusion.
+    """
+
+    def endpoint(value: str) -> tuple[str, str, int | None, str]:
+        parts = urlsplit(value.strip())
+        path = parts.path
+        for _ in range(3):
+            path = unquote(path)
+        path = posixpath.normpath("/" + path.replace("\\", "/").lstrip("/"))
+        return (
+            parts.scheme.lower(),
+            (parts.hostname or "").lower(),
+            parts.port or _DEFAULT_PORTS.get(parts.scheme.lower()),
+            path,
+        )
+
+    try:
+        return endpoint(candidate) == endpoint(public_url)
+    except ValueError:
+        return False

@@ -97,6 +97,7 @@ from daimon.core.stores.domain import UnsavedWorkChoice
 from daimon.core.stores.pending_file_deletes import enqueue_pending_file_delete
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.driver import run_turn, unattended_sends
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import Billed, UsageRecorder
@@ -105,6 +106,10 @@ from daimon.core.turn.unattended import (
     session_gate,
     session_rules_channel,
     unattended_posture,
+)
+from daimon.core.turn.unattended_capabilities import (
+    ENTRY_POINT_POLICY,
+    require_allowed_capabilities,
 )
 from daimon.core.usage_recording import record_turn_usage
 from daimon.core.workspace_ports_compat import restore_transfer_records
@@ -533,6 +538,20 @@ async def transfer_workspace(
             raise
         log.warning("workspace_transfer.checkpoint_failed", session_id=old_session_id)
         return TranscriptOnly(transcript=transcript or "", gap_reason="session_dead")
+    try:
+        # A session the unattended gate cannot constrain (a coordinator roster,
+        # a capability this release does not know) is never checkpointed: only
+        # the conversation crosses, and no turn is spent on it.
+        require_allowed_capabilities(
+            old_session, allow_skills=ENTRY_POINT_POLICY["checkpoint"].allow_skills
+        )
+    except AdmissionDenied:
+        log.warning(
+            "workspace_transfer.checkpoint_failed",
+            session_id=old_session_id,
+            gap_reason="unattended_capabilities",
+        )
+        return TranscriptOnly(transcript=transcript or "", gap_reason="checkpoint_failed")
 
     # Unattended: the old session is gated before the message and before every
     # confirmation batch, each a single attempt.
@@ -545,6 +564,7 @@ async def transfer_workspace(
             public_url=public_url,
             session_factory=sessionmaker,
             tenant_id=tenant_id,
+            entry_point="checkpoint",
         )
     ):
         state = await run_turn(
@@ -575,6 +595,7 @@ async def transfer_workspace(
                 session_factory=sessionmaker,
                 tenant_id=tenant_id,
                 channel_id=session_rules_channel(old_session, platform=platform),
+                entry_point="checkpoint",
             ),
             deadline=checkpoint_deadline,
             # The checkpoint executes the old session: decided again right before.

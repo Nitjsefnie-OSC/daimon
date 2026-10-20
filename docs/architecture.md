@@ -1072,7 +1072,34 @@ The driver-run ones go through one send boundary
 (`turn/driver.unattended_sends`): the session is gated
 (`unattended.session_gate`) right before the message and before every
 confirmation batch, live or on reconnect, and every send is a single
-attempt; a failed gate stops the send. For `run_prepared_turn` (fleet workers,
+attempt; a failed gate stops the send. The gate builds the session through
+`turn/unattended_capabilities.py` under the entry point's `CapabilityPolicy`
+(`ENTRY_POINT_POLICY`; `session_gate`, `gate_session_snapshot` and
+`unattended_posture` take an `entry_point`, and one that names none gets no
+built-ins and no skills). `require_allowed_capabilities` is a pure check on the
+snapshot that refuses a coordinator (`multiagent`) and disallowed skills, and
+checks every capability-bearing node (session, resources and checkouts,
+agent, model, skills, servers, tools, toolset defaults, per-tool configs,
+permission policies) against a field allowlist frozen in the module rather
+than read from the SDK, before any update: an unknown field, empty or not,
+and an unknown tool, resource or policy type are refused. The snapshot's raw
+form is also checked against the reviewed value shapes (`_SESSION_SHAPE`): a
+scalar leaf must be that scalar or null, objects and lists are walked to the
+bottom, and only telemetry, metadata and a custom tool's `input_schema` stay
+opaque, so a field cannot hide in a value that turned into an object.
+`constrain_capabilities` computes the arrays to send (built-ins always disabled
+and custom tools removed for every unattended entry point, with no opt-in,
+an optional `server/tool` allowlist, and every retained
+MCP toolset's default and per-tool configs on `always_ask`, trusted
+`daimon-mcp` and safety off included, so every MCP call reaches the
+unattended decider); `apply_capabilities` clears the thread session's cached tool hashes
+before it sends them, and `restore_capabilities` puts the session's own arrays
+back, finishing through repeated cancellation. `capability_posture` makes the
+decider refuse what the session no longer carries, including every built-in
+or custom call. Unattended runs cannot generate files with sandbox tools;
+checkpoint turns cannot create sandbox archives. Prepared turns map their
+origin to an entry point (`unattended_entry_point`: `worker` is a fleet worker,
+`routine` a routine, anything else a wake). For `run_prepared_turn` (fleet workers,
 unattended wakes, and future watches or completion turns), this also covers
 dead-session recovery. Platform queue dispatchers explicitly mark timers and
 worker-completion wakes unattended. User-initiated handoffs and private-input
@@ -1081,9 +1108,11 @@ the snapshot before **every** confirmation batch. Decision-task joins and card
 retirement remain inside the driver's abort boundary:
 an outside cancellation, including one during Stop cleanup, finishes bounded,
 shielded interruption and leaves unattended calls unanswered before propagating.
-A non-Anthropic runtime, or an injected mux
-backend without a session read, refuses every unattended confirmation with
-a plain explanation that it cannot refresh the tool safety gate. This rule
+An injected Managed Agents backend without a session read (or without a
+session ref) cannot have its snapshot checked, so `run_prepared_turn` refuses
+the unattended turn with `AdmissionDenied(backend_unsupported)` before its
+first message. A non-Anthropic runtime refuses every unattended confirmation
+with a plain explanation that it cannot refresh the tool safety gate. This rule
 applies with safety on or off; the model receives a denial and the turn can
 continue or end. Unattended turns never invoke a human provider-action hook.
 Tool rules come from the session's
@@ -1188,8 +1217,9 @@ runs anything. Attended cleanup refuses pending calls. An unattended
 turn leaves them paused and interrupts instead: even a denial would resume
 execution. The driver tracks unattended cleanup independently of its optional
 confirmation gate, so Stop, cancellation and ceiling expiry also leave calls
-paused on runtimes without session reads. Normal decisions on those runtimes
-still refuse unattended confirmations. Cancellation during a confirmation
+paused on runtimes without a confirmation gate. Normal decisions on those
+runtimes (non-Anthropic ones; a Managed Agents runtime without a session read
+is refused before it starts) still refuse unattended confirmations. Cancellation during a confirmation
 gate cancels that gate before interrupting; a failed gate sends no confirmations. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.

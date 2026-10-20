@@ -37,7 +37,7 @@ from daimon.core.session_snapshot import (
 from daimon.core.stores.access_policy import lock_access_policy
 from daimon.core.stores.domain import ThreadSessionRow, TransferKind, UnsavedWorkChoice
 from daimon.core.stores.worker_ownership import owner_is_alive
-from sqlalchemy import and_, select, update
+from sqlalchemy import and_, func, select, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -592,6 +592,31 @@ async def update_agent_identity(session: AsyncSession, *, id: _uuid.UUID, ma_age
     """Record the identity observed on MA without replacing session history."""
     await session.execute(
         update(ThreadSession).where(ThreadSession.id == id).values(ma_agent_id=ma_agent_id)
+    )
+    await session.flush()
+
+
+async def invalidate_session_tools(session: AsyncSession, *, ma_session_id: str) -> None:
+    """Force the next bind to reconcile tools after a temporary override.
+
+    Empty tool hashes cannot match an actual configuration. Preserve environment,
+    vault, identity and resource metadata: only the tools need reconciliation.
+    Commit before provider mutation so interruption cannot hide restricted tools
+    behind a cached configuration. Legacy NULL snapshots remain unknown.
+    """
+    await session.execute(
+        update(ThreadSession)
+        .where(
+            ThreadSession.ma_session_id == ma_session_id,
+            ThreadSession.status == "live",
+            func.jsonb_typeof(ThreadSession.effective_config) == "object",
+        )
+        .values(
+            effective_config=ThreadSession.effective_config.op("||")(
+                {"tools_sha256": "", "mcp_servers_sha256": ""}
+            ),
+            mutable_fingerprint=None,
+        )
     )
     await session.flush()
 

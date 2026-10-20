@@ -12,6 +12,7 @@ from __future__ import annotations
 
 import asyncio
 import functools
+import json
 import os
 import unittest.mock
 import uuid
@@ -3225,11 +3226,10 @@ async def test_legacy_public_routines_still_fire_with_unknown_creation_source(
 
 
 @pytest.mark.parametrize("agent_posted", [False, True])
-async def test_fire_collects_outputs_from_real_headless_turn(
+async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
     db_session, db_session_factory, monkeypatch, agent_posted
 ):
-    """Exercise scheduler → headless SSE reducer → settled output listing → outbox."""
-    from anthropic.types.beta import FileMetadata
+    """Sandbox tools are disabled before a routine runs, so it produces no files."""
     from daimon.core.routine_files import decode_payload
     from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
     from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
@@ -3250,6 +3250,30 @@ async def test_fire_collects_outputs_from_real_headless_turn(
     )
     await db_session.commit()
     router = MARouter()
+    snapshot = ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
+        mode="json"
+    )
+    snapshot["agent"]["tools"] = [
+        {
+            "type": "agent_toolset_20260401",
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
+            ],
+        }
+    ]
+
+    def update_session(request, match):
+        snapshot["agent"].update(json.loads(request.content)["agent"])
+        return httpx.Response(200, json=snapshot)
+
+    def send_event(request, match):
+        [builtins] = snapshot["agent"]["tools"]
+        assert builtins["default_config"]["enabled"] is False
+        assert all(config["enabled"] is False for config in builtins["configs"])
+        return httpx.Response(200, json={"data": None})
+
+    router.add("POST", r"/v1/sessions/[^/]+$", update_session)
     router.add(
         "GET",
         r"/v1/agents/([^/]+)",
@@ -3265,9 +3289,7 @@ async def test_fire_collects_outputs_from_real_headless_turn(
         r"/v1/sessions",
         lambda r, m: httpx.Response(
             200,
-            json=ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
-                mode="json"
-            ),
+            json=snapshot,
         ),
     )
     router.add(
@@ -3275,14 +3297,10 @@ async def test_fire_collects_outputs_from_real_headless_turn(
         r"/v1/sessions/[^/]+$",
         lambda r, m: httpx.Response(
             200,
-            json=ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
-                mode="json"
-            ),
+            json=snapshot,
         ),
     )
-    router.add(
-        "POST", r"/v1/sessions/[^/]+/events", lambda r, m: httpx.Response(200, json={"data": None})
-    )
+    router.add("POST", r"/v1/sessions/[^/]+/events", send_event)
     now = datetime.now(UTC)
     router.add(
         "GET",
@@ -3329,19 +3347,7 @@ async def test_fire_collects_outputs_from_real_headless_turn(
     router.add(
         "GET",
         r"/v1/files",
-        lambda r, m: list_response(
-            [
-                FileMetadata(
-                    id="file_report",
-                    created_at=now,
-                    filename="report.csv",
-                    mime_type="text/csv",
-                    size_bytes=4,
-                    type="file",
-                    downloadable=True,
-                ).model_dump(mode="json")
-            ]
-        ),
+        lambda r, m: list_response([]),
     )
     router.add(
         "GET", r"/v1/vaults", lambda r, m: httpx.Response(200, json={"data": [], "has_more": False})
@@ -3394,8 +3400,9 @@ async def test_fire_collects_outputs_from_real_headless_turn(
         after = await get_routine(session, row.id, tenant_id=tenant.id)
     assert after is not None
     assert after.last_error is None
-    assert after.delivery_status == "pending"
+    assert after.delivery_status == ("skipped" if agent_posted else "pending")
+    assert after.delivery_note == ("agent_posted" if agent_posted else None)
     payload = decode_payload(after.delivery_payload)
     assert payload.text == ("" if agent_posted else "Here is the report.")
-    assert [file.file_id for file in payload.files] == ["file_report"]
+    assert payload.files == []
     assert after.last_result_tail == "Here is the report."

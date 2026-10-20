@@ -93,6 +93,7 @@ async def _run_with_defaults(settings: Settings, session: str, user_message: str
             public_url=public_url,
             session_factory=rt.sessionmaker,
             tenant_id=tenant_id,
+            entry_point="cli_run",
         )
         # Decide on what a first gate leaves (a healed reserved URL, for one);
         # the driver gates again before the message and every confirmation.
@@ -111,6 +112,7 @@ async def _run_with_defaults(settings: Settings, session: str, user_message: str
                     tenant_id=tenant_id,
                     channel_id=session_rules_channel(snapshot, platform=platform),
                     annotations_for=_annotations_for(rt, snapshot, tenant_id=tenant_id),
+                    entry_point="cli_run",
                 ),
             )
 

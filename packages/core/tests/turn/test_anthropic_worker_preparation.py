@@ -422,6 +422,16 @@ async def test_recorded_builtin_readback_passes_real_allocation_and_session_chec
     assert all(config["enabled"] for config in tools[0]["configs"])
     assert len(allocated["skills"]) == 11 and not allocated.get("mcp_servers")
     assert any(call.method == "POST" and call.path == "/v1/sessions" for call in trace.requests)
+    gated = [
+        call.json()["agent"]["tools"]
+        for call in trace.requests
+        if call.method == "POST" and call.path == "/v1/sessions/worker-session"
+    ]
+    assert gated, "the unattended worker must disable its allocated built-ins before sending"
+    for tool in gated[0]:
+        if tool["type"] == "agent_toolset_20260401":
+            assert tool["default_config"]["enabled"] is False
+            assert all(config["enabled"] is False for config in tool["configs"])
     trace.assert_consumed()
 
 

@@ -7,9 +7,14 @@ entirely. Every pause is then decided by `unattended_posture`, which always
 answers through `unattended_decider` and never `AutoApprove`. Safety off is
 the explicit `enabled=False` policy from settings, under which the decider
 allows ordinary third-party calls. Prepared fleet/wake turns require a fresh
-Managed Agents snapshot before every confirmation batch. A runtime without
-that read capability refuses every unattended confirmation, even with safety
-off; it never falls back to an allow decision.
+Managed Agents snapshot before every confirmation batch; a Managed Agents
+runtime without that read is refused before its first message
+(`run_prepared_turn`). A non-Anthropic runtime refuses every unattended
+confirmation, even with safety off; it never falls back to an allow decision.
+
+What the session may still do beyond gated MCP tools (a coordinator, the
+built-in sandbox, skills, fields this release does not know) is decided per
+entry point in `unattended_capabilities`, the one place for it.
 
 Daimon's own protected actions (`protected_tools`) ask in these sessions and
 their final call is refused, since nobody is there to press the card: a
@@ -22,13 +27,10 @@ from __future__ import annotations
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import replace
-from typing import TYPE_CHECKING, Any, cast
+from typing import TYPE_CHECKING
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
-from anthropic.types.beta.beta_managed_agents_session_agent_update_param import (
-    BetaManagedAgentsSessionAgentUpdateParam,
-)
 from cryptography.fernet import MultiFernet
 from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL, MA_METADATA_KEY_PRIVATE_DM
 from daimon.core.ma_identity import derive_agent_uuid
@@ -37,26 +39,29 @@ from daimon.core.mcp_tool_annotations import (
     mcp_annotation_lookup,
     no_mcp_token,
 )
-from daimon.core.session_ports_compat import retrieve_session_record, update_session_record
+from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.tool_safety import (
     ToolCall,
     ToolSafetyPolicy,
-    backend_switch_tools,
     daimon_endpoint,
-    heal_reserved_server,
-    microsoft_send_tools,
-    session_tools_for_policy,
     trusted_servers_for,
 )
 from daimon.core.turn.approvals import (
     AnnotationLookup,
     agent_rule_lookup,
     channel_for_tool_rules,
-    daimon_rule_tools_for,
     unattended_decider,
 )
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
-from mux.contracts.ids import Revision, Scope
+from daimon.core.turn.unattended_capabilities import (
+    UnattendedEntryPoint,
+    apply_capabilities,
+    capability_policy,
+    capability_posture,
+    constrain_capabilities,
+    protected_tools,
+)
+from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -75,18 +80,6 @@ async def refuse_ungated_confirmation(call: ToolCall) -> ToolConfirmationResult:
     )
 
 
-def protected_tools(policy: ToolSafetyPolicy) -> frozenset[str]:
-    """Daimon's tools that act only on a person's card, for an unattended turn.
-
-    Every one a deployment could offer, whether or not this one does: a
-    session that asks on a tool it lacks costs nothing. `microsoft_write`
-    asks only with the policy on, as it does in chat.
-    """
-    return backend_switch_tools(enabled=True) | microsoft_send_tools(
-        enabled=True, tool_safety_on=policy.enabled
-    )
-
-
 async def gate_session_snapshot(
     client: AsyncAnthropic,
     session: BetaManagedAgentsSession,
@@ -96,47 +89,32 @@ async def gate_session_snapshot(
     public_url: str | None,
     session_factory: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID | None,
+    entry_point: UnattendedEntryPoint | None = None,
 ) -> None:
     """Make `session`'s gated calls pause under `policy`, before anything is sent.
 
     Works from the session's own frozen arrays, so hidden servers and the
     caller's resources stay as they are; nothing is restored from the
-    agent's deployment-wide definition. Both the toolset defaults and every
-    per-tool config are rewritten, Daimon's `protected_tools` ask, and a
-    foreign `daimon-mcp` URL is healed, policy on or off. A failed update
-    raises, so the send never happens on an ungated session.
+    agent's deployment-wide definition. `constrain_capabilities` refuses a
+    session it cannot constrain (a coordinator, skills the `entry_point`
+    does not allow, an unknown field) before any update, always turns
+    built-ins off, rewrites
+    both the toolset defaults and every per-tool config, makes Daimon's
+    `protected_tools` ask, and heals a foreign `daimon-mcp` URL, policy on or
+    off. A refusal or a failed update raises, so the send never happens on an
+    ungated session. An `entry_point` of None gets no built-ins and no skills.
     """
-    tools = [t.model_dump(mode="json") for t in session.agent.tools]
-    servers = [s.model_dump(mode="json") for s in session.agent.mcp_servers]
-    rules = (
-        await daimon_rule_tools_for(
-            session_factory, policy, tenant_id=tenant_id, agent_id=session.agent.id
-        )
-        if session_factory is not None
-        else frozenset[str]()
-    )
-    protected = protected_tools(policy)
-    gated = session_tools_for_policy(
+    allowed = capability_policy(entry_point)
+    constrained = await constrain_capabilities(
+        session,
         policy,
-        tools,
-        trusted_servers=trusted_servers_for(public_url),
-        confirmed_tools=protected,
-        daimon_rule_tools=rules,
+        public_url=public_url,
+        session_factory=session_factory,
+        tenant_id=tenant_id,
+        allow_skills=allowed.allow_skills,
     )
-    healed = heal_reserved_server(policy, servers, public_url=public_url, confirmed_tools=protected)
-    if gated is None and healed is None:
-        return
-    agent: dict[str, Any] = {
-        "tools": gated if gated is not None else tools,
-        "mcp_servers": healed if healed is not None else servers,
-    }
-    await update_session_record(
-        client,
-        session.id,
-        scope=scope,
-        agent_id=session.agent.id,
-        revision=Revision(local=session.agent.version, native=str(session.agent.version)),
-        agent=cast(BetaManagedAgentsSessionAgentUpdateParam, agent),
+    await apply_capabilities(
+        client, session, constrained, scope=scope, session_factory=session_factory
     )
 
 
@@ -179,6 +157,7 @@ def unattended_posture(
     annotations_for: AnnotationLookup | None = None,
     fernet: MultiFernet | None = None,
     agent_id: uuid.UUID | None = None,
+    entry_point: UnattendedEntryPoint | None = None,
 ) -> PolicyApproval:
     """How an unattended turn on `session` answers its pauses.
 
@@ -188,9 +167,10 @@ def unattended_posture(
     for a DM or no channel); with no database or tenant there are no rules to
     read. `protected_tools` are refused. `annotations_for`
     is the seam for operator-trusted MCP hints; it must answer only for
-    trusted servers.
+    trusted servers. A built-in or custom call is always refused
+    (`capability_posture`), regardless of `entry_point`.
     """
-    return PolicyApproval(
+    posture = PolicyApproval(
         decide=unattended_decider(
             policy,
             trusted_servers=trusted_servers_for(public_url),
@@ -217,6 +197,7 @@ def unattended_posture(
             ),
         )
     )
+    return capability_posture(posture)
 
 
 def session_gate(
@@ -229,6 +210,7 @@ def session_gate(
     session_factory: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID | None,
     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None,
+    entry_point: UnattendedEntryPoint | None = None,
 ) -> Callable[[], Awaitable[None]]:
     """The gate a driven unattended turn runs before each send (`unattended_sends`).
 
@@ -236,7 +218,8 @@ def session_gate(
     rule that changed while the turn was paused reaches its next call. A
     failed read or update raises, and the send it guards does not happen.
     An injected mux backend supplies its own `read_session`; its snapshot is
-    never replaced by a read through a different runtime.
+    never replaced by a read through a different runtime. `entry_point`
+    picks the `CapabilityPolicy` (`gate_session_snapshot`).
     """
 
     async def gate() -> None:
@@ -250,6 +233,7 @@ def session_gate(
             public_url=public_url,
             session_factory=session_factory,
             tenant_id=tenant_id,
+            entry_point=entry_point,
         )
 
     return gate
@@ -277,6 +261,7 @@ async def dm_session_authority(
     *,
     tenant_id: uuid.UUID,
     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None,
+    entry_point: UnattendedEntryPoint | None = None,
 ) -> tuple[PolicyApproval, Callable[[], Awaitable[None]]]:
     """Authorize unattended DMs entirely from their actual session snapshot.
 
@@ -327,6 +312,7 @@ async def dm_session_authority(
         tenant_id=tenant_id,
         channel_id=None,
         fernet=deps.fernet,
+        entry_point=entry_point,
     )
 
     async def gate() -> None:
@@ -348,6 +334,7 @@ async def dm_session_authority(
             public_url=deps.public_url,
             session_factory=deps.sessionmaker,
             tenant_id=tenant_id,
+            entry_point=entry_point,
         )
 
     return posture, gate
