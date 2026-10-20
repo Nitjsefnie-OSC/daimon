@@ -7,7 +7,7 @@ from datetime import datetime, timedelta
 from email.utils import getaddresses
 from enum import StrEnum
 from typing import Annotated
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from daimon.core.access_policy import TenantAccessPolicy, is_invoker_allowed
 from daimon.core.membership import Membership
@@ -176,24 +176,6 @@ def verify_lead_evidence(evidence: LeadEvidence) -> LeadEvidence:
     )
 
 
-def get_company_key(evidence: LeadEvidence) -> str:
-    """Canonical key shared by company creation claims and identity lookup."""
-    if not evidence.identity_verified or not evidence.company_domain:
-        raise ValueError("Company processing requires verified identity")
-    return evidence.company_domain.strip().lower().rstrip(".")
-
-
-DEAL_SOURCE_CHANNEL = "Cold in-mail"
-DEAL_TYPE_NEW_BUSINESS = "newbusiness"
-
-
-def get_discord_message_url(guild_id: str, channel_id: str, message_id: str) -> str:
-    """Permalink to the Discord post that carries the lead's intake thread."""
-    if not (guild_id and channel_id and message_id):
-        raise ValueError("Discord lead thread link requires guild, channel and message")
-    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-
-
 class LeadDealCandidate(BaseModel):
     id: NonEmptyStr
     name: str
@@ -276,20 +258,6 @@ def select_matching_opportunity(
     return LeadOpportunityMatch(
         requires_review=True,
         reason="Existing opportunities require selection or confirmation of a separate project",
-    )
-
-
-def get_opportunity_identity(
-    company_key: str, description: str, intake_id: UUID, progress: LeadProgress
-) -> UUID:
-    """Stable remote identity even if a worker survives losing its DB claim."""
-    if progress.selected_deal_id:
-        return uuid5(NAMESPACE_URL, f"daimon:hubspot:deal:{progress.selected_deal_id}")
-    if progress.separate_opportunity_confirmed:
-        return intake_id
-    return uuid5(
-        NAMESPACE_URL,
-        f"daimon:hubspot:opportunity:{company_key}:{_normalize_project(description)}",
     )
 
 
