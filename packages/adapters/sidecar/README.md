@@ -4,8 +4,8 @@
 polling or MCP management tools. Core owns registration, replay/evidence storage,
 durable wakes and stop controls. The sidecar has no direct table grants.
 
-Both producer gates default off pending release review. Migration `0117_watches`
-follows `0116_thread_model_settings`. Enrollment binds an existing Discord thread;
+Both producer gates default off pending release review. Migration `0119_watches`
+follows `0118_lead_intake`. Enrollment binds an existing Discord thread;
 watch turns need its current unattended execution grant, recheck live access and
 spend, and only read/report. Original tools restore before release, including
 cancellation; cache invalidation forces reconciliation after interruption.
