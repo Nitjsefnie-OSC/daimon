@@ -10,7 +10,6 @@ from __future__ import annotations
 import re
 import uuid
 from datetime import UTC, datetime
-from typing import cast
 
 from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.stores.domain import TaskContinuationRow
@@ -24,7 +23,6 @@ from daimon.core.turn.approvals import RuleLookup, unattended_decider
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.turn_origin import current_execution_origin_id
-from pydantic import BaseModel
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -115,31 +113,8 @@ async def require_watch_send(
         raise AdmissionDenied(reason="invoker_not_allowed")
 
 
-def _telemetry_fields(value: object, names: str) -> None:
-    # Shared validation leaves telemetry opaque; watches freeze its fields.
-    if not isinstance(value, BaseModel):
-        raise AdmissionDenied(reason="backend_unsupported")
-    present = set(type(value).model_fields) | set(value.model_extra or {}) | set(vars(value))
-    if present - set(names.split()) - {"_request_id"}:
-        raise AdmissionDenied(reason="backend_unsupported")
-
-
-def _instance_fields(value: object) -> None:
-    # Shared validation ignores private attributes; only the request ID is reviewed.
-    if isinstance(value, BaseModel):
-        known = set(type(value).model_fields) | set(value.model_extra or {}) | {"_request_id"}
-        if set(vars(value)) - known:
-            raise AdmissionDenied(reason="backend_unsupported")
-        for name in type(value).model_fields:
-            if name not in ("metadata", "input_schema"):
-                _instance_fields(getattr(value, name, None))
-    elif isinstance(value, list):
-        for item in cast("list[object]", value):
-            _instance_fields(item)
-
-
 def validate_watch_snapshot(snapshot: BetaManagedAgentsSession) -> None:
-    """Shared watch policy plus the stricter frozen telemetry field allowlist."""
+    """Shared watch policy plus refusal of duplicate server toolsets."""
     allowed = capabilities.capability_policy("watch")
     if allowed.allow_builtins or allowed.allow_skills:
         raise AdmissionDenied(reason="backend_unsupported")
@@ -147,19 +122,6 @@ def validate_watch_snapshot(snapshot: BetaManagedAgentsSession) -> None:
     servers = [tool.mcp_server_name for tool in snapshot.agent.tools if tool.type == "mcp_toolset"]
     if len(servers) != len(set(servers)):
         raise AdmissionDenied(reason="backend_unsupported")
-    _instance_fields(snapshot)
-    _telemetry_fields(snapshot.stats, "active_seconds duration_seconds")
-    _telemetry_fields(
-        snapshot.usage, "cache_creation cache_read_input_tokens input_tokens output_tokens"
-    )
-    if snapshot.usage.cache_creation is not None:
-        _telemetry_fields(
-            snapshot.usage.cache_creation, "ephemeral_1h_input_tokens ephemeral_5m_input_tokens"
-        )
-    for outcome in snapshot.outcome_evaluations:
-        _telemetry_fields(
-            outcome, "completed_at description explanation iteration outcome_id result type"
-        )
 
 
 async def watch_capabilities(
@@ -175,11 +137,9 @@ async def watch_capabilities(
     strict = read_report_policy(policy)
     servers = {server.name for server in snapshot.agent.mcp_servers}
     allowlist = frozenset(
-        f"{tool.mcp_server_name}/{config.name}"
+        capabilities.ServerTool(tool.mcp_server_name, config.name)
         for tool in snapshot.agent.tools
-        if tool.type == "mcp_toolset"
-        and tool.mcp_server_name in servers
-        and "/" not in tool.mcp_server_name
+        if tool.type == "mcp_toolset" and tool.mcp_server_name in servers
         for config in tool.configs
         if config.enabled
         and re.fullmatch(r"[A-Za-z0-9_.:-]{1,128}", config.name)

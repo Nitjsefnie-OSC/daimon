@@ -3945,6 +3945,132 @@ class GeminiRuntimeState(Base):
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
+class Watch(Base):
+    """Owner-registered source and immutable conversation binding."""
+
+    __tablename__ = "watches"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
+    )
+    owner_external_id: Mapped[str] = mapped_column(Text, nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
+    session_id: Mapped[str] = mapped_column(Text, nullable=False)
+    instructions: Mapped[str] = mapped_column(Text, nullable=False)
+    producer: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
+    page_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
+    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="page_event")
+    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
+    baseline: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    rule: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    source_state: Mapped[dict[str, Any]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'{}'::jsonb")
+    )
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    lease_owner: Mapped[str | None] = mapped_column(Text)
+    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    backoff_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    consecutive_errors: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    max_turns_per_day: Mapped[int] = mapped_column(Integer, nullable=False, server_default="24")
+    max_fires: Mapped[int | None] = mapped_column(Integer)
+    fire_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    rate_window_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    rate_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WatchCapability(Base):
+    """Only the hash survives issuance. Secrets are never queryable."""
+
+    __tablename__ = "watch_capabilities"
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    watch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False
+    )
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    key_id: Mapped[str] = mapped_column(Text, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    operation: Mapped[str] = mapped_column(Text, nullable=False)
+    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class WatchFiring(Base):
+    """One coalesced batch linked to the existing durable wake."""
+
+    __tablename__ = "watch_firings"
+    wake_key: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("task_continuations.idempotency_key", ondelete="CASCADE"),
+        primary_key=True,
+    )
+    watch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False, index=True
+    )
+    revision: Mapped[int] = mapped_column(Integer, nullable=False)
+    generation: Mapped[int] = mapped_column(Integer, nullable=False)
+    events: Mapped[list[dict[str, Any]]] = mapped_column(
+        JSONB, nullable=False, server_default=text("'[]'::jsonb")
+    )
+    omitted: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WatchEvidence(Base):
+    """Durably accepted producer event; retries return the original wake."""
+
+    __tablename__ = "watch_inbox"
+    __table_args__ = (
+        UniqueConstraint("producer", "event_id", name="uq_watch_inbox_event"),
+        Index("watch_inbox_accepted_idx", "accepted_at"),
+        Index("watch_inbox_watch_idx", "watch_id"),
+    )
+    id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
+    )
+    watch_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False
+    )
+    producer: Mapped[str] = mapped_column(Text, nullable=False)
+    event_id: Mapped[str] = mapped_column(Text, nullable=False)
+    payload: Mapped[str] = mapped_column(Text, nullable=False)
+    wake_key: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("watch_firings.wake_key", ondelete="CASCADE"), nullable=False
+    )
+    accepted_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
+class WatchControl(Base):
+    """Durable global producer gate and owner/tenant stops, outside sidecar authority."""
+
+    __tablename__ = "watch_controls"
+    scope: Mapped[str] = mapped_column(Text, primary_key=True)
+    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
+
+
 class LeadIntakeConfig(Base):
     __tablename__ = "lead_intake_configs"
     tenant_id: Mapped[uuid.UUID] = mapped_column(
@@ -4086,129 +4212,3 @@ class LeadMailboxMessageRecord(Base):
     disposition: Mapped[str] = mapped_column(Text, nullable=False)
     intake_id: Mapped[uuid.UUID | None] = mapped_column(UUID(as_uuid=True))
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-
-
-class Watch(Base):
-    """Owner-registered source and immutable conversation binding."""
-
-    __tablename__ = "watches"
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_account_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("accounts.id", ondelete="CASCADE"), nullable=False
-    )
-    owner_external_id: Mapped[str] = mapped_column(Text, nullable=False)
-    platform: Mapped[str] = mapped_column(Text, nullable=False)
-    parent_channel_id: Mapped[str] = mapped_column(Text, nullable=False)
-    thread_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_id: Mapped[str] = mapped_column(Text, nullable=False)
-    agent_name: Mapped[str] = mapped_column(Text, nullable=False)
-    session_id: Mapped[str] = mapped_column(Text, nullable=False)
-    instructions: Mapped[str] = mapped_column(Text, nullable=False)
-    producer: Mapped[str] = mapped_column(Text, nullable=False, unique=True)
-    page_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
-    revision: Mapped[int] = mapped_column(Integer, nullable=False, server_default="1")
-    source: Mapped[str] = mapped_column(Text, nullable=False, server_default="page_event")
-    status: Mapped[str] = mapped_column(Text, nullable=False, server_default="active")
-    baseline: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
-    rule: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
-    source_state: Mapped[dict[str, Any]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'{}'::jsonb")
-    )
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    lease_owner: Mapped[str | None] = mapped_column(Text)
-    lease_expires_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    next_check_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    backoff_until: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    consecutive_errors: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    max_turns_per_day: Mapped[int] = mapped_column(Integer, nullable=False, server_default="24")
-    max_fires: Mapped[int | None] = mapped_column(Integer)
-    fire_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    rate_window_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-    rate_count: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
-class WatchCapability(Base):
-    """Only the hash survives issuance. Secrets are never queryable."""
-
-    __tablename__ = "watch_capabilities"
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    watch_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False
-    )
-    digest: Mapped[str] = mapped_column(Text, nullable=False)
-    key_id: Mapped[str] = mapped_column(Text, nullable=False)
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    operation: Mapped[str] = mapped_column(Text, nullable=False)
-    expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
-    revoked_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
-
-
-class WatchFiring(Base):
-    """One coalesced batch linked to the existing durable wake."""
-
-    __tablename__ = "watch_firings"
-    wake_key: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True),
-        ForeignKey("task_continuations.idempotency_key", ondelete="CASCADE"),
-        primary_key=True,
-    )
-    watch_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False, index=True
-    )
-    revision: Mapped[int] = mapped_column(Integer, nullable=False)
-    generation: Mapped[int] = mapped_column(Integer, nullable=False)
-    events: Mapped[list[dict[str, Any]]] = mapped_column(
-        JSONB, nullable=False, server_default=text("'[]'::jsonb")
-    )
-    omitted: Mapped[int] = mapped_column(Integer, nullable=False, server_default="0")
-    created_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
-class WatchEvidence(Base):
-    """Durably accepted producer event; retries return the original wake."""
-
-    __tablename__ = "watch_inbox"
-    __table_args__ = (
-        UniqueConstraint("producer", "event_id", name="uq_watch_inbox_event"),
-        Index("watch_inbox_accepted_idx", "accepted_at"),
-        Index("watch_inbox_watch_idx", "watch_id"),
-    )
-    id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
-    )
-    watch_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("watches.id", ondelete="CASCADE"), nullable=False
-    )
-    producer: Mapped[str] = mapped_column(Text, nullable=False)
-    event_id: Mapped[str] = mapped_column(Text, nullable=False)
-    payload: Mapped[str] = mapped_column(Text, nullable=False)
-    wake_key: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("watch_firings.wake_key", ondelete="CASCADE"), nullable=False
-    )
-    accepted_at: Mapped[datetime] = mapped_column(
-        DateTime(timezone=True), nullable=False, server_default=func.now()
-    )
-
-
-class WatchControl(Base):
-    """Durable global producer gate and owner/tenant stops, outside sidecar authority."""
-
-    __tablename__ = "watch_controls"
-    scope: Mapped[str] = mapped_column(Text, primary_key=True)
-    enabled: Mapped[bool] = mapped_column(Boolean, nullable=False, server_default=text("false"))
