@@ -164,7 +164,9 @@ The platform surfaces differ, and the difference is deliberate:
   chat, which calls `create_routine`
   (`packages/adapters/discord/daimon/adapters/discord/routines_panel/`).
 - The CLI has no routine CRUD. `daimon routines backfill-agent-names` is an
-  admin migration helper and nothing else.
+  admin migration helper, `daimon routines create --destination dm` creates
+  an owner-DM routine, and `daimon routines sandbox-tools` turns a routine's
+  built-in sandbox tools on or off (see [Sandbox tools](#sandbox-tools)).
 
 ## How the scheduler picks it up
 
@@ -262,9 +264,8 @@ routine refuses, and its card-only actions: a routine's session asks on a
 backend switch and Microsoft mail and invites, policy on or off, and on
 Microsoft file changes with it on, and the routine refuses them. A routine
 cannot use built-in sandbox tools (bash, file reads and edits, web fetch
-and the rest) or custom tools. This applies to every unattended run, with
-no opt-in, so routines and other unattended runs cannot generate files
-using sandbox tools. A routine whose agent coordinates other agents (`multiagent`), or whose session
+and the rest) or custom tools unless an admin has opted that routine in
+(see [Sandbox tools](#sandbox-tools)); custom tools stay off even then. A routine whose agent coordinates other agents (`multiagent`), or whose session
 carries a capability this release does not know, is refused before its
 message and records `AdmissionDenied: backend_unsupported`; see
 [permissions.md](permissions.md#what-an-unattended-session-may-carry). See
@@ -636,10 +637,45 @@ refuses the result; no destination post or private fallback is authorized
 by stale evidence. User exceptions and current server admins retain their
 invoker-policy bypass; destination and agent restrictions remain separate.
 
+### Sandbox tools
+
+Built-in sandbox tools are off for every routine run by default. A current
+workspace or server admin can turn them on for one routine at a time, for
+that routine's own scheduled runs only:
+
+- in chat or the hub, with the `set_routine_sandbox_tools` MCP tool
+  (`routine_id`, `enabled`). Only a person may call it: an agent key or an
+  agent acting in a conversation is refused. On Discord the caller's admin
+  rights are checked again against the server at the time of the call, so a
+  demoted admin is refused. The routine's owner cannot opt their own routine
+  in unless they are an admin.
+- from the operator CLI, for one routine or a confirmed list of them:
+
+  ```bash
+  daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID [ROUTINE_ID ...] --dry-run
+  daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID [ROUTINE_ID ...]
+  daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID --off
+  ```
+
+  Every id must name a routine in that tenant, or nothing changes. A routine
+  already set that way is left alone, so the command can be re-run; `--dry-run`
+  prints what would change and writes nothing.
+
+Each change sets `sandbox_tools_set_by` (the account or CLI principal) and
+`sandbox_tools_set_at` on the routine and appends a row to
+`routine_sandbox_history` (routine id, before and after, who, when, and
+whether it came from `mcp` or `cli`). `get_routine` and `list_routines`
+return `sandbox_tools_enabled`, and the Discord `/routines` panel shows
+"Sandbox tools: on (admin opt-in)" or "Sandbox tools: off".
+
+The opt-in reaches only the routine entry point. Watches, timers and
+worker-finished wakes, agent chat, fleet workers, `daimon run` and workspace
+checkpoints keep built-ins off with no opt-in.
+
 ### Generated files
 
-Routines cannot generate files with sandbox tools because those tools are
-disabled for every unattended run, with no opt-in. The delivery pipeline
+Routines cannot generate files with sandbox tools unless an admin opted the
+routine in ([Sandbox tools](#sandbox-tools)). The delivery pipeline
 still supports files already present in a session or queued in an outbox.
 
 After a successful run, Daimon collects any downloadable session outputs with

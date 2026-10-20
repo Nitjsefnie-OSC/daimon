@@ -172,23 +172,36 @@ tool safety off, included. Each call therefore reaches the unattended decider,
 which answers as described above, with the agent's and the channel's rules:
 Daimon's ordinary tools and, with tool safety off, ordinary third-party calls
 are still allowed. Built-in sandbox tools (bash, file
-reads and edits, web fetch and the rest) and custom tools are disabled for
-every unattended entry point, with no opt-in. These runs cannot generate
-files using sandbox tools:
+reads and edits, web fetch and the rest) are disabled for every unattended
+entry point, and custom tools are removed. The one exception is a scheduled
+routine that an admin has opted in:
 
 | Entry point | Built-in tools | Skills |
 | --- | --- | --- |
-| Watches | off | denied |
-| Scheduled routines | off | allowed |
-| Timers and worker-finished wakes | off | allowed |
-| Fleet workers | off | allowed |
-| Agent chat | off | allowed |
-| `daimon run` | off | allowed |
-| Workspace checkpoints | off | allowed |
+| Watches | off, no opt-in | denied |
+| Scheduled routines | off, unless an admin opted that routine in | allowed |
+| Timers and worker-finished wakes | off, no opt-in | allowed |
+| Fleet workers | off, no opt-in | allowed |
+| Agent chat | off, no opt-in | allowed |
+| `daimon run` | off, no opt-in | allowed |
+| Workspace checkpoints | off, no opt-in | allowed |
 
-The session's built-in toolset is
-disabled (every tool `enabled: false`), custom tools are removed, and the
-decider refuses any built-in call that still pauses.
+With built-ins off, the session's built-in toolset is
+disabled (every tool `enabled: false`) and the decider refuses any built-in
+call that still pauses. An opted-in routine keeps its built-in toolset as the
+agent defines it; custom tools are still removed.
+
+### Routine sandbox opt-in
+
+Only a current human workspace or server admin can opt a routine in, with the
+`set_routine_sandbox_tools` MCP tool or the operator's `daimon routines
+sandbox-tools` command. Owning the routine is not enough, and an agent key or
+an agent acting in a conversation on an admin's behalf is refused. On Discord
+the admin's rights are re-read from the server when they make the change.
+Every change is recorded with who made it, when, and the routine id
+(`routine_sandbox_history`), and routine status shows the current setting.
+The opt-in applies to that routine's own scheduled runs only. See
+[routines.md](routines.md#sandbox-tools).
 
 A refused routine records `AdmissionDenied: backend_unsupported` as its
 result. Agent chat answers with a tool error, `daimon run` exits with the
