@@ -520,7 +520,7 @@ async def test_the_sweep_names_the_turns_person_and_replies_to_their_message() -
         None,
         False,
     )
-    lifecycle = MagicMock()
+    lifecycle = MagicMock(output_authorization=None)
     lifecycle.requester_id = 4242
     lifecycle.files_reply_to = MagicMock(return_value=5150)
 
