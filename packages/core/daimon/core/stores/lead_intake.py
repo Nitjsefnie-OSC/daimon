@@ -35,8 +35,6 @@ from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
-Effect = LeadEffectState
-
 
 class MailboxState(BaseModel):
     checkpoint: datetime | None = None
@@ -273,20 +271,7 @@ class IntakeStore:
                     .order_by(LeadIntakeEffect.created_at)
                 )
             ).scalars()
-            record.effects = (
-                [
-                    LeadEffectState(
-                        step=e.step,
-                        stable_key=e.stable_key,
-                        state=e.state,
-                        remote_id=e.remote_id,
-                        created_at=e.created_at,
-                    )
-                    for e in effects
-                ]
-                if record.submission
-                else []
-            )
+            record.effects = [_effect_state(e) for e in effects] if record.submission else []
             return record
 
     async def list(
@@ -456,20 +441,10 @@ class IntakeStore:
                     break
             return [value for value in claimed if value is not None], uncertain_peer
 
-    async def effect(self, intake_id: UUID, step: str) -> Effect | None:
+    async def effect(self, intake_id: UUID, step: str) -> LeadEffectState | None:
         async with self.sessions() as session:
             row = await session.get(LeadIntakeEffect, (self.tenant_id, intake_id, step))
-            return (
-                Effect(
-                    step=row.step,
-                    stable_key=row.stable_key,
-                    state=row.state,
-                    remote_id=row.remote_id,
-                    created_at=row.created_at,
-                )
-                if row
-                else None
-            )
+            return _effect_state(row) if row else None
 
     async def _lock_live(self, session: AsyncSession, intake_id: UUID) -> None:
         # Erasure takes the same parent-row lock before deleting child rows.
@@ -727,6 +702,16 @@ class IntakeStore:
         """Erase all lead content/effects/audit, keeping only the source tombstone."""
         async with self.sessions() as session, session.begin():
             await _purge(session, now, self.tenant_id)
+
+
+def _effect_state(row: LeadIntakeEffect) -> LeadEffectState:
+    return LeadEffectState(
+        step=row.step,
+        stable_key=row.stable_key,
+        state=row.state,
+        remote_id=row.remote_id,
+        created_at=row.created_at,
+    )
 
 
 @asynccontextmanager
