@@ -177,3 +177,12 @@ def isolate_agent_faces() -> Iterator[None]:
 
     yield
     cancel_pending_agent_faces()
+
+
+@pytest.fixture
+def status_log_on() -> Iterator[None]:
+    """Run a test with `turn.status_log` on; every other test runs with it off."""
+    from daimon.core.turn.status_log import status_log_override
+
+    with status_log_override(True):
+        yield

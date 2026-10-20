@@ -3186,6 +3186,38 @@ async def test_final_response_preserves_whitespace_between_distinct_blocks():
     assert edits[-1][1]["content"] == "Hello world."
 
 
+@pytest.mark.usefixtures("status_log_on")
+async def test_consecutive_final_messages_collapse_but_distinct_answers_survive_with_the_log_on():
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="First part.\nMore of the first.\n"),
+                TextBlock(kind="text", text="First part.\nMore of the first.\n"),
+                TextBlock(kind="text", text="Second part.\nMore of the second."),
+            ]
+        )
+    )
+    assert (
+        edits[-1][1]["content"]
+        == "First part.\nMore of the first.\n\nSecond part.\nMore of the second."
+    )
+
+
+@pytest.mark.usefixtures("status_log_on")
+async def test_final_response_leaves_out_a_status_line_written_just_before_the_answer():
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="📚 **Found:** 14 patterns | top area: diagnostics"),
+                TextBlock(kind="text", text="Saturation priors are usually Beta."),
+            ]
+        )
+    )
+    assert edits[-1][1]["content"] == "Saturation priors are usually Beta."
+
+
 @pytest.mark.parametrize("notice", ["cancel", "degraded", "continuity"])
 async def test_overflow_keeps_operational_notices_visible(notice):
     lc, _, edits = _make_lifecycle()

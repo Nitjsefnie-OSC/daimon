@@ -7,12 +7,15 @@ from typing import Literal
 import pytest
 from daimon.core.turn.state import ContentBlock, TextBlock, ToolUseBlock
 from daimon.core.turn.status_lines import (
+    DRAFT_LOG_LINES,
+    draft_log,
     format_draft,
     format_duration,
     format_headline,
     format_summary,
     format_tool_lines,
     has_running_tool,
+    roll_draft,
 )
 
 ToolType = Literal["agent.tool_use", "agent.custom_tool_use", "agent.mcp_tool_use"]
@@ -305,3 +308,37 @@ def test_optional_backend_context_does_not_shift_existing_positional_fields() ->
     signature = inspect.signature(TurnObservation)
     assert signature.parameters["backend_profile"].kind is inspect.Parameter.KEYWORD_ONLY
     assert signature.parameters["id"].kind is inspect.Parameter.POSITIONAL_OR_KEYWORD
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_the_draft_log_keeps_the_last_three_lines_oldest_first() -> None:
+    earlier: tuple[str, ...] = ()
+    latest: str | None = None
+    for line in ("one", "two", "three", "four", "five"):
+        earlier, latest = roll_draft(earlier, latest, line)
+    assert DRAFT_LOG_LINES == 3
+    assert draft_log(earlier, latest) == ("three", "four", "five")
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_the_draft_log_grows_from_nothing_to_one_to_three_lines() -> None:
+    assert draft_log((), None) == ()
+    earlier, latest = roll_draft((), None, "one")
+    assert draft_log(earlier, latest) == ("one",)
+    earlier, latest = roll_draft(earlier, latest, "two")
+    earlier, latest = roll_draft(earlier, latest, "three")
+    assert draft_log(earlier, latest) == ("one", "two", "three")
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_the_draft_log_does_not_repeat_the_latest_line() -> None:
+    earlier, latest = roll_draft((), None, "one")
+    assert roll_draft(earlier, latest, "one") == ((), "one")
+
+
+def test_with_the_switch_off_the_draft_keeps_only_the_latest_line() -> None:
+    earlier: tuple[str, ...] = ()
+    latest: str | None = None
+    for line in ("one", "two", "three"):
+        earlier, latest = roll_draft(earlier, latest, line)
+    assert draft_log(earlier, latest) == ("three",)

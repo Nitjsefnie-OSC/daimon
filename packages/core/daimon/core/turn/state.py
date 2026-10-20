@@ -12,6 +12,7 @@ types.
 
 from __future__ import annotations
 
+import unicodedata
 from collections.abc import Mapping
 from dataclasses import dataclass, field
 from datetime import datetime
@@ -26,15 +27,21 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 from daimon.core.errors import TurnError
 from daimon.core.pricing import uncached_input_tokens
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
+from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.usage import UsageObservation
 from mux.profiles import accounting_mode_for
 
+#: The longest one-line message still read as a status line, not as prose.
+STATUS_LINE_MAX_CHARS: Final[int] = 300
+
 
 @dataclass(frozen=True, slots=True)
 class TextBlock:
-    """Assistant text. Grown by appending across `agent.message` events —
-    the reducer concatenates onto the most recent `TextBlock` when no
+    """Assistant text. Managed Agents delivers each `agent.message` whole (its
+    streamed deltas are previews that never reach the reducer). With
+    `turn.status_log` on, every message is its own block; off, the reducer
+    concatenates consecutive messages onto the most recent `TextBlock` when no
     tool-use block has intervened."""
 
     kind: Literal["text"]
@@ -180,43 +187,141 @@ class TurnState:
     """Ids of the tool calls that got a result, in the order the results came."""
 
 
+def _starts_with_symbol(text: str) -> bool:
+    """Whether the first non-space character is a pictograph, not a letter, digit or punctuation.
+
+    Unicode categories So (emoji and other symbols such as 🔍 📚 ⚠️ ✅) and Sk, or any
+    character followed by the emoji variation selector U+FE0F that is not itself a
+    letter or digit.
+    """
+    flat = text.lstrip()
+    if not flat:
+        return False
+    first = flat[0]
+    if unicodedata.category(first) in ("So", "Sk"):
+        return True
+    return flat[1:2] == "\ufe0f" and not first.isalnum()
+
+
+def _is_status_line(text: str) -> bool:
+    """A short one-line message that opens with an emoji, such as ``🔍 Looking up: priors``.
+
+    Agents (or skills) that narrate their work write these between tool calls
+    and sometimes right before the answer. The status card shows them; the
+    answer must not carry them. The emoji requirement keeps real answer text
+    ("Yes.", "Done", "- item", "**Bold**") from ever being taken for one.
+    """
+    flat = text.strip()
+    return "\n" not in flat and len(flat) <= STATUS_LINE_MAX_CHARS and _starts_with_symbol(flat)
+
+
+def _answer_texts(blocks: list[TextBlock], *, keep_last: bool) -> list[str]:
+    """The texts of one run of consecutive messages that belong in an answer.
+
+    A run of one message is that message, untouched. In a longer run, blank
+    messages and status lines are left out; ``keep_last`` keeps the run's last
+    message even when it is a status line, while a run followed by a tool call
+    may be all status lines, and then they stay.
+    """
+    if len(blocks) == 1:
+        return [blocks[0].text]
+    texts = [block.text for block in blocks if block.text.strip()]
+    if not texts:
+        return [block.text for block in blocks]
+    last = len(texts) - 1
+    kept = [
+        text
+        for i, text in enumerate(texts)
+        if not _is_status_line(text) or (keep_last and i == last)
+    ]
+    return kept or texts
+
+
+def join_messages(texts: list[str]) -> str:
+    """Separate messages with a blank line; a lone message is returned as it is.
+
+    With `turn.status_log` off, texts are joined as they are, as before.
+    """
+    if len(texts) == 1:
+        return texts[0]
+    if not status_log_enabled():
+        return "".join(texts)
+    return "\n\n".join(text.strip() for text in texts)
+
+
+def _text_runs(content: list[ContentBlock]) -> list[tuple[int, list[TextBlock]]]:
+    """Runs of consecutive text blocks as ``(index of the first block, blocks)``."""
+    runs: list[tuple[int, list[TextBlock]]] = []
+    previous_was_text = False
+    for i, block in enumerate(content):
+        if isinstance(block, TextBlock):
+            if previous_was_text:
+                runs[-1][1].append(block)
+            else:
+                runs.append((i, [block]))
+        previous_was_text = isinstance(block, TextBlock)
+    return runs
+
+
+def _last_tool_index(content: list[ContentBlock]) -> int:
+    return max(
+        (i for i, block in enumerate(content) if isinstance(block, ToolUseBlock)), default=-1
+    )
+
+
+def final_answer_texts(content: list[ContentBlock]) -> list[str]:
+    """The messages after the last tool use that make up the final answer.
+
+    With `turn.status_log` on, each `agent.message` is its own block, so a
+    status line the agent wrote just before its answer (no tool call between
+    them) is told apart from the answer and left out; see ``_answer_texts``.
+    Off, every text after the last tool use is the answer.
+    """
+    tail = [
+        block for block in content[_last_tool_index(content) + 1 :] if isinstance(block, TextBlock)
+    ]
+    if not status_log_enabled():
+        return [block.text for block in tail]
+    return _answer_texts(tail, keep_last=True) if tail else []
+
+
 def extract_final_response(content: list[ContentBlock]) -> str:
     """Extract text after the last ToolUseBlock, or all text if no tools.
 
     In multi-tool turns, intermediate agent.message text (pre-tool narration)
     is positionally before ToolUseBlocks. Only text AFTER the last tool use
     is the actual response. When no tools were used, all text is final.
+    Separate messages in the answer are set apart by a blank line.
     """
-    last_tool_idx = -1
-    for i, block in enumerate(content):
-        if isinstance(block, ToolUseBlock):
-            last_tool_idx = i
-
-    return "".join(
-        block.text for block in content[last_tool_idx + 1 :] if isinstance(block, TextBlock)
-    )
+    return join_messages(final_answer_texts(content))
 
 
 def extract_sealed_responses(
     content: list[ContentBlock], *, min_chars: int
 ) -> list[tuple[int, str]]:
-    """Text blocks "sealed" by a later tool use and at least ``min_chars`` long.
+    """Runs of text "sealed" by a later tool use and at least ``min_chars`` long.
 
-    A text block with a ToolUseBlock after it can never grow again (the reducer
-    only appends onto the last block), so it is safe to render permanently
-    mid-turn. The length floor separates substantive answers from pre-tool
-    narration ("Let me check…"). Returns ``(content index, text)`` pairs in
-    stream order; the index is a stable dedup key for callers that flush
+    Text with a ToolUseBlock after it can never grow again, so it is safe to
+    render permanently mid-turn. The length floor separates substantive
+    answers from pre-tool narration ("Let me check…"). A run of consecutive
+    messages is one candidate, minus its status lines (``_answer_texts``);
+    with `turn.status_log` off every block is a candidate on its own.
+    Returns ``(content index of the run's first block, text)`` pairs in stream
+    order; the index is a stable dedup key for callers that flush
     incrementally. Text after the last tool use is the final response and is
     never included — that's ``extract_final_response``'s job.
     """
-    last_tool_idx = -1
-    for i, block in enumerate(content):
-        if isinstance(block, ToolUseBlock):
-            last_tool_idx = i
-
-    return [
-        (i, block.text)
-        for i, block in enumerate(content[:last_tool_idx])
-        if isinstance(block, TextBlock) and len(block.text) >= min_chars
-    ]
+    last_tool_idx = _last_tool_index(content)
+    sealed: list[tuple[int, str]] = []
+    runs = (
+        _text_runs(content)
+        if status_log_enabled()
+        else [(i, [block]) for i, block in enumerate(content) if isinstance(block, TextBlock)]
+    )
+    for index, blocks in runs:
+        if index + len(blocks) > last_tool_idx:
+            break
+        text = join_messages(_answer_texts(blocks, keep_last=False))
+        if len(text) >= min_chars:
+            sealed.append((index, text))
+    return sealed

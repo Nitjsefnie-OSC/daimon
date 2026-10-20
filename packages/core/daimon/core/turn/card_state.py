@@ -9,7 +9,12 @@ from typing import Literal
 
 from daimon.core.platform_words import scrub_other_platforms
 from daimon.core.turn.state import TurnState
-from daimon.core.turn.status_lines import format_draft, format_tool_lines, has_running_tool
+from daimon.core.turn.status_lines import (
+    format_draft,
+    format_tool_lines,
+    has_running_tool,
+    roll_draft,
+)
 
 
 class TurnPhase(Enum):
@@ -29,8 +34,11 @@ class CardEvent:
     """An event fed into the embed state machine.
 
     kind discriminates the event:
-    - "message": agent emitted intermediate text; label is the full text
-      (flattened and clipped to the draft length in ``update``)
+    - "message": agent emitted a whole message; label is the full text
+      (flattened and clipped to the draft length in ``update``) and joins
+      the draft log
+    - "draft": the same text revised in place (a provider's preview of the
+      message in progress); replaces the latest draft line
     - "done": turn completed successfully
     - "error": turn failed; label is the error description
 
@@ -38,7 +46,7 @@ class CardEvent:
     turn state on each render.
     """
 
-    kind: Literal["message", "done", "error"]
+    kind: Literal["message", "draft", "done", "error"]
     label: str = ""
 
 
@@ -61,6 +69,9 @@ class CardState:
     cost_str: str | None = None
     balance_str: str | None = None
     text_preview: str | None = None
+    """The latest draft line."""
+    earlier_drafts: tuple[str, ...] = ()
+    """The draft lines before ``text_preview`` that the card still shows, oldest first."""
     error_reason: str = ""
     """Internal failure label from the event; never rendered directly."""
     notice_title: str = ""
@@ -75,14 +86,18 @@ _TERMINAL_PHASES = frozenset({TurnPhase.DONE, TurnPhase.ERROR})
 def update(state: CardState, event: CardEvent) -> CardState:
     """Return a new CardState with event applied.
 
-    A message replaces the draft shown under the tool lines; an empty one
-    keeps the last draft. done and error move to the terminal phases.
+    A message joins the draft log shown under the tool lines (the last few
+    lines, oldest first); an empty one changes nothing. A draft revises the
+    latest line. done and error move to the terminal phases.
     """
-    if event.kind == "message":
+    if event.kind in ("message", "draft"):
         if not event.label:
             return state
         draft = format_draft(scrub_other_platforms(event.label, state.platform))
-        return dataclasses.replace(state, text_preview=draft)
+        if event.kind == "draft":
+            return dataclasses.replace(state, text_preview=draft)
+        earlier, latest = roll_draft(state.earlier_drafts, state.text_preview, draft)
+        return dataclasses.replace(state, earlier_drafts=earlier, text_preview=latest)
     if event.kind == "done":
         return dataclasses.replace(state, phase=TurnPhase.DONE)
     return dataclasses.replace(state, phase=TurnPhase.ERROR, error_reason=event.label or "error")

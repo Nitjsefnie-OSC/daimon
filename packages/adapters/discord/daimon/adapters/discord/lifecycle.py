@@ -60,6 +60,8 @@ from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
     extract_sealed_responses,
+    final_answer_texts,
+    join_messages,
 )
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
@@ -601,7 +603,7 @@ class DiscordTurnLifecycle:
         text = self._provider_draft.text(event)
         if text is not None:
             self._state = (
-                update(self._state, EmbedEvent(kind="message", label=text))
+                update(self._state, EmbedEvent(kind="draft", label=text))
                 if text
                 else dataclasses.replace(self._state, text_preview=None)
             )
@@ -917,7 +919,7 @@ class DiscordTurnLifecycle:
         return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
-        """Render the one status embed: headline, tool lines and the latest draft."""
+        """Render the one status embed: headline, tool lines and the last few draft lines."""
         embed = build_discord_embed(to_embed_data(self._state, now=now))
         if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
             embed.title = "Queued — waiting for a free slot…"
@@ -1182,20 +1184,15 @@ class DiscordTurnLifecycle:
         return discord.File(io.BytesIO(text.encode("utf-8")), filename="answer.txt")
 
     def _final_response(self, state: TurnState) -> str:
-        # Collapse adjacent identical final text blocks before joining them.
-        last_tool = max(
-            (i for i, block in enumerate(state.content) if isinstance(block, ToolUseBlock)),
-            default=-1,
-        )
+        # Collapse adjacent identical final messages before joining them.
         texts: list[str] = []
         previous = self._last_sealed_text
-        for block in state.content[last_tool + 1 :]:
-            if isinstance(block, TextBlock):
-                text = block.text.strip()
-                if not text or text != previous:
-                    texts.append(block.text)
-                previous = text
-        text = "".join(texts)
+        for message in final_answer_texts(state.content):
+            text = message.strip()
+            if not text or text != previous:
+                texts.append(message)
+            previous = text
+        text = join_messages(texts)
         if _pure_tool_markup(text):
             log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
             text = "" if self._unprompted else _TOOL_MARKUP_NOTICE

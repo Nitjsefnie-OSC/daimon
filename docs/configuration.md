@@ -1243,6 +1243,19 @@ Capture complete scoped source and resource intent for an agent-selected native 
 Unproved obligations are refused; counterpart identity readback alone never authorizes
 execution. Requires mux and channel_backends; off by default.
 
+### `DAIMON_TURN__STATUS_LOG`
+
+`bool` · optional · default `False`
+
+Show an agent's recent short updates on the "Working on it…" card, and keep them out of
+its answer. Off by default: the card shows only the latest line the agent wrote, and
+consecutive messages from the agent are joined into one block of text. On (Discord,
+Slack and Teams): the card shows the last three messages the agent wrote, oldest first,
+each cut to one line; each message stays its own block, so a one-line message that
+starts with an emoji (such as "🔍 Looking up: priors") written right before the answer
+stays on the card and out of the answer, and separate messages in an answer are set
+apart by a blank line.
+
 ## Thread Naming
 
 Read from `daimon.core.config.ThreadNamingSettings`. Prefix `DAIMON_THREAD_NAMING__`.

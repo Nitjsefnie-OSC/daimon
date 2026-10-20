@@ -1,7 +1,7 @@
 """Words for the in-progress turn card, shared by the chat adapters.
 
 Discord and Slack both draw a headline, a code block of tool lines and
-the latest draft from the same `TurnState`; this module owns the words so the
+the last few draft lines from the same `TurnState`; this module owns the words so the
 two cards cannot drift, and each adapter adds only its own markup. A tool
 line names the tool and never shows its arguments.
 """
@@ -13,11 +13,13 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from daimon.core.turn.outcomes import current_outcome
-from daimon.core.turn.state import ContentBlock, ToolUseBlock
+from daimon.core.turn.state import STATUS_LINE_MAX_CHARS, ContentBlock, ToolUseBlock
+from daimon.core.turn.status_log import status_log_enabled
 from mux.profiles import get_profile
 
 MAX_TOOL_LINES = 6
-DRAFT_MAX_CHARS = 300
+DRAFT_MAX_CHARS = STATUS_LINE_MAX_CHARS
+DRAFT_LOG_LINES = 3
 _LABEL_MAX_CHARS = 48
 # Em spaces: chat clients collapse runs of plain spaces but keep these.
 SUMMARY_GAP = "\u2003\u2003"
@@ -115,6 +117,26 @@ def format_draft(text: str) -> str:
     """The draft on one line, clipped, so a single quote marker covers all of it."""
     flat = " ".join(text.split())
     return flat[:DRAFT_MAX_CHARS] + "…" if len(flat) > DRAFT_MAX_CHARS else flat
+
+
+def roll_draft(earlier: Sequence[str], latest: str | None, new: str) -> tuple[tuple[str, ...], str]:
+    """Add ``new`` to the draft log: ``(earlier lines, latest line)``.
+
+    The log keeps the last ``DRAFT_LOG_LINES`` lines, so at most that many
+    including ``new``; a line equal to the latest one is not added twice.
+    With `turn.status_log` off, only the latest line is kept.
+    """
+    if not status_log_enabled():
+        return (), new
+    if new == latest:
+        return tuple(earlier), new
+    lines = (*earlier, latest) if latest else tuple(earlier)
+    return lines[-(DRAFT_LOG_LINES - 1) :], new
+
+
+def draft_log(earlier: Sequence[str], latest: str | None) -> tuple[str, ...]:
+    """The lines a card shows under its tool lines, oldest first."""
+    return (*earlier, latest) if latest else tuple(earlier)
 
 
 def has_running_tool(content: Sequence[ContentBlock]) -> bool:

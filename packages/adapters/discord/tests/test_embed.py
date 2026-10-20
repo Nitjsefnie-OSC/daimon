@@ -5,6 +5,7 @@ from __future__ import annotations
 import dataclasses
 from typing import Literal
 
+import pytest
 from daimon.adapters.discord.embed import (
     EmbedEvent,
     EmbedState,
@@ -165,6 +166,19 @@ class TestToEmbedData:
         assert data.title == "Working on it…"
         assert data.description == "> Checking \\*the\\* logs"
         assert data.details == "`✔️ Ran a command`\n`🔍 Reading a file`"
+
+    @pytest.mark.usefixtures("status_log_on")
+    def test_in_progress_quotes_the_last_three_draft_lines_oldest_first(self) -> None:
+        state = _make_state(phase=TurnPhase.THINKING)
+        for line in ("one", "two", "three", "four"):
+            state = update(state, EmbedEvent(kind="message", label=line))
+        assert to_embed_data(state, now=1.0).description == "> two\n> three\n> four"
+
+    def test_by_default_in_progress_shows_only_the_latest_draft_line(self) -> None:
+        state = _make_state(phase=TurnPhase.THINKING)
+        for line in ("one", "two", "three"):
+            state = update(state, EmbedEvent(kind="message", label=line))
+        assert to_embed_data(state, now=1.0).description == "> three"
 
     def test_tool_line_markdown_stays_in_inline_code(self) -> None:
         state = dataclasses.replace(

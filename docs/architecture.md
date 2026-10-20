@@ -1012,6 +1012,19 @@ which calls become platform edits: 10 s on Discord, 5 s on Slack and Teams. The
 finalizers' render after the terminal event stays guarded, so it runs only if
 that event changed the state.
 
+Managed Agents delivers each `agent.message` whole (its streamed deltas are
+previews that never reach the reducer). With `DAIMON_TURN__STATUS_LOG` off, the
+default, the reducer joins consecutive messages into one text block, the answer
+is every text after the last tool call, and the status card shows the latest
+line. With it on, the reducer keeps every message as its own text block; a
+one-line message of at most 300 characters that starts with an emoji or other
+pictograph, just before the answer (a status line such as "🔍 Looking up:
+priors"), is left out of the answer, any other message stays however short, and
+separate messages in the answer are set apart by a blank line. The status card
+on Discord, Slack and Teams then shows the last three messages as a small log
+under the tool lines, oldest first, each clipped to one line of 300 characters.
+`daimon.core.turn.status_log` holds the switch.
+
 Stop also opens its SSE subscription before sending `user.interrupt`, so an
 immediate idle acknowledgement is observed. The interrupt and acknowledgement
 wait are bounded by the same 120-second timeout; the subscription closes when
