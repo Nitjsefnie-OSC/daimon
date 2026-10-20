@@ -10,6 +10,7 @@ stamping a database that already has the new schema.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
 import re
 import secrets
@@ -48,15 +49,30 @@ CHAIN = [
     HEAD,
 ]
 # The preview chain before the ID repair: each legacy revision ran the
-# canonical script under its own ID and parent.
+# canonical script under its own ID and parent. The sha256 pins the bytes
+# preview databases ran, so an edit to a deployed canonical script fails here
+# instead of silently changing the historical chain.
 PREVIEW_CHAIN = {
-    "0110_cold_dm_agent": ("0111_cold_dm_agent", FORK),
-    "0111_routine_dm_destination": ("0112_routine_dm_destination", "0110_cold_dm_agent"),
+    "0110_cold_dm_agent": (
+        "0111_cold_dm_agent",
+        FORK,
+        "0dd1c622c56c93b5a37aeebd0f1dff4bbdf369f900c84bc82c0eea409b6f32d8",
+    ),
+    "0111_routine_dm_destination": (
+        "0112_routine_dm_destination",
+        "0110_cold_dm_agent",
+        "c6847980363d5509ef1e6d0181796a1c41dd564b3ed304235bff7e36a29cf318",
+    ),
     "0112_unattended_turn_provenance": (
         "0113_unattended_turn_provenance",
         "0111_routine_dm_destination",
+        "c5738445743c6b1d854199720f01b99c341169395a8072633b07bff193f89fe6",
     ),
-    "0113_microsoft_accounts": (MAIN, "0112_unattended_turn_provenance"),
+    "0113_microsoft_accounts": (
+        MAIN,
+        "0112_unattended_turn_provenance",
+        "5c531e579a7475a174797ce30fe031e716fc7917aa6e0359de74d416405a50b9",
+    ),
 }
 TABLES = {
     "microsoft_user_tokens",
@@ -94,7 +110,7 @@ def _historical_scripts(tmp_path: Path) -> Path:
     for source in (SCRIPTS / "versions").glob("*.py"):
         if source.stem not in CHAIN:
             shutil.copy(source, versions / source.name)
-    for legacy, (canonical, parent) in PREVIEW_CHAIN.items():
+    for legacy, (canonical, parent, digest) in PREVIEW_CHAIN.items():
         script = (SCRIPTS / "versions" / f"{canonical}.py").read_text()
         script, revisions = re.subn(
             r'^revision: str = ".*"$', f'revision: str = "{legacy}"', script, flags=re.M
@@ -106,6 +122,9 @@ def _historical_scripts(tmp_path: Path) -> Path:
             flags=re.M,
         )
         assert revisions == parents == 1
+        assert hashlib.sha256(script.encode()).hexdigest() == digest, (
+            f"{canonical} no longer matches what preview ran as {legacy}"
+        )
         (versions / f"{legacy}.py").write_text(script)
     return scripts
 
@@ -155,6 +174,11 @@ def test_authoritative_chain() -> None:
         assert node is not None and node.down_revision == parent
         assert Path(node.path).stem == revision
         parent = revision
+
+
+def test_historical_scripts_match_what_preview_ran(tmp_path: Path) -> None:
+    versions = _historical_scripts(tmp_path) / "versions"
+    assert {p.stem for p in versions.glob("*.py")} >= set(PREVIEW_CHAIN)
 
 
 @pytest.fixture
