@@ -302,8 +302,9 @@ async def run_turn_impl(
     3. The drain is delegated to ``daimon.core.turn.driver.run_turn`` with a
        no-op lifecycle (nothing to render to), ``tool_confirmation`` from
        ``unattended_posture(tool_safety, ...)`` (nobody is here to press
-       Approve: reads run and writes are refused unless the operator allowed
-       them; ``daimon.core.turn.unattended`` has the rest), each send gated
+       Approve: with the policy on, reads run and writes are refused unless
+       the operator allowed them; with it off, ordinary third-party calls
+       run; ``daimon.core.turn.unattended`` has the rest), each send gated
        first and sent once
        (`unattended_sends`), ``deadline=effective_deadline``
        (the same instant that bounded step 1/2's assembly, so the driver's own
