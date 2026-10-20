@@ -17,7 +17,11 @@ from daimon.adapters.cli.output import emit_rows, render_json
 from daimon.adapters.cli.prompt import confirm_or_abort
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
 from daimon.core import channel_backend
-from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.access_policy import (
+    OPEN_ACCESS_POLICY,
+    TenantAccessPolicy,
+    is_discord_snowflake,
+)
 from daimon.core.config import load_settings
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -809,14 +813,7 @@ async def tenants_access_policy_set(
         if validated_platform != "discord":
             raise typer.BadParameter("invoker_role_ids are supported only for Discord")
         roles = tuple(value.strip() for value in invoker_role)
-        if any(
-            not value.isascii()
-            or not value.isdecimal()
-            or not 0 < int(value) < 2**64
-            or str(int(value)) != value
-            or value == external_id
-            for value in roles
-        ):
+        if any(not is_discord_snowflake(value) or value == external_id for value in roles):
             raise typer.BadParameter(
                 "invoker_role_ids: expected Discord snowflakes excluding @everyone (guild id)"
             )
