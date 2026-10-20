@@ -98,7 +98,7 @@ class TestUpdate:
         state = update(_make_state(), EmbedEvent(kind="message", label="short"))
         state = update(state, EmbedEvent(kind="message", label="y" * 400))
         assert state.earlier_drafts == ("short",)
-        assert state.text_preview == "y" * 300 + "…"
+        assert state.text_preview == "y" * 120 + "…"
 
     def test_a_draft_event_revises_the_latest_line_without_growing_the_log(self) -> None:
         state = update(_make_state(), EmbedEvent(kind="message", label="one"))
@@ -236,6 +236,32 @@ class TestToBlocks:
         shown = range(max(1, count - 2), count + 1)
         assert draft["text"]["text"] == "\n".join(f"> 🔍 **step** {n} &lt;x&gt;" for n in shown)
         assert draft.get("expand") is True
+
+    @pytest.mark.usefixtures("status_log_on")
+    def test_three_worst_case_escaped_lines_fit_a_slack_section(self) -> None:
+        state = _make_state(phase=TurnPhase.TOOL_RUNNING)
+        for _ in range(3):
+            state = update(state, EmbedEvent(kind="message", label="&" * 400 + "x"))
+            state = update(state, EmbedEvent(kind="message", label="<" * 400))
+        draft = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]
+        assert len(draft["text"]["text"]) <= 3000
+
+    def test_a_draft_log_over_the_section_limit_loses_its_oldest_lines_first(self) -> None:
+        state = replace(
+            _make_state(phase=TurnPhase.TOOL_RUNNING),
+            earlier_drafts=("&" * 400, "&" * 400),
+            text_preview="&" * 400,
+        )
+        text = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]["text"]["text"]
+        assert len(text) <= 3000
+        assert text.endswith("&amp;" * 400)
+        assert text.count("\n") < 2, "an oldest line was dropped to fit"
+
+    def test_one_line_over_the_section_limit_is_cut_after_escaping(self) -> None:
+        state = replace(_make_state(phase=TurnPhase.TOOL_RUNNING), text_preview="&" * 900)
+        text = _find_blocks_by_type(to_blocks(state, now=None), "section")[-1]["text"]["text"]
+        assert len(text) <= 3000
+        assert text.endswith("&amp;…")
 
     def test_done_state_has_no_cancel_button(self) -> None:
         """DONE (terminal) state must not have an actions block."""

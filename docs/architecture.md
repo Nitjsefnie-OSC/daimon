@@ -1016,13 +1016,15 @@ Managed Agents delivers each `agent.message` whole (its streamed deltas are
 previews that never reach the reducer). With `DAIMON_TURN__STATUS_LOG` off, the
 default, the reducer joins consecutive messages into one text block, the answer
 is every text after the last tool call, and the status card shows the latest
-line. With it on, the reducer keeps every message as its own text block; a
-one-line message of at most 300 characters that starts with an emoji or other
-pictograph, just before the answer (a status line such as "🔍 Looking up:
-priors"), is left out of the answer, any other message stays however short, and
-separate messages in the answer are set apart by a blank line. The status card
-on Discord, Slack and Teams then shows the last three messages as a small log
-under the tool lines, oldest first, each clipped to one line of 300 characters.
+line. With it on, the reducer keeps every message as its own text block, an
+answer of several messages keeps every one set apart by a blank line (a run of
+messages before a tool call is one candidate for a sealed answer, joined the
+same way, so Discord compares like with like when it drops a repeat), and the
+status card on Discord, Slack and Teams shows the last three messages as a
+small log under the tool lines, oldest first, each cut to one line of 120
+characters. On Slack the log's section is also held under Slack's 3,000
+character limit after escaping. For a non-Anthropic provider, each new message
+item starts a new entry and its previews and snapshots revise that entry.
 `daimon.core.turn.status_log` holds the switch.
 
 Stop also opens its SSE subscription before sending `user.interrupt`, so an

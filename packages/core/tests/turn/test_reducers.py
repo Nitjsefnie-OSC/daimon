@@ -126,7 +126,7 @@ def test_apply_keeps_consecutive_agent_messages_as_separate_text_blocks() -> Non
 
 
 @pytest.mark.usefixtures("status_log_on")
-def test_status_lines_between_tools_leave_the_answer_clean() -> None:
+def test_messages_after_the_last_tool_are_kept_apart_not_glued() -> None:
     state = TurnState()
     events = [
         make_agent_message(event_id="m1", text="🔍 **Looking up:** saturation priors"),
@@ -138,7 +138,9 @@ def test_status_lines_between_tools_leave_the_answer_clean() -> None:
     ]
     for event in events:
         state = apply(state, event)
-    assert extract_final_response(state.content) == "Priors on saturation are usually Beta."
+    assert extract_final_response(state.content) == (
+        "📚 **Found:** 14 patterns\n\nPriors on saturation are usually Beta."
+    )
     assert extract_sealed_responses(state.content, min_chars=500) == []
 
 

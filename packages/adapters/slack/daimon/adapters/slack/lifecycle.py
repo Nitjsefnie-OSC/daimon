@@ -376,7 +376,13 @@ class SlackTurnLifecycle:
         text = self._provider_draft.text(event)
         if text is not None:
             self._state = (
-                update(self._state, EmbedEvent(kind="draft", label=text))
+                update(
+                    self._state,
+                    EmbedEvent(
+                        kind="message" if self._provider_draft.takes_new_item() else "draft",
+                        label=text,
+                    ),
+                )
                 if text
                 else dataclasses.replace(self._state, text_preview=None)
             )

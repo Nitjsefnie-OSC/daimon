@@ -269,8 +269,15 @@ def native_budget():
     return None
 
 
+@pytest.fixture(autouse=True)
+def _status_log_off() -> Iterator[None]:
+    """Pin `turn.status_log` off, so the environment cannot change what a test sees."""
+    with status_log_override(False):
+        yield
+
+
 @pytest.fixture
-def status_log_on() -> Iterator[None]:
+def status_log_on(_status_log_off: None) -> Iterator[None]:
     """Run a test with `turn.status_log` on; every other test runs with it off."""
     with status_log_override(True):
         yield

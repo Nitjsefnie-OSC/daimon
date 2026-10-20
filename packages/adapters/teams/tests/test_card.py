@@ -83,3 +83,9 @@ def test_by_default_the_card_shows_only_the_latest_draft_line() -> None:
     for number in range(1, 5):
         state = card.on_message(state, f"🔍 step {number}")
     assert _draft_text(state) == "🔍 step 4"
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_with_the_log_on_a_draft_line_is_cut_to_120_characters() -> None:
+    state = card.on_message(card.CardState(started_at=100.0), "z" * 400)
+    assert _draft_text(state) == "z" * 120 + "…"

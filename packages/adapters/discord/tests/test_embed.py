@@ -174,6 +174,15 @@ class TestToEmbedData:
             state = update(state, EmbedEvent(kind="message", label=line))
         assert to_embed_data(state, now=1.0).description == "> two\n> three\n> four"
 
+    @pytest.mark.usefixtures("status_log_on")
+    def test_three_worst_case_escaped_lines_fit_an_embed_description(self) -> None:
+        state = _make_state(phase=TurnPhase.THINKING)
+        for _ in range(3):
+            state = update(state, EmbedEvent(kind="message", label="*" * 400))
+            state = update(state, EmbedEvent(kind="message", label="`" * 400))
+        description = to_embed_data(state, now=1.0).description
+        assert len(description) <= 4096
+
     def test_by_default_in_progress_shows_only_the_latest_draft_line(self) -> None:
         state = _make_state(phase=TurnPhase.THINKING)
         for line in ("one", "two", "three"):

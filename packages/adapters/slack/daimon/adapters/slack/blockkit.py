@@ -101,6 +101,33 @@ def _headline(state: State, now: float | None, *, bold: Callable[[str], str]) ->
     )
 
 
+# Slack refuses a section whose text is longer than this.
+_SECTION_TEXT_MAX_CHARS = 3000
+
+
+def _draft_quote(lines: tuple[str, ...]) -> str:
+    """The draft lines as one quoted mrkdwn text of at most `_SECTION_TEXT_MAX_CHARS`.
+
+    Escaping grows a line (``&`` becomes ``&amp;``), so the size is judged after
+    it. Over the limit, the oldest lines go first; a last line that is still too
+    long is cut so that its escaped form fits.
+    """
+    quoted = [f"> {escape_mrkdwn(line)}" for line in lines]
+    while len(quoted) > 1 and len("\n".join(quoted)) > _SECTION_TEXT_MAX_CHARS:
+        quoted.pop(0)
+    text = "\n".join(quoted)
+    if len(text) <= _SECTION_TEXT_MAX_CHARS:
+        return text
+    kept: list[str] = []
+    room = _SECTION_TEXT_MAX_CHARS - len("> …")
+    for char in lines[-1]:
+        room -= len(escape_mrkdwn(char))
+        if room < 0:
+            break
+        kept.append(char)
+    return f"> {escape_mrkdwn(''.join(kept))}…"
+
+
 def to_blocks(
     state: State,
     *,
@@ -196,12 +223,11 @@ def to_blocks(
     # expand=True keeps Slack from folding the draft log behind "see more".
     draft_lines = draft_log(state.earlier_drafts, state.text_preview)
     if draft_lines:
-        quoted = "\n".join(f"> {escape_mrkdwn(line)}" for line in draft_lines)
         blocks.append(
             {
                 "type": "section",
                 "expand": True,
-                "text": {"type": "mrkdwn", "text": quoted},
+                "text": {"type": "mrkdwn", "text": _draft_quote(draft_lines)},
             }
         )
 

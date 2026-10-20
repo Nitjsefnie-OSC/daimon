@@ -112,127 +112,6 @@ class TestExtractFinalResponse:
         ]
         assert extract_final_response(content) == "Hello world"
 
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_status_line_before_the_answer_is_left_out(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="🔍 **Looking up:** saturation priors"),
-            _tool("tu_1"),
-            TextBlock(kind="text", text="📚 **Found:** 14 patterns | top area: diagnostics"),
-            TextBlock(kind="text", text="Priors on saturation are usually Beta.\n\nSee below."),
-        ]
-        assert (
-            extract_final_response(content)
-            == "Priors on saturation are usually Beta.\n\nSee below."
-        )
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_several_status_lines_before_the_answer_are_left_out(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="🔍 one"),
-            TextBlock(kind="text", text="📚 two"),
-            TextBlock(kind="text", text="The answer."),
-        ]
-        assert extract_final_response(content) == "The answer."
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_short_last_message_is_always_the_answer(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="📚 Found: 14 patterns"),
-            TextBlock(kind="text", text="Yes."),
-        ]
-        assert extract_final_response(content) == "Yes."
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_long_message_before_the_answer_stays_and_is_set_apart(self) -> None:
-        long_line = "x" * 301
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text=long_line),
-            TextBlock(kind="text", text="Done."),
-        ]
-        assert extract_final_response(content) == f"{long_line}\n\nDone."
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_multi_line_message_before_the_answer_is_not_a_status_line(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="Plan:\n- one\n- two"),
-            TextBlock(kind="text", text="Done."),
-        ]
-        assert extract_final_response(content) == "Plan:\n- one\n- two\n\nDone."
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_short_plain_message_before_the_answer_is_kept_and_set_apart(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="Yes."),
-            TextBlock(kind="text", text="The saturation prior is Beta(2, 2)."),
-        ]
-        assert extract_final_response(content) == "Yes.\n\nThe saturation prior is Beta(2, 2)."
-
-    @pytest.mark.usefixtures("status_log_on")
-    @pytest.mark.parametrize("opener", ["Done", "- item", "**Bold**", "1. first", "> quote", "…"])
-    def test_a_short_message_not_opening_with_an_emoji_is_never_dropped(self, opener: str) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text=opener),
-            TextBlock(kind="text", text="The answer."),
-        ]
-        assert extract_final_response(content) == f"{opener}\n\nThe answer."
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_status_line_with_markdown_after_the_emoji_is_left_out(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="⚠️ **Issue found:** x"),
-            TextBlock(kind="text", text="The answer."),
-        ]
-        assert extract_final_response(content) == "The answer."
-
-    @pytest.mark.usefixtures("status_log_on")
-    @pytest.mark.parametrize("emoji", ["🔍", "📚", "⚠️", "🔧", "💻", "✅", "📊", "⏳", "✔️"])
-    def test_emoji_openers_with_or_without_a_variation_selector_are_status_lines(
-        self, emoji: str
-    ) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text=f"  {emoji} working"),
-            TextBlock(kind="text", text="The answer."),
-        ]
-        assert extract_final_response(content) == "The answer."
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_variation_selector_after_a_letter_does_not_make_a_status_line(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="A\ufe0f note"),
-            TextBlock(kind="text", text="The answer."),
-        ]
-        assert extract_final_response(content) == "A\ufe0f note\n\nThe answer."
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_status_line_that_is_the_last_message_is_kept(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="The answer is below.\nSecond line."),
-            TextBlock(kind="text", text="✅ Done"),
-        ]
-        assert extract_final_response(content) == "The answer is below.\nSecond line.\n\n✅ Done"
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_blank_message_before_the_answer_is_left_out(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text=" "),
-            TextBlock(kind="text", text="The answer."),
-        ]
-        assert extract_final_response(content) == "The answer."
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_lone_message_is_returned_untouched(self) -> None:
-        content: list[ContentBlock] = [TextBlock(kind="text", text="  padded\n")]
-        assert extract_final_response(content) == "  padded\n"
-
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_status_line_before_a_tool_is_not_in_the_final_response(self) -> None:
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text="📚 Found: 14 patterns"),
-            _tool("tu_1"),
-            TextBlock(kind="text", text="The answer."),
-        ]
-        assert extract_final_response(content) == "The answer."
-
     def test_empty_content_returns_empty_string(self) -> None:
         assert extract_final_response([]) == ""
 
@@ -307,19 +186,52 @@ class TestExtractSealedResponses:
     def test_empty_content_returns_empty_list(self) -> None:
         assert extract_sealed_responses([], min_chars=500) == []
 
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_status_line_beside_a_sealed_answer_is_left_out(self) -> None:
-        answer = "x" * 600
-        content: list[ContentBlock] = [
-            TextBlock(kind="text", text=answer),
-            TextBlock(kind="text", text="🔍 Looking up: saturation priors"),
-            _tool("tu_1"),
-            TextBlock(kind="text", text="Recap."),
-        ]
-        assert extract_sealed_responses(content, min_chars=500) == [(0, answer)]
 
-    @pytest.mark.usefixtures("status_log_on")
-    def test_consecutive_messages_are_one_candidate_set_apart_by_a_blank_line(self) -> None:
+@pytest.mark.usefixtures("status_log_on")
+class TestAnswersWithTheStatusLogOn:
+    """Every message after the last tool is kept, set apart by a blank line."""
+
+    def test_the_answer_is_every_message_after_the_last_tool_set_apart_by_a_blank_line(
+        self,
+    ) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text="🔍 **Looking up:** saturation priors"),
+            _tool("tu_1"),
+            TextBlock(kind="text", text="📚 **Found:** 14 patterns"),
+            TextBlock(kind="text", text="Priors on saturation are usually Beta."),
+        ]
+        assert extract_final_response(content) == (
+            "📚 **Found:** 14 patterns\n\nPriors on saturation are usually Beta."
+        )
+
+    def test_an_emoji_led_message_of_real_answer_text_is_never_dropped(self) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text="⚠️ Do not run this against production."),
+            TextBlock(kind="text", text="Run it against staging."),
+        ]
+        assert extract_final_response(content) == (
+            "⚠️ Do not run this against production.\n\nRun it against staging."
+        )
+
+    def test_messages_are_not_glued(self) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text="First"),
+            TextBlock(kind="text", text="second"),
+        ]
+        assert extract_final_response(content) == "First\n\nsecond"
+
+    def test_a_blank_message_adds_nothing(self) -> None:
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text=" "),
+            TextBlock(kind="text", text="The answer."),
+        ]
+        assert extract_final_response(content) == "The answer."
+
+    def test_a_lone_message_is_returned_untouched(self) -> None:
+        content: list[ContentBlock] = [TextBlock(kind="text", text="  padded\n")]
+        assert extract_final_response(content) == "  padded\n"
+
+    def test_a_run_of_messages_before_a_tool_is_one_sealed_candidate(self) -> None:
         first = "a" * 250
         second = "b" * 250
         content: list[ContentBlock] = [
@@ -329,18 +241,18 @@ class TestExtractSealedResponses:
         ]
         assert extract_sealed_responses(content, min_chars=500) == [(0, f"{first}\n\n{second}")]
 
-    @pytest.mark.usefixtures("status_log_on")
-    def test_a_short_plain_message_in_a_sealed_run_is_kept(self) -> None:
+    def test_a_sealed_run_keeps_a_short_message_beside_a_long_one(self) -> None:
         answer = "x" * 600
         content: list[ContentBlock] = [
-            TextBlock(kind="text", text="Yes."),
+            TextBlock(kind="text", text="🔍 Looking up: priors"),
             TextBlock(kind="text", text=answer),
             _tool("tu_1"),
         ]
-        assert extract_sealed_responses(content, min_chars=500) == [(0, f"Yes.\n\n{answer}")]
+        assert extract_sealed_responses(content, min_chars=500) == [
+            (0, f"🔍 Looking up: priors\n\n{answer}")
+        ]
 
-    @pytest.mark.usefixtures("status_log_on")
-    def test_status_lines_alone_are_not_sealed(self) -> None:
+    def test_short_messages_alone_are_not_sealed(self) -> None:
         content: list[ContentBlock] = [
             TextBlock(kind="text", text="🔍 one"),
             TextBlock(kind="text", text="📚 two"),

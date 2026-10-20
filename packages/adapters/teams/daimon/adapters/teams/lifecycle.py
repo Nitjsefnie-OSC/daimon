@@ -392,7 +392,13 @@ class TeamsTurnLifecycle:
         text = self._provider_draft.text(event)
         if text is not None:
             self._state = (
-                card.on_draft(self._state, text) if text else replace(self._state, draft=None)
+                (
+                    card.on_message(self._state, text)
+                    if self._provider_draft.takes_new_item()
+                    else card.on_draft(self._state, text)
+                )
+                if text
+                else replace(self._state, draft=None)
             )
 
     async def on_render(self, state: TurnState) -> None:

@@ -342,3 +342,13 @@ def test_with_the_switch_off_the_draft_keeps_only_the_latest_line() -> None:
     for line in ("one", "two", "three"):
         earlier, latest = roll_draft(earlier, latest, line)
     assert draft_log(earlier, latest) == ("three",)
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_with_the_log_on_each_entry_is_cut_to_120_characters() -> None:
+    assert format_draft("x" * 121) == "x" * 120 + "…"
+    assert format_draft("x" * 120) == "x" * 120
+
+
+def test_by_default_a_draft_is_cut_to_300_characters() -> None:
+    assert format_draft("x" * 301) == "x" * 300 + "…"

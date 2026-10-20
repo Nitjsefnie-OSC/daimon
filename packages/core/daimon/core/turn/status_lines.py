@@ -13,13 +13,15 @@ from collections.abc import Callable, Mapping, Sequence
 from dataclasses import dataclass
 
 from daimon.core.turn.outcomes import current_outcome
-from daimon.core.turn.state import STATUS_LINE_MAX_CHARS, ContentBlock, ToolUseBlock
+from daimon.core.turn.state import ContentBlock, ToolUseBlock
 from daimon.core.turn.status_log import status_log_enabled
 from mux.profiles import get_profile
 
 MAX_TOOL_LINES = 6
-DRAFT_MAX_CHARS = STATUS_LINE_MAX_CHARS
+DRAFT_MAX_CHARS = 300
 DRAFT_LOG_LINES = 3
+# Each entry of the draft log, when `turn.status_log` is on: three of them share the card.
+DRAFT_LOG_ENTRY_MAX_CHARS = 120
 _LABEL_MAX_CHARS = 48
 # Em spaces: chat clients collapse runs of plain spaces but keep these.
 SUMMARY_GAP = "\u2003\u2003"
@@ -114,9 +116,14 @@ def format_headline(
 
 
 def format_draft(text: str) -> str:
-    """The draft on one line, clipped, so a single quote marker covers all of it."""
+    """The draft on one line, clipped, so a single quote marker covers all of it.
+
+    Clipped to ``DRAFT_MAX_CHARS``, or to ``DRAFT_LOG_ENTRY_MAX_CHARS`` when
+    `turn.status_log` is on and the card shows several lines.
+    """
+    limit = DRAFT_LOG_ENTRY_MAX_CHARS if status_log_enabled() else DRAFT_MAX_CHARS
     flat = " ".join(text.split())
-    return flat[:DRAFT_MAX_CHARS] + "…" if len(flat) > DRAFT_MAX_CHARS else flat
+    return flat[:limit] + "…" if len(flat) > limit else flat
 
 
 def roll_draft(earlier: Sequence[str], latest: str | None, new: str) -> tuple[tuple[str, ...], str]:
