@@ -35,7 +35,7 @@ def upgrade() -> None:
         sa.Column("set_at", sa.DateTime(timezone=True), nullable=False),
         sa.Column("via", sa.Text(), nullable=False),
         sa.ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
-        sa.CheckConstraint("via IN ('mcp', 'cli')", name="ck_routine_sandbox_history_via"),
+        sa.CheckConstraint("via IN ('mcp', 'cli', 'edit')", name="ck_routine_sandbox_history_via"),
     )
     op.create_index(
         "ix_routine_sandbox_history_routine",

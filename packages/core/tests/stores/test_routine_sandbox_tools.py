@@ -11,8 +11,10 @@ from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     create_routine,
     get_routine,
+    pause_routine,
     sandbox_tools_history,
     set_sandbox_tools,
+    update_routine,
 )
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
@@ -155,3 +157,55 @@ async def test_another_tenant_cannot_reach_the_routine(
         )
         is None
     )
+
+
+async def _opted_in(session: AsyncSession, tenant_id: uuid.UUID) -> RoutineRow:
+    row = await _routine(session, tenant_id)
+    result = await set_sandbox_tools(
+        session, row.id, tenant_id=tenant_id, enabled=True, set_by="a", actor=ADMIN, via="mcp"
+    )
+    assert result is not None
+    return result[0]
+
+
+@pytest.mark.parametrize(
+    "edit",
+    [
+        {"trigger_message": "something else"},
+        {"agent_id": "agent_b", "agent_name": "other"},
+        {"destination_kind": "channel", "destination_id": "C123", "channel_id": "C123"},
+    ],
+    ids=["prompt", "agent", "destination"],
+)
+async def test_an_owner_edit_to_what_was_approved_clears_the_opt_in(
+    db_session: AsyncSession, tenant_id: uuid.UUID, edit: dict[str, str]
+) -> None:
+    """The owner cannot carry an admin's opt-in over to a new agent, prompt or place."""
+    row = await _opted_in(db_session, tenant_id)
+
+    updated = await update_routine(
+        db_session, row.id, tenant_id=tenant_id, edited_by="owner-account", **edit
+    )
+
+    assert updated is not None
+    assert updated.sandbox_tools_enabled is False
+    assert updated.sandbox_tools_set_by == "owner-account"
+    history = await sandbox_tools_history(db_session, row.id, tenant_id=tenant_id)
+    assert [(h.via, h.before_enabled, h.after_enabled, h.set_by) for h in history] == [
+        ("mcp", False, True, "a"),
+        ("edit", True, False, "owner-account"),
+    ]
+
+
+async def test_schedule_edits_pause_and_unchanged_values_keep_the_opt_in(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await _opted_in(db_session, tenant_id)
+
+    await update_routine(db_session, row.id, tenant_id=tenant_id, cron_expr="0 10 * * *")
+    await update_routine(db_session, row.id, tenant_id=tenant_id, trigger_message="nightly")
+    await pause_routine(db_session, row.id, tenant_id=tenant_id)
+
+    after = await get_routine(db_session, row.id, tenant_id=tenant_id)
+    assert after is not None and after.sandbox_tools_enabled is True
+    assert len(await sandbox_tools_history(db_session, row.id, tenant_id=tenant_id)) == 1

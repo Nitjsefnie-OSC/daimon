@@ -170,6 +170,7 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                     expected_updated_at=row.updated_at,
                     destination_kind="dm" if self.values[0] == "dm" else None,
                     clear_destination=self.values[0] == "none",
+                    edited_by=str(interaction.user.id),
                 )
             await _rerender(interaction, self.view)
         except DaimonError as exc:

@@ -16,7 +16,7 @@ from __future__ import annotations
 import uuid as _uuid
 from collections.abc import Collection, Mapping
 from datetime import UTC, datetime, timedelta
-from typing import Any, Literal, cast
+from typing import Any, Final, Literal, cast
 
 import structlog
 from daimon.core._models import (
@@ -259,6 +259,7 @@ async def update_routine(
     clear_destination: bool = False,
     channel_id: str | None = None,
     expected_updated_at: datetime | None = None,
+    edited_by: str = "unknown",
 ) -> RoutineRow | None:
     """PATCH: `None` leaves a field alone. A destination is set as a pair, with
     the `channel_id` it resolves to; `clear_destination=True` removes the pair
@@ -266,6 +267,8 @@ async def update_routine(
     and `channel_id`, so the routine's spend still counts toward the same budget.
     A concurrent edit raises StoreError; callers can also supply the revision
     used for authorization so a stale authorized view cannot be applied.
+    `edited_by` names the editor in the sandbox history when the edit clears
+    an admin's sandbox opt-in (`_SANDBOX_MATERIAL`).
     """
     # Read exactly once: validation, erasure and the write share this revision.
     # A concurrent edit must fail the CAS rather than reuse stale classification.
@@ -325,7 +328,19 @@ async def update_routine(
     if not values:
         return current
 
-    return await _save_routine_edit(session, current, values)
+    return await _save_routine_edit(session, current, values, edited_by=edited_by)
+
+
+#: What an admin approved when opting a routine in to sandbox tools: who runs
+#: it, what it is told, and where it posts. Changing any of them clears the opt-in.
+_SANDBOX_MATERIAL: Final = (
+    "agent_id",
+    "agent_name",
+    "trigger_message",
+    "destination_kind",
+    "destination_id",
+    "channel_id",
+)
 
 
 async def _save_routine_edit(
@@ -334,8 +349,25 @@ async def _save_routine_edit(
     values: dict[str, str | bool | datetime | None],
     *,
     expected_updated_at: datetime | None = None,
+    edited_by: str = "unknown",
 ) -> RoutineRow:
-    """All configuration writers share CAS, monotone revisions and erasure."""
+    """All configuration writers share CAS, monotone revisions and erasure.
+
+    An edit that changes what an admin approved (`_SANDBOX_MATERIAL`) turns
+    the routine's sandbox opt-in off and logs it (`via="edit"`) in the same
+    transaction, so the owner cannot carry an opt-in over to a new agent,
+    prompt or destination.
+    """
+    sandbox_cleared = current.sandbox_tools_enabled and any(
+        key in values and values[key] != getattr(current, key) for key in _SANDBOX_MATERIAL
+    )
+    cleared_at = datetime.now(UTC)
+    if sandbox_cleared:
+        values.update(
+            sandbox_tools_enabled=False,
+            sandbox_tools_set_by=edited_by,
+            sandbox_tools_set_at=cleared_at,
+        )
     if expected_updated_at is not None and current.updated_at != expected_updated_at:
         raise StoreError("Routine changed while being edited; reload it and try again.")
     if current.destination_kind == "dm" or (
@@ -390,6 +422,24 @@ async def _save_routine_edit(
     orm = result.scalar_one_or_none()
     if orm is None:
         raise StoreError("Routine changed while being edited; reload it and try again.")
+    if sandbox_cleared:
+        session.add(
+            RoutineSandboxHistoryRecord(
+                tenant_id=current.tenant_id,
+                routine_id=current.id,
+                before_enabled=True,
+                after_enabled=False,
+                set_by=edited_by,
+                set_at=cleared_at,
+                via="edit",
+            )
+        )
+        log.info(
+            "routine.sandbox_tools_cleared_by_edit",
+            tenant_id=str(current.tenant_id),
+            routine_id=str(current.id),
+            edited_by=edited_by,
+        )
     await session.flush()
     return RoutineRow.model_validate(orm)
 

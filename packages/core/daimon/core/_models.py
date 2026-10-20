@@ -548,7 +548,7 @@ class RoutineSandboxHistoryRecord(Base):
     __tablename__ = "routine_sandbox_history"
     __table_args__ = (
         ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
-        CheckConstraint("via IN ('mcp', 'cli')", name="ck_routine_sandbox_history_via"),
+        CheckConstraint("via IN ('mcp', 'cli', 'edit')", name="ck_routine_sandbox_history_via"),
         Index("ix_routine_sandbox_history_routine", "tenant_id", "routine_id", "set_at"),
     )
 
