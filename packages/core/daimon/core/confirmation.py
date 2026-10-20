@@ -20,14 +20,18 @@ futures, which is fine — the turn waiting on them died with the process.
 from __future__ import annotations
 
 import asyncio
+import json
 import re
 import secrets
+import unicodedata
 import uuid
 from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
+from urllib.parse import unquote
 
+from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
     PUBLISH_TOOLS,
@@ -73,6 +77,21 @@ CONFIRMATION_TIMEOUT: Final[timedelta] = timedelta(minutes=10)
 SEND_BODY_LIMIT: Final[int] = 8000
 #: How much of that body the card shows before Details.
 _SEND_PREVIEW: Final[int] = 400
+#: Longest `microsoft_write` path the tool accepts, so the card shows all of it.
+WRITE_PATH_LIMIT: Final[int] = 500
+#: Longest `microsoft_write` body in characters (a text body's, or a JSON body's compact form).
+WRITE_BODY_LIMIT: Final[int] = 8000
+#: Longest `microsoft_write` body in UTF-8 bytes. Emoji and most CJK text cost 3 to 4 bytes a
+#: character on the card, and Teams refuses a message over about 28 KB, so a body of such text is
+#: cut shorter than WRITE_BODY_LIMIT. Together the two let Details hold the whole body. The tool
+#: refuses more than either.
+WRITE_BODY_BYTES: Final[int] = 14000
+#: Most UTF-8 bytes a `microsoft_send`'s addresses, subject, location, start, end and time zone
+#: may total. The card shows each in three places and Teams refuses a message over about 28 KB,
+#: so this keeps room for a full 8,000-character body. The tool refuses more.
+SEND_HEADER_BYTES: Final[int] = 3000
+#: Longest `microsoft_write` path the card shows before Details.
+_WRITE_PATH_PREVIEW: Final[int] = 120
 
 
 class BackendSwitchReference(BaseModel):
@@ -175,6 +194,40 @@ def _short(value: object, *, limit: int = 80) -> str:
     return text if len(text) <= limit else text[: limit - 1] + "…"
 
 
+def _plain(text: str) -> str:
+    """`text` without control, invisible (such as direction override) or line-break characters."""
+    return "".join(ch for ch in text if unicodedata.category(ch) not in {"Cc", "Cf", "Zl", "Zp"})
+
+
+def is_plain(text: str) -> bool:
+    """Whether `text` holds no control, invisible or line-break characters."""
+    return _plain(text) == text
+
+
+def _one_line(value: object, *, limit: int | None = None) -> str:
+    """A model-supplied field as one plain line, so it can't start a line of the card.
+
+    Every kind of whitespace, including each line break, becomes one space.
+    """
+    text = _plain(" ".join(str(value).split()))
+    return text if limit is None else _short(text, limit=limit)
+
+
+def _clip_middle(text: str, limit: int) -> str:
+    """`text` cut to `limit` characters in the middle, so its start and its end both show."""
+    if len(text) <= limit:
+        return text
+    head = (limit - 1) // 3
+    return f"{text[:head]}…{text[len(text) - (limit - 1 - head) :]}"
+
+
+def _preview(text: str) -> str:
+    """The first `_SEND_PREVIEW` characters of one line, saying how much is left."""
+    if len(text) <= _SEND_PREVIEW:
+        return text
+    return f"{text[:_SEND_PREVIEW]}… (+{len(text) - _SEND_PREVIEW} more characters, see Details)"
+
+
 def _generic_details(tool_input: dict[str, object]) -> tuple[str, ...]:
     lines: list[str] = []
     for key, value in tool_input.items():
@@ -199,7 +252,7 @@ def _generic_details(tool_input: dict[str, object]) -> tuple[str, ...]:
 
 def _recipients(value: object) -> str:
     if not isinstance(value, list):
-        return str(value or "recipients")
+        return _one_line(value or "recipients")
     names: list[str] = []
     for item in cast(list[object], value):
         if isinstance(item, dict):
@@ -207,7 +260,75 @@ def _recipients(value: object) -> str:
             names.append(str(entry.get("label") or entry.get("name") or "recipient"))
         else:
             names.append(str(item))
-    return ", ".join(names)
+    return ", ".join(_one_line(name) for name in names)
+
+
+_WRITE_VERBS: Final[dict[str | None, str]] = {
+    "upload": "Upload or replace a file",
+    "workbook": "Change an Excel workbook",
+    "onenote_create": "Add a OneNote page",
+    "onenote_update": "Change a OneNote page",
+    None: "Change something",
+}
+
+
+def _microsoft_write_action(method: str, path: str) -> str:
+    """What a `microsoft_write` does, in words, as the tool itself classifies the call."""
+    return f"{_WRITE_VERBS[write_kind(method.upper(), path)]} in your Microsoft 365"
+
+
+def _write_body_text(body: object) -> str:
+    """A `microsoft_write` body as text: a text body as is, JSON in its compact form."""
+    if body is None:
+        return ""
+    if isinstance(body, str):
+        return body
+    return json.dumps(body, separators=(",", ":"), ensure_ascii=False, default=str)
+
+
+def write_body_size(body: object) -> tuple[int, int]:
+    """How many characters, and UTF-8 bytes, of `microsoft_write` body the card has to show."""
+    text = _write_body_text(body)
+    return len(text), len(text.encode())
+
+
+def _shown_write_body(text: str) -> str:
+    """The part of a `microsoft_write` body the card shows: all of it, up to the tool's limits."""
+    shown = text[:WRITE_BODY_LIMIT].encode()[:WRITE_BODY_BYTES]
+    return shown.decode(errors="ignore")
+
+
+def _microsoft_write_card(data: dict[str, object]) -> tuple[str, str, tuple[str, ...]]:
+    """The action, always-visible text and Details of one `microsoft_write` approval."""
+    method = _one_line(data.get("method")).upper()
+    decoded = unquote(str(data.get("path") or ""))
+    decoded = decoded.removeprefix("/v1.0") if decoded.lower().startswith("/v1.0/") else decoded
+    path = _one_line(decoded)
+    handle = _one_line(data.get("file_handle")) if data.get("file_handle") else None
+    text = _write_body_text(data.get("body"))
+    shown_text = _shown_write_body(text)
+    lines = [line for line in map(_plain, shown_text.splitlines()) if line.strip()]
+    facts = (
+        f"Method: {method}",
+        # The end of a path says what is changed, so a long one loses its middle.
+        f"Path: {_clip_middle(path, _WRITE_PATH_PREVIEW)}",
+        *((f"File handle: {_short(handle)}",) if handle else ()),
+    )
+    if lines:
+        shown = (f"Content: {_preview(_one_line(' '.join(lines)))}",)
+    else:
+        # An upload's bytes are staged, not in the call; its file handle stands for them.
+        shown = () if handle else ("Content: (none)",)
+    cut = len(text) - len(shown_text)
+    details = (
+        f"Method: {method}",
+        f"Path: {_clip_middle(path, WRITE_PATH_LIMIT)}",
+        *((f"File handle: {_short(handle, limit=WRITE_PATH_LIMIT)}",) if handle else ()),
+        *(("Content:", *lines) if lines else ()),
+        *((f"… (+{cut} more characters not shown)",) if cut > 0 else ()),
+    )
+    consequence = "\n".join(("It acts as you in Microsoft 365.", *facts, *shown))
+    return _microsoft_write_action(method, decoded), consequence, details
 
 
 def prompt_for_tool_call(
@@ -284,20 +405,18 @@ def prompt_for_tool_call(
         )
     elif call.tool_name == "microsoft_send" and server == DAIMON_SERVER_NAME:
         invite = data.get("action") == "create_event"
-        subject = str(data.get("subject") or "")
+        # Each field is one line: a newline in one must not fake a line of the card.
+        subject = _one_line(data.get("subject") or "")
         noun = "invite" if invite else "email"
-        action = f'Send {noun} "{subject}"'
+        action = f'Send {noun} "{_short(subject, limit=100)}"'
         title = f"{action}?"
         denied_action = f"{noun.capitalize()} not sent"
         # Who and what is shown outside Details: the person approves exactly
         # that. The body is previewed there and given in full behind Details.
         body = str(data.get("body") or "")
-        preview = " ".join(body.split())
-        if len(preview) > _SEND_PREVIEW:
-            more = len(preview) - _SEND_PREVIEW
-            preview = f"{preview[:_SEND_PREVIEW]}… (+{more} more characters, see Details)"
-        location = data.get("location")
-        zone = data.get("time_zone") or "UTC"
+        preview = _preview(_one_line(body))
+        location = _one_line(data.get("location") or "")
+        zone = _one_line(data.get("time_zone") or "UTC")
         heading = (
             f"To: {_recipients(data.get('to'))}",
             *(
@@ -306,10 +425,14 @@ def prompt_for_tool_call(
                 else ()
             ),
             f"Subject: {subject}",
-            *((f"When: {data.get('start')} to {data.get('end')} ({zone})",) if invite else ()),
+            *(
+                (f"When: {_one_line(data.get('start'))} to {_one_line(data.get('end'))} ({zone})",)
+                if invite
+                else ()
+            ),
             *((f"Where: {location}",) if invite and location else ()),
         )
-        lines = [line for line in body[:SEND_BODY_LIMIT].splitlines() if line.strip()]
+        lines = [line for line in map(_plain, body[:SEND_BODY_LIMIT].splitlines()) if line.strip()]
         detail_lines = (*heading, "Message:" if lines else "Message: (empty)", *lines)
         consequence = "\n".join(
             (
@@ -318,6 +441,10 @@ def prompt_for_tool_call(
                 f"Message: {preview or '(empty)'}",
             )
         )
+    elif call.tool_name == "microsoft_write" and server == DAIMON_SERVER_NAME:
+        action, consequence, detail_lines = _microsoft_write_card(data)
+        title = f"{action}?"
+        denied_action = "Microsoft 365 not changed"
     elif call.tool_name == "add_skill" and server == DAIMON_SERVER_NAME:
         agent = str(data.get("agent_name") or data.get("agent") or "agent")
         if not name:

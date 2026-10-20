@@ -28,7 +28,15 @@ from daimon.adapters.mcp.tools.microsoft._person import (
     require_one_to_one,
     require_person,
 )
-from daimon.core.confirmation import SEND_BODY_LIMIT
+from daimon.core.confirmation import (
+    SEND_BODY_LIMIT,
+    SEND_HEADER_BYTES,
+    WRITE_BODY_BYTES,
+    WRITE_BODY_LIMIT,
+    WRITE_PATH_LIMIT,
+    is_plain,
+    write_body_size,
+)
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, JsonValue
 
@@ -53,6 +61,8 @@ _HIT_KEYS = (
 _ERROR_CODE = re.compile(r"[A-Za-z][A-Za-z0-9_.]{0,63}")
 _ADDRESS = re.compile(r"[^@\s,;<>]+@[^@\s,;<>]+")
 _MAX_RECIPIENTS = 50
+#: Longest email address (RFC 5321).
+_MAX_ADDRESS = 254
 _DOWNLOAD_KEYS = frozenset({"@microsoft.graph.downloadurl", "@content.downloadurl"})
 
 
@@ -315,11 +325,24 @@ async def microsoft_write_impl(
         await require_one_to_one(runtime, auth, origin_context_id, what="OneNote")
     if (kind == "upload") != (file_handle is not None):
         raise ToolError("A file upload (PUT .../content) takes file_handle; nothing else does.")
+    # The approval card shows the whole path and body, so nothing longer is written.
+    if len(target.decoded) > WRITE_PATH_LIMIT:
+        raise ToolError(
+            f"Nothing was written: the path is {len(target.decoded):,} characters and the "
+            f"limit is {WRITE_PATH_LIMIT:,}."
+        )
+    size, size_bytes = write_body_size(body)
+    if size > WRITE_BODY_LIMIT or size_bytes > WRITE_BODY_BYTES:
+        raise ToolError(
+            f"Nothing was written: the body is {size:,} characters ({size_bytes:,} bytes) and the "
+            f"limit is {WRITE_BODY_LIMIT:,} characters and {WRITE_BODY_BYTES:,} bytes (emoji and "
+            "most non-Latin text take 3 to 4 bytes each). Make the change in smaller calls."
+        )
     content: bytes | None = None
     headers: dict[str, str] = {}
     payload: JsonValue = None
     if kind == "upload":
-        assert file_handle is not None
+        assert file_handle is not None  # checked above
         if body is not None:
             raise ToolError("A file upload takes file_handle and no body.")
         ((upload, data),) = await staged_uploads(
@@ -352,9 +375,23 @@ async def microsoft_write_impl(
     return _result(response, links=False)
 
 
+def _check_send_header(fields: list[str]) -> None:
+    """Refuse a send whose approval card could not show every address and field whole."""
+    size = sum(len(field.strip().encode()) for field in fields)
+    if size > SEND_HEADER_BYTES:
+        raise ToolError(
+            f"Nothing was sent: the addresses, subject, location, start, end and time zone "
+            f"total {size:,} bytes and the limit is {SEND_HEADER_BYTES:,} (emoji and most "
+            "non-Latin text take 3 to 4 bytes a character). Shorten them or send to fewer people."
+        )
+
+
 def _recipients(addresses: list[str], field: str) -> list[dict[str, object]]:
     for address in addresses:
-        if not _ADDRESS.fullmatch(address.strip()):
+        # The approval card shows an address without invisible characters, so one
+        # that holds any is refused rather than sent as something else.
+        clean = address.strip()
+        if not _ADDRESS.fullmatch(clean) or not is_plain(clean) or len(clean) > _MAX_ADDRESS:
             raise ToolError(f"{field} has {address!r}, which is not one email address.")
     return [{"emailAddress": {"address": a.strip()}} for a in addresses]
 
@@ -403,6 +440,7 @@ async def microsoft_send_impl(
         )
     if not to or len(to) + len(cc) > _MAX_RECIPIENTS:
         raise ToolError(f"Pass between 1 and {_MAX_RECIPIENTS} recipients.")
+    _check_send_header([*to, *cc, subject, location or "", start or "", end or "", time_zone])
     text = {"contentType": "Text", "content": body}
     if action == "send_mail":
         message: dict[str, object] = {

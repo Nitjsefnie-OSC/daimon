@@ -905,6 +905,126 @@ async def test_send_refuses_a_body_longer_than_the_card_shows(
     assert not fake.graph_requests, "a body the card could not show must not be sent"
 
 
+_WORKBOOK = "/me/drive/items/i1/workbook/worksheets/S/range(address='A1')"
+
+
+@pytest.mark.parametrize(
+    ("path", "body", "refusal"),
+    [
+        (
+            _WORKBOOK,
+            {"values": [["x" * 8000]]},
+            r"body is 8,017 characters \(8,017 bytes\) and the limit is 8,000 characters",
+        ),
+        (
+            _WORKBOOK,
+            {"values": [["😀" * 3600]]},
+            r"\(14,417 bytes\) and the limit is 8,000 characters and 14,000 bytes",
+        ),
+        (_WORKBOOK + "/" + "s" * 500, {"values": [[1]]}, r"limit is 500"),
+    ],
+)
+async def test_write_refuses_what_the_card_could_not_show_whole(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    path: str,
+    body: dict[str, Any],
+    refusal: str,
+) -> None:
+    """The approval card holds 500 characters of path and 8,000 characters (14,000 bytes) of body."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    with pytest.raises(ToolError, match=f"Nothing was written.*{refusal}"):
+        await microsoft_write_impl(
+            _runtime(committing_sessionmaker, fake),
+            auth,
+            method="PATCH",
+            path=path,
+            body=body,
+            file_handle=None,
+            origin_context_id="",
+        )
+    assert not fake.graph_requests, "a change the person could not see whole must not run"
+
+
+@pytest.mark.parametrize(
+    "address",
+    ["ada@example.com\u200b", "a\u202eda@example.com", "ada@exa\x00mple.com", "a@" + "b" * 260],
+)
+async def test_send_refuses_an_address_the_card_would_show_differently(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+    address: str,
+) -> None:
+    """Invisible characters are stripped on the card, so the address sent must hold none."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    origin = await _origin(committing_sessionmaker, auth, ONE_TO_ONE)
+
+    async def approved(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(graph_module, "session_card_gap", approved)
+    with pytest.raises(ToolError, match="not one email address"):
+        await microsoft_send_impl(
+            _runtime(committing_sessionmaker, fake),
+            auth,
+            action="send_mail",
+            to=[address],
+            subject="Hi",
+            body="Hello",
+            cc=[],
+            start=None,
+            end=None,
+            time_zone="UTC",
+            location=None,
+            origin_context_id=origin,
+        )
+    assert not fake.graph_requests, "the card and the mail must name the same address"
+
+
+@pytest.mark.parametrize(
+    "kwargs",
+    [
+        {"to": [f"{'a' * 60}{n:02d}@example.com" for n in range(50)]},
+        {"subject": "s" * 3000},
+        {"subject": "😀" * 800},
+    ],
+)
+async def test_send_refuses_a_header_the_card_could_not_show_whole(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    fake: FakeMicrosoft,
+    monkeypatch: pytest.MonkeyPatch,
+    kwargs: dict[str, Any],
+) -> None:
+    """Addresses, subject, location and times share 3,000 bytes, so the card shows all of them."""
+    _, auth = await _person(committing_sessionmaker)
+    await _connect(committing_sessionmaker, auth)
+    origin = await _origin(committing_sessionmaker, auth, ONE_TO_ONE)
+
+    async def approved(*args: object, **kwargs: object) -> None:
+        return None
+
+    monkeypatch.setattr(graph_module, "session_card_gap", approved)
+    call: dict[str, Any] = {"to": ["a@example.com"], "subject": "Hi"} | kwargs
+    with pytest.raises(ToolError, match=r"limit is 3,000"):
+        await microsoft_send_impl(
+            _runtime(committing_sessionmaker, fake),
+            auth,
+            action="send_mail",
+            body="Hello",
+            cc=[],
+            start=None,
+            end=None,
+            time_zone="UTC",
+            location=None,
+            origin_context_id=origin,
+            **call,
+        )
+    assert not fake.graph_requests, "a send the person could not see whole must not go out"
+
+
 async def _saved(sm: async_sessionmaker[AsyncSession], auth: AuthIdentity) -> bool:
     async with sm() as session:
         row = await tokens_store.get_microsoft_user_token(
