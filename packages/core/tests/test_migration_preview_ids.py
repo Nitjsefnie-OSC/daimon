@@ -1,6 +1,8 @@
 """Exercise deployed main/preview stamps through real Alembic and PostgreSQL.
 
-The fixture scripts are frozen from 7df20d82c, before the ID repair. Building
+The historical scripts reproduce the preview chain as it stood at 7df20d82c,
+before the ID repair: the canonical migrations under their old revision IDs
+and parents. Building
 those historical schemas proves compatibility without imitating them by merely
 stamping a database that already has the new schema.
 """
@@ -9,6 +11,7 @@ from __future__ import annotations
 
 import asyncio
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -46,6 +49,17 @@ CHAIN = [
     LEAD_HEAD,
     HEAD,
 ]
+# The preview chain before the ID repair: each legacy revision ran the
+# canonical script under its own ID and parent.
+PREVIEW_CHAIN = {
+    "0110_cold_dm_agent": ("0111_cold_dm_agent", FORK),
+    "0111_routine_dm_destination": ("0112_routine_dm_destination", "0110_cold_dm_agent"),
+    "0112_unattended_turn_provenance": (
+        "0113_unattended_turn_provenance",
+        "0111_routine_dm_destination",
+    ),
+    "0113_microsoft_accounts": (MAIN, "0112_unattended_turn_provenance"),
+}
 TABLES = {
     "microsoft_user_tokens",
     "microsoft_sign_ins",
@@ -82,8 +96,19 @@ def _historical_scripts(tmp_path: Path) -> Path:
     for source in (SCRIPTS / "versions").glob("*.py"):
         if source.stem not in CHAIN:
             shutil.copy(source, versions / source.name)
-    for source in (Path(__file__).parent / "fixtures/preview_migrations").glob("*.py"):
-        shutil.copy(source, versions / source.name)
+    for legacy, (canonical, parent) in PREVIEW_CHAIN.items():
+        script = (SCRIPTS / "versions" / f"{canonical}.py").read_text()
+        script, revisions = re.subn(
+            r'^revision: str = ".*"$', f'revision: str = "{legacy}"', script, flags=re.M
+        )
+        script, parents = re.subn(
+            r'^down_revision: str \| None = ".*"$',
+            f'down_revision: str | None = "{parent}"',
+            script,
+            flags=re.M,
+        )
+        assert revisions == parents == 1
+        (versions / f"{legacy}.py").write_text(script)
     return scripts
 
 
