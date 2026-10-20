@@ -95,7 +95,7 @@ from daimon.core.routine_delivery import (
     agent_posted_to,
     delivery_target,
     placement_unknown_is_unsafe,
-    record_failure,
+    record_routine_failure,
     render_routine_controls,
 )
 from daimon.core.routine_files import collect_routine_files
@@ -280,26 +280,6 @@ async def _build_fire(
             )
         return turn_deps[0]
 
-    async def _record_admission_failure(
-        s: AsyncSession,
-        routine_id: uuid.UUID,
-        *,
-        error: str,
-        reason: TerminationReason,
-        row: RoutineRow,
-    ) -> None:
-        if row.destination_kind == "dm":
-            await record_result(
-                s,
-                routine_id,
-                tail=None,
-                error=error,
-                expected_destination=("dm", row.destination_id),
-                expected_private=row,
-            )
-        else:
-            await record_failure(s, routine_id, error=error, reason=reason, expected_row=row)
-
     async def _refused_over_channel_budget(row: RoutineRow, *, platform: str) -> bool:
         """Record and refuse a fire over its channel budget. Keyed on `row.channel_id`,
         the channel the fire is billed to (the destination's parent, else where the
@@ -321,12 +301,11 @@ async def _build_fire(
             channel_id=row.channel_id,
         )
         async with sm() as s, s.begin():
-            await _record_admission_failure(
+            await record_routine_failure(
                 s,
-                row.id,
+                row,
                 error="channel_budget_exceeded",
                 reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
-                row=row,
             )
         return True
 
@@ -586,12 +565,11 @@ async def _build_fire(
                 tenant_id=str(row.tenant_id),
             )
             async with sm() as s, s.begin():
-                await _record_admission_failure(
+                await record_routine_failure(
                     s,
-                    row.id,
+                    row,
                     error="balance_depleted",
                     reason=TerminationReason.ADMISSION_BALANCE_DEPLETED,
-                    row=row,
                 )
             return
 
