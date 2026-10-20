@@ -27,14 +27,6 @@ class LeadClassification(StrEnum):
     OTHER = "other"
 
 
-class LeadIntakeStatus(StrEnum):
-    ACCEPTED = "accepted"
-    PENDING = "pending"
-    REVIEW = "review"
-    COMPLETED = "completed"
-    REJECTED = "rejected"
-
-
 class LeadStep(StrEnum):
     COMPANY = "company"
     CONTACT = "contact"
@@ -44,14 +36,6 @@ class LeadStep(StrEnum):
     DISCORD_THREAD = "discord_thread"
     DISCORD_DOSSIER = "discord_dossier"
     ARCHIVE = "archive"
-
-
-class LeadDisposition(StrEnum):
-    DISCOVERED = "discovered"
-    REJECTED = "rejected"
-    ACCEPTED = "accepted"
-    PENDING = "pending"
-    COMPLETED = "completed"
 
 
 class LeadSource(BaseModel):
@@ -126,52 +110,6 @@ class LeadProgress(BaseModel):
     separate_opportunity_confirmed: bool = False
     resolved_by: str | None = None
     resolution_evidence: str | None = None
-
-
-class LeadIntake(BaseModel):
-    id: UUID
-    submission: LeadSubmission
-    status: LeadIntakeStatus
-    progress: LeadProgress
-    attempts: int
-    last_error: str | None
-    routine_id: UUID | None
-    execution_id: UUID | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class LeadOpportunity(BaseModel):
-    id: UUID
-    company_key: str
-    description: str
-    company_id: str | None = None
-    deal_id: str | None = None
-    created_at: datetime
-
-
-class LeadMailboxScan(BaseModel):
-    id: UUID
-    mailbox: str
-    window_start: datetime
-    window_end: datetime
-    query: str
-    routine_id: UUID | None
-    execution_id: UUID | None
-    discovered_count: int
-    started_at: datetime
-    completed_at: datetime | None = None
-    last_error: str | None = None
-
-
-class LeadMailboxMessage(BaseModel):
-    mailbox: str
-    message_id: str
-    disposition: LeadDisposition
-    intake_id: UUID | None
-    reason: str | None
-    discovered_at: datetime
-    updated_at: datetime
 
 
 # A consumer address is not evidence of a distinct organization to create.
@@ -254,12 +192,6 @@ def get_discord_message_url(guild_id: str, channel_id: str, message_id: str) -> 
     if not (guild_id and channel_id and message_id):
         raise ValueError("Discord lead thread link requires guild, channel and message")
     return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-
-
-def get_intake_disposition(status: LeadIntakeStatus) -> LeadDisposition:
-    if status == LeadIntakeStatus.REVIEW:
-        return LeadDisposition.PENDING
-    return LeadDisposition(status.value)
 
 
 class LeadDealCandidate(BaseModel):
@@ -345,14 +277,6 @@ def select_matching_opportunity(
         requires_review=True,
         reason="Existing opportunities require selection or confirmation of a separate project",
     )
-
-
-class LeadIntakeHealth(BaseModel):
-    status_counts: dict[LeadIntakeStatus, int]
-    oldest_pending_at: datetime | None
-    failure_count: int
-    unclassified_count: int
-    last_successful_scan_at: datetime | None
 
 
 def get_opportunity_identity(
