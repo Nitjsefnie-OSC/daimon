@@ -22,7 +22,6 @@ import discord
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import CallerView, load_isolation_view
@@ -862,26 +861,36 @@ async def _delete_routine_impl(
 
 
 _SANDBOX_PERSON_ONLY = (
-    "A routine's sandbox tools can only be changed by a person, from the CLI or the "
-    "hub, not by an agent in a conversation."
+    "A routine's sandbox tools can only be changed by a person: a current Discord "
+    "server admin calling this tool with their own token, or the operator with "
+    "`daimon routines sandbox-tools`. Not by an agent in a conversation. Do not retry."
 )
 _SANDBOX_ADMIN_ONLY = (
-    "Only a current workspace or server admin can turn on sandbox tools for a "
-    "routine; the routine's owner cannot. Do not retry."
+    "Only a current Discord server admin, with their own token, can turn on sandbox "
+    "tools for a routine here; the routine's owner cannot. Elsewhere the operator uses "
+    "`daimon routines sandbox-tools`. Do not retry."
 )
 
 
 async def _sandbox_admin(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
-    """The caller, if they are a person and a workspace admin right now.
+    """The caller, only if they are a person and a Discord server admin right now.
 
-    An agent key or an agent acting in a conversation is refused outright. On
-    Discord the admin claim in the token is checked again against live server
-    membership (`resolve_subject`, fresh), so a demoted admin is refused.
+    An allowlist, not a denylist: the token must carry a jti (no legacy
+    vault token from before the sweep), must not be an operator token, an
+    agent key or an agent in a conversation, and its holder must be a
+    verified member and admin of the Discord server on a fresh membership
+    read. Any other platform fails closed, as `watches.fresh_admin` does; the
+    operator uses the CLI there.
     """
-    if auth.agent_id is not None or auth.chat_agent_id is not None:
+    if (
+        auth.token_jti is None
+        or auth.is_operator
+        or auth.agent_id is not None
+        or auth.chat_agent_id is not None
+    ):
         record_authz_denial(Action.SET_ROUTINE_SANDBOX_TOOLS, "person_only")
         raise ToolError(_SANDBOX_PERSON_ONLY)
-    subject = mcp_subject(auth, is_admin=auth.is_admin)
+    admin = False
     if auth.is_admin and auth.platform == "discord" and auth.platform_user_id is not None:
         live = await resolve_subject(
             runtime.session_factory,
@@ -890,10 +899,8 @@ async def _sandbox_admin(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
             user_id=auth.platform_user_id,
             require_fresh=True,
         )
-        subject = build_subject(
-            is_admin=live.is_admin and live.verified_membership is True,
-            platform_user_id=auth.platform_user_id,
-        )
+        admin = live.is_admin and live.verified_membership is True
+    subject = build_subject(is_admin=admin, platform_user_id=auth.platform_user_id)
     decision = authorize(
         TenantAccessPolicy(), subject=subject, action=Action.SET_ROUTINE_SANDBOX_TOOLS
     )
@@ -1081,13 +1088,15 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
 
-        They are off for every unattended run by default. Only a current workspace or
-        server admin may change this, and only in person (not an agent key or an agent in
-        a conversation); owning the routine is not enough. Each change records who made it
-        and when, and ``get_routine``/``list_routines`` show it as
-        ``sandbox_tools_enabled``. Setting the value a routine already has changes
-        nothing. Timers, watches, agent chat, fleet workers, ``daimon run`` and
-        checkpoints cannot be opted in.
+        They are off for every unattended run by default. Only a current Discord server
+        admin may call this, with their own token, and their admin rights are re-read from
+        the server on each call; owning the routine is not enough. Agent keys, agents in a
+        conversation, operator tokens, legacy tokens and other platforms are refused; the
+        operator uses ``daimon routines sandbox-tools`` instead. DM routines cannot be opted
+        in. Each change records who made it and when, and ``get_routine``/``list_routines``
+        show it as ``sandbox_tools_enabled``. It takes effect from the routine's next run.
+        Setting the value a routine already has changes nothing. Timers, watches, agent
+        chat, fleet workers, ``daimon run`` and checkpoints cannot be opted in.
         """
         return await _set_routine_sandbox_tools_impl(
             runtime, await _auth(ctx), routine_id=routine_id, enabled=enabled

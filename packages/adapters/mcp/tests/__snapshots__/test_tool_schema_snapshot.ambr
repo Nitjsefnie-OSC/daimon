@@ -6377,13 +6377,15 @@
         Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
         <blank line>
-        They are off for every unattended run by default. Only a current workspace or
-        server admin may change this, and only in person (not an agent key or an agent in
-        a conversation); owning the routine is not enough. Each change records who made it
-        and when, and ``get_routine``/``list_routines`` show it as
-        ``sandbox_tools_enabled``. Setting the value a routine already has changes
-        nothing. Timers, watches, agent chat, fleet workers, ``daimon run`` and
-        checkpoints cannot be opted in.
+        They are off for every unattended run by default. Only a current Discord server
+        admin may call this, with their own token, and their admin rights are re-read from
+        the server on each call; owning the routine is not enough. Agent keys, agents in a
+        conversation, operator tokens, legacy tokens and other platforms are refused; the
+        operator uses ``daimon routines sandbox-tools`` instead. DM routines cannot be opted
+        in. Each change records who made it and when, and ``get_routine``/``list_routines``
+        show it as ``sandbox_tools_enabled``. It takes effect from the routine's next run.
+        Setting the value a routine already has changes nothing. Timers, watches, agent
+        chat, fleet workers, ``daimon run`` and checkpoints cannot be opted in.
       ''',
       'parameters': dict({
         'additionalProperties': False,

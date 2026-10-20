@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 from unittest.mock import MagicMock
 
 import daimon.adapters.mcp.tools.routines as _routines_mod
@@ -50,18 +51,21 @@ def _auth(
     user_id: str,
     *,
     is_admin: bool,
-    chat_agent_id: uuid.UUID | None = None,
+    **overrides: Any,
 ) -> AuthIdentity:
-    return AuthIdentity(
-        account_id=uuid.uuid4(),
-        tenant_id=tenant_id,
-        role=Role.ADMIN if is_admin else Role.USER,
-        platform="discord",
-        external_id="g_sandbox",
-        platform_user_id=user_id,
-        is_admin=is_admin,
-        chat_agent_id=chat_agent_id,
-    )
+    """A person's own Discord token (it carries a jti), with `overrides` applied."""
+    fields: dict[str, Any] = {
+        "account_id": uuid.uuid4(),
+        "tenant_id": tenant_id,
+        "role": Role.ADMIN if is_admin else Role.USER,
+        "platform": "discord",
+        "external_id": "g_sandbox",
+        "platform_user_id": user_id,
+        "is_admin": is_admin,
+        "token_jti": uuid.uuid4(),
+        **overrides,
+    }
+    return AuthIdentity(**fields)
 
 
 async def _setup(
@@ -108,32 +112,50 @@ async def test_admin_opts_one_routine_in_and_status_shows_it(
     assert switched_off.sandbox_tools_enabled is False
 
 
+PERSON_ONLY = "only be changed by a person"
+ADMIN_ONLY = "owner cannot"
+
+
 @pytest.mark.parametrize(
-    ("user_id", "claims_admin", "live_admin", "in_conversation", "message"),
+    ("user_id", "claims_admin", "live_admin", "overrides", "message"),
     [
-        (OWNER, False, True, False, "owner cannot"),
-        (ADMIN, True, False, False, "owner cannot"),
-        (ADMIN, True, True, True, "only be changed by a person"),
+        (OWNER, False, True, {}, ADMIN_ONLY),
+        (ADMIN, True, False, {}, ADMIN_ONLY),
+        (ADMIN, True, True, {"chat_agent_id": uuid.uuid4()}, PERSON_ONLY),
+        (ADMIN, True, True, {"agent_id": uuid.uuid4()}, PERSON_ONLY),
+        # A legacy vault credential from before the sweep carries no jti, even
+        # when it was minted for an admin who is still an admin.
+        (ADMIN, True, True, {"token_jti": None}, PERSON_ONLY),
+        (ADMIN, True, True, {"token_kind": "operator"}, PERSON_ONLY),
+        # No live check exists off Discord, so the stored admin role is not enough.
+        (ADMIN, True, True, {"platform": "slack"}, ADMIN_ONLY),
+        (ADMIN, True, True, {"platform": "teams"}, ADMIN_ONLY),
+        (ADMIN, True, True, {"platform_user_id": None}, ADMIN_ONLY),
     ],
-    ids=["owner_not_admin", "demoted_admin", "agent_in_conversation"],
+    ids=[
+        "owner_not_admin",
+        "demoted_admin",
+        "agent_in_conversation",
+        "agent_key",
+        "legacy_jti_less_token",
+        "operator_token",
+        "slack_admin",
+        "teams_admin",
+        "no_platform_user",
+    ],
 )
-async def test_everyone_but_a_current_human_admin_is_refused(
+async def test_everyone_but_a_current_discord_admin_is_refused(
     committing_sessionmaker: async_sessionmaker[AsyncSession],
     db_session: AsyncSession,
     user_id: str,
     claims_admin: bool,
     live_admin: bool,
-    in_conversation: bool,
+    overrides: dict[str, Any],
     message: str,
 ) -> None:
     tenant_id, chosen, _ = await _setup(db_session)
     runtime = _runtime(committing_sessionmaker, _resolver(admin_is_admin=live_admin))
-    caller = _auth(
-        tenant_id,
-        user_id,
-        is_admin=claims_admin,
-        chat_agent_id=uuid.uuid4() if in_conversation else None,
-    )
+    caller = _auth(tenant_id, user_id, is_admin=claims_admin, **overrides)
 
     with pytest.raises(ToolError, match=message):
         await _set_impl(runtime, caller, routine_id=chosen.id, enabled=True)
