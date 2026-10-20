@@ -392,7 +392,15 @@ async def test_a_session_for_an_agent_with_daimon_rules_asks_on_call_tool_and_th
     asked = sorted(
         c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"
     )
-    assert asked == ["add_skill", "call_tool", "hubspot_update_objects"]
+    # Enrollment requires a person's card independently of agent-specific rules.
+    assert asked == [
+        "add_skill",
+        "call_tool",
+        "create_watch",
+        "hubspot_update_objects",
+        "resume_watch",
+        "rotate_watch_key",
+    ]
 
 
 async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before() -> None:
@@ -404,7 +412,12 @@ async def test_a_session_for_an_agent_without_daimon_rules_is_exactly_as_before(
 
     assert without == inert, "rules that are not applied leave the session's tools alone"
     (daimon,) = [t for t in without["tools"] if t.get("mcp_server_name") == "daimon-mcp"]
-    assert [c["name"] for c in daimon["configs"]] == ["add_skill"]
+    assert [c["name"] for c in daimon["configs"]] == [
+        "add_skill",
+        "create_watch",
+        "resume_watch",
+        "rotate_watch_key",
+    ]
 
 
 def test_no_production_signature_defaults_the_policy() -> None:
