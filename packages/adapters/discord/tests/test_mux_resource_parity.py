@@ -137,7 +137,10 @@ async def test_imported_skill_attachment_keeps_requests_retry_limit_and_notice(
                 await old.beta.agents.update(
                     "agent1",
                     version=fresh.version,
-                    skills=[*initial_payload, {"type": "custom", "skill_id": "existing"}],
+                    skills=[
+                        *initial_payload,
+                        {"type": "custom", "skill_id": "existing", "version": "9"},
+                    ],
                 )
             except ConflictError:
                 assert status == "exhausted"
