@@ -48,7 +48,7 @@ from daimon.core.stores.direct_messages import (
     quarantine_conversation,
     start_conversation,
 )
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
@@ -106,6 +106,16 @@ async def load_dm_access_policy(
         raise DirectMessageAccessRevoked("policy_unreadable", message=str(error)) from error
 
 
+def tenant_ready(tenant: TenantRow | None, *, platform: str | None = None) -> bool:
+    """A provisioned, unarchived tenant, on `platform` when one is named."""
+    return (
+        tenant is not None
+        and (platform is None or tenant.platform == platform)
+        and tenant.archived_at is None
+        and tenant.provision_status == "ready"
+    )
+
+
 async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None:
     """Recheck recipient and exact answering agent immediately before private output.
 
@@ -132,9 +142,7 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
         )
     if (
         not enabled
-        or tenant is None
-        or tenant.archived_at is not None
-        or tenant.provision_status != "ready"
+        or not tenant_ready(tenant)
         or current is None
         or current.scope_id != conversation.scope_id
         or current.account_id != conversation.account_id
@@ -358,13 +366,7 @@ async def admit_cold_dm(
     async with deps.sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
         name = await get_dm_agent_name(session, tenant_id=tenant_id)
-    if (
-        tenant is None
-        or tenant.platform != "discord"
-        or tenant.archived_at is not None
-        or tenant.provision_status != "ready"
-        or name is None
-    ):
+    if not tenant_ready(tenant, platform="discord") or name is None:
         raise AdmissionDenied(reason="invoker_not_allowed")
     return await admit(
         deps,
@@ -645,11 +647,7 @@ async def reply_to_dm_result(
                     )
             async with deps.sessionmaker() as session:
                 tenant = await get_tenant(session, conversation.tenant_id)
-            if (
-                tenant is None
-                or tenant.archived_at is not None
-                or tenant.provision_status != "ready"
-            ):
+            if not tenant_ready(tenant):
                 raise DirectMessageAccessRevoked(
                     "tenant_unavailable",
                     message="This workspace is not available. No DM turn was started.",
@@ -818,12 +816,7 @@ async def run_dm_routine(
             tenant = await get_tenant(session, tenant_id)
         if not enabled:
             raise DirectMessageAccessRevoked("dm_disabled", message="Daimon DMs are off here.")
-        if (
-            tenant is None
-            or tenant.platform != "discord"
-            or tenant.archived_at is not None
-            or tenant.provision_status != "ready"
-        ):
+        if not tenant_ready(tenant, platform="discord"):
             raise DirectMessageAccessRevoked(
                 "tenant_unavailable", message="This workspace is not available."
             )

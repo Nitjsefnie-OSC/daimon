@@ -35,6 +35,7 @@ from daimon.core.direct_messages import (
     require_unsealed_source,
     start_cold_dm,
     start_dm,
+    tenant_ready,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -170,7 +171,7 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
     ) -> tuple[Admission | None, bool, bool]:
         runtime = self.bot.runtime
-        if tenant.archived_at is not None or tenant.provision_status != "ready":
+        if not tenant_ready(tenant):
             self._suppress(message, "tenant_unavailable")
             return None, False, False
         async with runtime.sessionmaker() as session:
@@ -615,9 +616,7 @@ class DirectMessageCog(commands.Cog):
             )
             if (
                 not enabled
-                or tenant is None
-                or tenant.archived_at is not None
-                or tenant.provision_status != "ready"
+                or not tenant_ready(tenant)
                 or not recipient_policy.allows(str(message.author.id))
                 or subject.verified_membership is not True
                 or not authorize(policy, subject=subject, action=Action.START_TURN)
