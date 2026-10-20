@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from typing import Any
 
+import pytest
 from daimon.adapters.teams import card
 from daimon.core.turn.state import TurnState
 from microsoft_teams.api import Account, MentionEntity
@@ -43,3 +44,48 @@ def test_the_stopping_card_says_so_has_no_stop_button_and_keeps_the_elapsed_time
 def test_stopping_survives_the_turns_later_activity() -> None:
     state = card.on_activity(card.on_stop(card.CardState(started_at=0.0)), TurnState())
     assert state.stopping
+
+
+def _draft_text(state: card.CardState) -> str | None:
+    body = _live(state)["body"]
+    drafts = [block for block in body if block.get("isSubtle") and block.get("size") != "Small"]
+    return drafts[0]["text"] if drafts else None
+
+
+def test_a_card_with_no_draft_shows_no_draft_block() -> None:
+    assert _draft_text(card.CardState(started_at=100.0)) is None
+
+
+@pytest.mark.usefixtures("status_log_on")
+@pytest.mark.parametrize("count", [1, 3, 5])
+def test_the_card_logs_the_last_three_draft_lines_one_paragraph_each(count: int) -> None:
+    state = card.CardState(started_at=100.0)
+    for number in range(1, count + 1):
+        state = card.on_message(state, f"🔍 step {number}")
+    shown = range(max(1, count - 2), count + 1)
+    assert _draft_text(state) == "\n\n".join(f"🔍 step {n}" for n in shown)
+
+
+def test_a_long_draft_line_is_cut_at_the_draft_length() -> None:
+    state = card.on_message(card.CardState(started_at=100.0), "z" * 400)
+    assert _draft_text(state) == "z" * 300 + "…"
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_a_provider_preview_revises_the_latest_line_without_growing_the_log() -> None:
+    state = card.on_message(card.on_message(card.CardState(started_at=100.0), "one"), "two")
+    state = card.on_draft(state, "two, longer")
+    assert _draft_text(state) == "one\n\ntwo, longer"
+
+
+def test_by_default_the_card_shows_only_the_latest_draft_line() -> None:
+    state = card.CardState(started_at=100.0)
+    for number in range(1, 5):
+        state = card.on_message(state, f"🔍 step {number}")
+    assert _draft_text(state) == "🔍 step 4"
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_with_the_log_on_a_draft_line_is_cut_to_120_characters() -> None:
+    state = card.on_message(card.CardState(started_at=100.0), "z" * 400)
+    assert _draft_text(state) == "z" * 120 + "…"

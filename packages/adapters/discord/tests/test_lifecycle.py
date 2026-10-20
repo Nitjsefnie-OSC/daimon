@@ -51,6 +51,7 @@ from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import McpServerFailure, TextBlock, ToolUseBlock, TurnState
 from daimon.core.turn.status_lines import SUMMARY_GAP as GAP
+from daimon.core.turn.status_log import status_log_override
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -3184,6 +3185,69 @@ async def test_final_response_preserves_whitespace_between_distinct_blocks():
         )
     )
     assert edits[-1][1]["content"] == "Hello world."
+
+
+@pytest.mark.usefixtures("status_log_on")
+async def test_consecutive_final_messages_collapse_but_distinct_answers_survive_with_the_log_on():
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="First part.\nMore of the first.\n"),
+                TextBlock(kind="text", text="First part.\nMore of the first.\n"),
+                TextBlock(kind="text", text="Second part.\nMore of the second."),
+            ]
+        )
+    )
+    assert (
+        edits[-1][1]["content"]
+        == "First part.\nMore of the first.\n\nSecond part.\nMore of the second."
+    )
+
+
+@pytest.mark.usefixtures("status_log_on")
+async def test_final_response_keeps_every_message_set_apart_by_a_blank_line():
+    lc, _, edits = _make_lifecycle()
+    await lc.on_terminal_success(
+        TurnState(
+            content=[
+                TextBlock(kind="text", text="⚠️ Do not run this against production."),
+                TextBlock(kind="text", text="Run it against staging."),
+            ]
+        )
+    )
+    assert (
+        edits[-1][1]["content"]
+        == "⚠️ Do not run this against production.\n\nRun it against staging."
+    )
+
+
+def _repeated_run_state(*, merged: bool) -> tuple[TurnState, str]:
+    """An answer of two messages, sealed by a tool call, then said again after it."""
+    first = "First part of the answer. " * 12
+    second = "Second part of the answer. " * 12
+    tool = ToolUseBlock(kind="tool_use", id="tu_1", type="agent.tool_use", name="bash", input={})
+    messages = (
+        [TextBlock(kind="text", text=first + second)]
+        if merged
+        else [
+            TextBlock(kind="text", text=first),
+            TextBlock(kind="text", text=second),
+        ]
+    )
+    return TurnState(content=[*messages, tool, *messages]), first.strip()
+
+
+@pytest.mark.parametrize("log_on", [True, False])
+async def test_an_answer_repeated_after_a_tool_is_not_posted_twice(log_on: bool):
+    with status_log_override(log_on):
+        lc, sends, edits = _make_lifecycle()
+        state, first = _repeated_run_state(merged=not log_on)
+        await lc.on_render(state)
+        await lc.on_terminal_success(state)
+    posted = [s["content"] for s in sends if "content" in s]
+    posted += [e[1]["content"] for e in edits if e[1].get("content")]
+    assert sum(text.count(first) for text in posted) == 1, "the repeated answer posts once"
 
 
 @pytest.mark.parametrize("notice", ["cancel", "degraded", "continuity"])

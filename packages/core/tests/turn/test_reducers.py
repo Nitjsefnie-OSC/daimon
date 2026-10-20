@@ -2,6 +2,7 @@ from __future__ import annotations
 
 from datetime import UTC, datetime
 
+import pytest
 from anthropic.types.beta.sessions.beta_managed_agents_document_block import (
     BetaManagedAgentsDocumentBlock,
 )
@@ -40,7 +41,14 @@ from anthropic.types.beta.sessions.beta_managed_agents_url_image_source import (
 )
 from daimon.core.errors import TurnError
 from daimon.core.turn.reducers import apply
-from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState, UsageTotals
+from daimon.core.turn.state import (
+    TextBlock,
+    ToolUseBlock,
+    TurnState,
+    UsageTotals,
+    extract_final_response,
+    extract_sealed_responses,
+)
 from daimon.testing.ma_models import ma_model_usage
 
 from .conftest import (
@@ -82,11 +90,77 @@ def test_apply_records_event_id_in_seen_event_ids() -> None:
 # --- agent.message ---
 
 
-def test_apply_concatenates_consecutive_agent_messages_into_one_text_block() -> None:
+def test_apply_concatenates_consecutive_agent_messages_into_one_text_block_by_default() -> None:
     state = TurnState()
     state = apply(state, make_agent_message(event_id="sevt_1", text="hello "))
     state = apply(state, make_agent_message(event_id="sevt_2", text="world"))
     assert state.content == [TextBlock(kind="text", text="hello world")]
+
+
+def test_with_the_switch_off_a_status_line_is_glued_onto_the_answer_as_before() -> None:
+    state = TurnState()
+    for event in [
+        make_agent_message(event_id="m1", text="🔍 **Looking up:** priors"),
+        make_tool_use(event_id="t1", name="search"),
+        make_agent_message(event_id="m2", text="📚 **Found:** 14 patterns"),
+        make_agent_message(event_id="m3", text="Priors are usually Beta."),
+    ]:
+        state = apply(state, event)
+    assert extract_final_response(state.content) == (
+        "📚 **Found:** 14 patternsPriors are usually Beta."
+    )
+    assert extract_sealed_responses(state.content, min_chars=10) == [
+        (0, "🔍 **Looking up:** priors")
+    ]
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_apply_keeps_consecutive_agent_messages_as_separate_text_blocks() -> None:
+    state = TurnState()
+    state = apply(state, make_agent_message(event_id="sevt_1", text="📚 Found: 14 patterns"))
+    state = apply(state, make_agent_message(event_id="sevt_2", text="Here is the answer."))
+    assert state.content == [
+        TextBlock(kind="text", text="📚 Found: 14 patterns"),
+        TextBlock(kind="text", text="Here is the answer."),
+    ]
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_messages_after_the_last_tool_are_kept_apart_not_glued() -> None:
+    state = TurnState()
+    events = [
+        make_agent_message(event_id="m1", text="🔍 **Looking up:** saturation priors"),
+        make_tool_use(event_id="t1", name="search"),
+        make_agent_message(event_id="m2", text="🔍 **Looking up:** adstock"),
+        make_tool_use(event_id="t2", name="search"),
+        make_agent_message(event_id="m3", text="📚 **Found:** 14 patterns"),
+        make_agent_message(event_id="m4", text="Priors on saturation are usually Beta."),
+    ]
+    for event in events:
+        state = apply(state, event)
+    assert extract_final_response(state.content) == (
+        "📚 **Found:** 14 patterns\n\nPriors on saturation are usually Beta."
+    )
+    assert extract_sealed_responses(state.content, min_chars=500) == []
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_an_ordinary_turn_posts_the_same_answer() -> None:
+    state = TurnState()
+    for event in [
+        make_agent_message(event_id="m1", text="Let me check."),
+        make_tool_use(event_id="t1", name="bash"),
+        make_agent_message(event_id="m2", text="It is 42.\n\nSecond paragraph."),
+    ]:
+        state = apply(state, event)
+    assert extract_final_response(state.content) == "It is 42.\n\nSecond paragraph."
+
+
+@pytest.mark.usefixtures("status_log_on")
+def test_apply_ignores_an_agent_message_with_no_text() -> None:
+    state = apply(TurnState(), make_agent_message(event_id="sevt_1", text=""))
+    assert state.content == []
+    assert "sevt_1" in state.seen_event_ids
 
 
 def test_apply_opens_new_text_block_when_tool_use_interleaves() -> None:

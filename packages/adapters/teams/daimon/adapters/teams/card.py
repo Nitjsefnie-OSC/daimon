@@ -2,7 +2,7 @@
 
 The status card says what Discord's and Slack's say, in the words of
 `daimon.core.turn.status_lines`: a Thinking or Working headline with the
-elapsed time, the turn's tool lines, the latest draft, and a Stop button.
+elapsed time, the turn's tool lines, the last few draft lines, and a Stop button.
 The answer replaces the card as Extended Markdown messages: a card TextBlock
 renders no code blocks or math, a message does. A card follows it with the
 summary line, 👍/👎 buttons (`vote_actions`, answered by `feedback`) and
@@ -27,11 +27,13 @@ from daimon.core.teams_markdown import escape_dollars
 from daimon.core.turn.notices import TerminationNotice, fit_notice
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.status_lines import (
+    draft_log,
     format_draft,
     format_duration,
     format_headline,
     format_tool_lines,
     has_running_tool,
+    roll_draft,
 )
 from microsoft_teams.api import Account, Attachment, MentionEntity, MessageActivityInput
 from microsoft_teams.cards import (
@@ -72,6 +74,9 @@ class CardState:
     is_working: bool = False
     tool_lines: tuple[str, ...] = ()
     draft: str | None = None
+    """The latest draft line."""
+    earlier_drafts: tuple[str, ...] = ()
+    """The draft lines before ``draft`` that the card still shows, oldest first."""
     # Stop was clicked: the turn is winding down, so the card offers no Stop.
     stopping: bool = False
 
@@ -82,7 +87,16 @@ def on_stop(state: CardState) -> CardState:
 
 
 def on_message(state: CardState, text: str) -> CardState:
-    """The latest agent text becomes the draft; an empty one keeps the last."""
+    """A whole agent message joins the draft log; an empty one changes nothing."""
+    if not text:
+        return state
+    line = format_draft(scrub_other_platforms(text, "teams"))
+    earlier, latest = roll_draft(state.earlier_drafts, state.draft, line)
+    return dataclasses.replace(state, earlier_drafts=earlier, draft=latest)
+
+
+def on_draft(state: CardState, text: str) -> CardState:
+    """A provider's preview of the message in progress revises the latest draft line."""
     if not text:
         return state
     return dataclasses.replace(state, draft=format_draft(scrub_other_platforms(text, "teams")))
@@ -128,8 +142,9 @@ def live_card(state: CardState, *, now: float, cancel_key: str) -> AdaptiveCard:
         lines = "\n\n".join(state.tool_lines)
         body.append(TextBlock(text="Details", size="Small", wrap=True))
         body.append(TextBlock(text=lines, font_type="Monospace", size="Small", wrap=True))
-    if state.draft:
-        body.append(TextBlock(text=state.draft, is_subtle=True, wrap=True))
+    if draft_lines := draft_log(state.earlier_drafts, state.draft):
+        # A TextBlock drops single line breaks: one paragraph per draft line.
+        body.append(TextBlock(text="\n\n".join(draft_lines), is_subtle=True, wrap=True))
     body.append(TextBlock(text=format_duration(elapsed), is_subtle=True, size="Small", wrap=True))
     if not state.stopping:
         body.append(

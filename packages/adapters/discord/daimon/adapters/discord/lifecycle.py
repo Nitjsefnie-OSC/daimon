@@ -60,7 +60,10 @@ from daimon.core.turn.state import (
     ToolUseBlock,
     TurnState,
     extract_sealed_responses,
+    final_answer_texts,
+    join_messages,
 )
+from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.usage_totals import ProviderUsageTotals
 from mux.contracts.events import Event
@@ -333,6 +336,17 @@ def _split_with_name_prefix(text: str, agent_name: str) -> list[str]:
     return chunks
 
 
+def _without_adjacent_repeats(messages: list[str], previous: str | None) -> list[str]:
+    """``messages`` with each one dropped that repeats the one before it (or ``previous``)."""
+    kept: list[str] = []
+    for message in messages:
+        text = message.strip()
+        if not text or text != previous:
+            kept.append(message)
+        previous = text
+    return kept
+
+
 class DiscordTurnLifecycle:
     """TurnLifecycle implementation for Discord. Created fresh per turn.
 
@@ -601,7 +615,13 @@ class DiscordTurnLifecycle:
         text = self._provider_draft.text(event)
         if text is not None:
             self._state = (
-                update(self._state, EmbedEvent(kind="message", label=text))
+                update(
+                    self._state,
+                    EmbedEvent(
+                        kind="message" if self._provider_draft.takes_new_item() else "draft",
+                        label=text,
+                    ),
+                )
                 if text
                 else dataclasses.replace(self._state, text_preview=None)
             )
@@ -917,7 +937,7 @@ class DiscordTurnLifecycle:
         return True
 
     def _build_embeds(self, now: float) -> list[discord.Embed]:
-        """Render the one status embed: headline, tool lines and the latest draft."""
+        """Render the one status embed: headline, tool lines and the last few draft lines."""
         embed = build_discord_embed(to_embed_data(self._state, now=now))
         if self._waiting_for_tenant_slot is not None and self._waiting_for_tenant_slot():
             embed.title = "Queued — waiting for a free slot…"
@@ -1182,20 +1202,15 @@ class DiscordTurnLifecycle:
         return discord.File(io.BytesIO(text.encode("utf-8")), filename="answer.txt")
 
     def _final_response(self, state: TurnState) -> str:
-        # Collapse adjacent identical final text blocks before joining them.
-        last_tool = max(
-            (i for i, block in enumerate(state.content) if isinstance(block, ToolUseBlock)),
-            default=-1,
-        )
-        texts: list[str] = []
-        previous = self._last_sealed_text
-        for block in state.content[last_tool + 1 :]:
-            if isinstance(block, TextBlock):
-                text = block.text.strip()
-                if not text or text != previous:
-                    texts.append(block.text)
-                previous = text
-        text = "".join(texts)
+        messages = final_answer_texts(state.content)
+        if status_log_enabled():
+            # Compare like with like: the final messages joined, against the
+            # last sealed run, which was joined the same way.
+            text = join_messages(_without_adjacent_repeats(messages, None))
+            if text.strip() == self._last_sealed_text:
+                text = ""
+        else:
+            text = join_messages(_without_adjacent_repeats(messages, self._last_sealed_text))
         if _pure_tool_markup(text):
             log.warning("turn.final_tool_markup_suppressed", turn_id=str(self._turn_id))
             text = "" if self._unprompted else _TOOL_MARKUP_NOTICE

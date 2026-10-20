@@ -417,6 +417,41 @@ async def test_second_event_within_debounce_no_update(fake_slack_web_client: Any
     assert _update_count(fake_slack_web_client) == 0, "no chat.update within the 5s debounce window"
 
 
+@pytest.mark.usefixtures("status_log_on")
+async def test_status_lines_show_as_a_running_log_on_the_card(
+    fake_slack_web_client: Any,
+) -> None:
+    """Each whole agent message joins the card's quoted log; the card keeps the last three."""
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+
+    for text in (
+        "🔍 **Looking up:** priors",
+        "📚 **Found:** 14 patterns",
+        "✍️ Drafting",
+        "Here you go.",
+    ):
+        await lc.on_sse_event(_message_event(text))
+    await lc.on_render(_running_tool_turn())
+
+    post = fake_slack_web_client.mock.requests[("POST", _POST_URL)][-1].kwargs["json"]
+    quote = next(b for b in post["blocks"] if b.get("expand"))["text"]["text"]
+    assert quote == "> 📚 **Found:** 14 patterns\n> ✍️ Drafting\n> Here you go."
+
+
+async def test_by_default_the_card_shows_only_the_latest_line(
+    fake_slack_web_client: Any,
+) -> None:
+    lc, *_ = _make_lifecycle(fake_slack_web_client)
+
+    for text in ("🔍 one", "📚 two", "Here you go."):
+        await lc.on_sse_event(_message_event(text))
+    await lc.on_render(_running_tool_turn())
+
+    post = fake_slack_web_client.mock.requests[("POST", _POST_URL)][-1].kwargs["json"]
+    quote = next(b for b in post["blocks"] if b.get("expand"))["text"]["text"]
+    assert quote == "> Here you go."
+
+
 async def test_render_tick_within_debounce_skips_building_the_card(
     fake_slack_web_client: Any,
 ) -> None:

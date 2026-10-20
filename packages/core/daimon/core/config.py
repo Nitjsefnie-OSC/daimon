@@ -1476,6 +1476,19 @@ class TurnSettings(BaseModel):
         ),
     )
 
+    status_log: bool = Field(
+        default=False,
+        description=(
+            'Show an agent\'s recent short updates on the "Working on it…" card. Off by '
+            "default: the card shows only the latest line the agent wrote, and consecutive "
+            "messages from the agent are joined into one block of text. On (Discord, Slack "
+            "and Teams): the card shows the last three messages the agent wrote, oldest "
+            "first, one line each (cut at 120 characters), and an answer made of several "
+            "messages keeps every one, set apart by a blank line instead of being run "
+            "together."
+        ),
+    )
+
     @field_validator("path", mode="before")
     @classmethod
     def _empty_path_is_legacy(cls, value: object) -> object:
