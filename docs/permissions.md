@@ -163,6 +163,8 @@ the turn, before anything is sent or changed, when the session:
   type, resource type or permission policy type it does not know is refused
   the same way.
 - carries skills on an entry point that does not allow them.
+- has an MCP server whose name contains `/`. Tool keys join a server and a
+  tool with `/`, so such a name could stand for a tool on another server.
 - runs on a Managed Agents runtime that cannot read the live session, so the
   checks above cannot be made. Nothing is sent, not even the first message.
 
