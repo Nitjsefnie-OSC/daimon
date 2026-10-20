@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import uuid
+from typing import Any
 
 import pytest
 import pytest_asyncio
@@ -301,3 +302,56 @@ async def test_a_flip_takes_effect_from_the_next_run_and_drops_the_in_flight_res
     assert after.sandbox_tools_enabled is enabled
     assert after.last_result_tail is None
     assert after.delivery_payload is None
+
+
+async def test_purging_an_admin_erases_them_as_setter_but_keeps_the_log(
+    db_session: AsyncSession, db_session_factory: Any
+) -> None:
+    """Privacy erasure: the change log keeps when, which routine and how; not who."""
+    from daimon.core.purge import purge_account
+    from daimon.testing.factories import make_account, make_platform_principal
+
+    tenant = await make_tenant(db_session, workspace_id="g_purge")
+    admin = await make_account(db_session, tenant=tenant)
+    await make_platform_principal(
+        db_session, platform="discord", external_id="2002", tenant=tenant, account=admin
+    )
+    by_mcp = await _routine(db_session, tenant.id)
+    by_panel_edit = await _routine(db_session, tenant.id)
+    kept = await _routine(db_session, tenant.id)
+    for row, setter in ((by_mcp, str(admin.id)), (by_panel_edit, "x"), (kept, "other-admin")):
+        await set_sandbox_tools(
+            db_session,
+            row.id,
+            tenant_id=tenant.id,
+            enabled=True,
+            set_by=setter,
+            actor=ADMIN,
+            via="mcp",
+        )
+    # The admin's panel edit is logged under their Discord user id.
+    await update_routine(
+        db_session, by_panel_edit.id, tenant_id=tenant.id, trigger_message="new", edited_by="2002"
+    )
+    await db_session.commit()
+
+    await purge_account(sm=db_session_factory, account_id=admin.id)
+
+    async with db_session_factory() as session:
+        setters = {
+            row.id: [
+                (h.set_by, h.via)
+                for h in await sandbox_tools_history(session, row.id, tenant_id=tenant.id)
+            ]
+            for row in (by_mcp, by_panel_edit, kept)
+        }
+        current = {
+            row.id: (await get_routine(session, row.id, tenant_id=tenant.id)).sandbox_tools_set_by
+            for row in (by_mcp, by_panel_edit, kept)
+        }
+    assert setters == {
+        by_mcp.id: [("erased", "mcp")],
+        by_panel_edit.id: [("x", "mcp"), ("erased", "edit")],
+        kept.id: [("other-admin", "mcp")],
+    }
+    assert current == {by_mcp.id: "erased", by_panel_edit.id: "erased", kept.id: "other-admin"}

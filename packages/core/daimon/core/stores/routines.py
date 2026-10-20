@@ -609,6 +609,45 @@ async def set_sandbox_tools(
     return RoutineRow.model_validate(orm), True
 
 
+SANDBOX_SETTER_ERASED: Final = "erased"
+
+
+async def erase_sandbox_setter(
+    session: AsyncSession,
+    *,
+    ids: Collection[str],
+    platform_users: Collection[tuple[_uuid.UUID, str]] = (),
+) -> int:
+    """Privacy erasure: replace a purged person's id as a sandbox opt-in setter.
+
+    `set_by` holds an account id (MCP), a CLI principal id (CLI) or, for a
+    panel edit, a platform user id. `ids` are matched anywhere; each
+    `platform_users` pair only within its tenant. The id becomes
+    `SANDBOX_SETTER_ERASED`; when, which routine and through what are kept, so
+    the change log stays complete. Returns the history rows rewritten.
+    """
+    erased = 0
+    for tenant_id, setter in [(None, i) for i in ids] + [(t, u) for t, u in platform_users]:
+        history = update(RoutineSandboxHistoryRecord).where(
+            RoutineSandboxHistoryRecord.set_by == setter
+        )
+        routines = update(Routine).where(Routine.sandbox_tools_set_by == setter)
+        if tenant_id is not None:
+            history = history.where(RoutineSandboxHistoryRecord.tenant_id == tenant_id)
+            routines = routines.where(Routine.tenant_id == tenant_id)
+        result = cast(
+            "CursorResult[Any]",
+            await session.execute(history.values(set_by=SANDBOX_SETTER_ERASED)),
+        )
+        erased += result.rowcount or 0
+        await session.execute(
+            routines.values(sandbox_tools_set_by=SANDBOX_SETTER_ERASED).execution_options(
+                synchronize_session=False
+            )
+        )
+    return erased
+
+
 async def sandbox_tools_history(
     session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
 ) -> list[RoutineSandboxHistoryRecord]:

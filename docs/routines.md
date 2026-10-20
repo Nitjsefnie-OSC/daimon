@@ -710,7 +710,9 @@ Each change sets `sandbox_tools_set_by` (the account or CLI principal) and
 whether it came from `mcp`, `cli` or an `edit`). An edit that changes what was
 approved, meaning the routine's agent, trigger message, destination or budget
 channel (including turning it into a DM routine), turns the opt-in off and is
-logged as `edit`. Changing the schedule, pausing or resuming keeps it.
+logged as `edit`. Changing the schedule, pausing or resuming keeps it. When an
+account is erased for privacy, its id in `sandbox_tools_set_by` and in the
+history becomes `erased`; when, which routine and how are kept.
 `get_routine` and `list_routines` return `sandbox_tools_enabled`, and the
 Discord `/routines` panel shows "Sandbox tools: on (admin opt-in)",
 "Sandbox tools: off", or for a DM routine "off (DM routines can't use sandbox
