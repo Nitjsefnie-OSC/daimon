@@ -912,3 +912,20 @@ def test_a_lead_card_that_cannot_show_its_selections_is_refused(
 ) -> None:
     with pytest.raises(ValueError, match="visible_lines"):
         _lead_prompt("Verified with the sales lead on the call.", **resolution)
+
+
+async def test_lead_details_reload_on_every_click_and_ignore_cached_prompt_lines() -> None:
+    prompt = _lead_prompt("Evidence supplied in the proposed resolution.")
+    assert prompt.detail_lines == ()
+    # Even an old serialized prompt cannot supply the details being returned.
+    prompt = prompt.model_copy(update={"detail_lines": ("stale private evidence",)})
+    load = AsyncMock(side_effect=[("live evidence v1",), ("live evidence v2",)])
+    card = build_confirmation_card(prompt, state="pending", token="tok_abcdefgh")
+    view = confirmation_module._ConfirmationView(  # pyright: ignore[reportPrivateUsage]
+        card, prompt, None, lead_details=load
+    )
+    for version in (1, 2):
+        click = _interaction(222)
+        await _buttons(view)[-1].callback(click)
+        assert click.followup.send.await_args.args[0] == f"live evidence v{version}"
+    assert load.await_count == 2

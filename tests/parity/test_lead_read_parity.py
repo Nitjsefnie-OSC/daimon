@@ -15,7 +15,7 @@ import uuid
 from collections.abc import AsyncIterator
 from dataclasses import dataclass
 from typing import Any
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import AsyncMock, MagicMock, patch
 
 import discord
 import discord.http
@@ -327,21 +327,15 @@ class World:
 
                 async with self.sessions() as session, session.begin():
                     await erase_actor(session, self.tenant_id, A_ONLY)
-            elif remove == "expire":
-                from daimon.core._models import LeadIntakeRecord
-                from sqlalchemy import update
-
-                async with self.sessions() as session, session.begin():
-                    await session.execute(
-                        update(LeadIntakeRecord)
-                        .where(LeadIntakeRecord.id == intake_id)
-                        .values(expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1))
-                    )
             click = MagicMock()
             click.user.id = int(member)
             click.response.defer = AsyncMock()
             click.followup.send = AsyncMock()
-            await details.callback(click)
+            with patch("daimon.core.stores.lead_intake.datetime", wraps=dt.datetime) as clock:
+                clock.now.return_value = dt.datetime.now(dt.UTC) + dt.timedelta(
+                    days=91 if remove == "expire" else 0
+                )
+                await details.callback(click)
             waiting.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await waiting
@@ -585,8 +579,9 @@ async def test_resume_mailbox_checks_history_even_without_readable_records(
     assert refused and "synthetic-discovery" not in text
 
 
+@pytest.mark.parametrize("hidden", ["private", "destination"])
 async def test_list_pages_past_a_hundred_hidden_records(
-    sessions: async_sessionmaker[AsyncSession],
+    sessions: async_sessionmaker[AsyncSession], hidden: str
 ) -> None:
     world = await _world(sessions, reconfigure=False)
     config, _ = await world.store.configuration()
@@ -599,6 +594,11 @@ async def test_list_pages_past_a_hundred_hidden_records(
         record = await world.store.accept(config, draft, A_ONLY)
         record.progress.discord_thread_id = PRIVATE
         await world.store.save(record)
+    member = OUTSIDE_PRIVATE
+    if hidden == "destination":
+        member = B_ONLY
+        config = config.model_copy(update={"revision": 2, "channel_id": B})
+        await world.store.configure(config, {"hubspot_access_token": "synthetic"})
     expected: list[str] = []
     for index in range(3):
         draft = template.model_copy(
@@ -606,9 +606,9 @@ async def test_list_pages_past_a_hundred_hidden_records(
         )
         record = await world.store.accept(config, draft, A_ONLY)
         expected.append(str(record.id))
-    refused, first = await world.mcp(OUTSIDE_PRIVATE, "lead_intake_list")
+    refused, first = await world.mcp(member, "lead_intake_list")
     assert not refused
     assert all(identity in first for identity in expected)
-    refused, second = await world.mcp(OUTSIDE_PRIVATE, "lead_intake_list", after_id=expected[0])
+    refused, second = await world.mcp(member, "lead_intake_list", after_id=expected[0])
     assert not refused and expected[0] not in second
     assert all(identity in second for identity in expected[1:])
