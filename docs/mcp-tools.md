@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 122 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 123 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -314,7 +314,7 @@ Report publishing MCP tools.
 
 ## `routines`
 
-Routines tools: create / list / get / update / delete.
+Routines tools: create / list / get / update / delete, and an admin's sandbox opt-in.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
@@ -322,6 +322,7 @@ Routines tools: create / list / get / update / delete.
 | `delete_routine` | all callers | Delete a routine (hard delete, tenant-scoped). |
 | `get_routine` | all callers | Get a routine by id. |
 | `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |
+| `set_routine_sandbox_tools` | admin only | Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off for one routine's own scheduled runs. |
 | `update_routine` | all callers | PATCH-update a routine, including owner-only Discord DM delivery. |
 
 ## `self_edit`

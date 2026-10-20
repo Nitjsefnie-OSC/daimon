@@ -17,9 +17,7 @@ def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.add_column(
         "routines",
-        sa.Column(
-            "sandbox_tools_enabled", sa.Boolean(), nullable=False, server_default=sa.false()
-        ),
+        sa.Column("sandbox_tools_enabled", sa.Boolean(), nullable=False, server_default=sa.false()),
     )
     op.add_column("routines", sa.Column("sandbox_tools_set_by", sa.Text(), nullable=True))
     op.add_column(
