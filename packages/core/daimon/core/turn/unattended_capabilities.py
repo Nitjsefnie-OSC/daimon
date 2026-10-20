@@ -38,6 +38,7 @@ from collections.abc import Callable, Mapping
 from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, NamedTuple, NoReturn, cast, get_args
 
+import structlog
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
@@ -77,6 +78,8 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 UnattendedEntryPoint = Literal[
     "watch", "routine", "wake", "mcp_chat", "fleet_worker", "cli_run", "checkpoint"
 ]
+
+log = structlog.get_logger(__name__)
 
 BUILTIN_TOOLSET: Final[str] = "agent_toolset_20260401"
 MCP_TOOLSET: Final[str] = "mcp_toolset"
@@ -168,19 +171,36 @@ def _fields(*names: str) -> frozenset[str]:
 # is refused until it is reviewed. Telemetry (stats, usage and its cache
 # creation, outcome evaluations) is frozen too. Opaque data (a custom tool's
 # `input_schema`, metadata values) is not walked.
+#
+# Reviewed provider fields the pinned SDK does not parse yet (they arrive as
+# extras): the session's `budget` (a spend ceiling, which can only stop
+# model requests sooner), usage's `active_seconds`, `list_cost` and
+# `server_tool_use` (counters), and the agent's `execution_identity`, which
+# is held to the one identity Managed Agents runs every agent as today
+# (`service_account`, the API key's own organisation): any other identity
+# could act as another principal, so it is refused until reviewed.
 _SESSION = _fields(
-    "id type agent archived_at created_at updated_at deployment_id environment_id",
+    "id type agent archived_at budget created_at updated_at deployment_id environment_id",
     "metadata outcome_evaluations resources stats status title usage vault_ids",
 )
 _AGENT = _fields(
-    "id type version name description model system tools mcp_servers skills multiagent"
+    "id type version name description model system tools mcp_servers skills multiagent",
+    "execution_identity",
 )
+_EXECUTION_IDENTITY = _fields("type")
+_EXECUTION_IDENTITY_TYPES = frozenset({"service_account"})
 # Inference settings only (Daimon's own driver writes `inference_geo` and
 # `effort`, which the SDK does not parse yet); none of them grants a tool.
 _MODEL = _fields("id speed inference_geo effort")
+_BUDGET = _fields("type max_list_cost")
+_MONEY = _fields("amount currency")
 _STATS = _fields("active_seconds duration_seconds")
-_USAGE = _fields("cache_creation cache_read_input_tokens input_tokens output_tokens")
+_USAGE = _fields(
+    "active_seconds cache_creation cache_read_input_tokens input_tokens list_cost output_tokens",
+    "server_tool_use",
+)
 _CACHE_CREATION = _fields("ephemeral_1h_input_tokens ephemeral_5m_input_tokens")
+_SERVER_TOOL_USE = _fields("web_fetch_requests web_search_requests")
 _OUTCOME = _fields("type outcome_id description result iteration explanation completed_at")
 # The two skill kinds the SDK knows, by their own `type` literals.
 _SKILL_TYPES = frozenset(
@@ -209,35 +229,108 @@ _CHECKOUTS: Final[Mapping[str, frozenset[str]]] = {
     "commit": _fields("type sha"),
 }
 
+#: Every reviewed node, by its path from the session (`[kind]` picks a
+#: tagged variant). The tests hold the installed SDK's own type tree to it,
+#: so an SDK upgrade that parses a new field fails CI, not a deployment.
+REVIEWED_FIELDS: Final[Mapping[str, frozenset[str]]] = {
+    "session": _SESSION,
+    "session.budget": _BUDGET,
+    "session.budget.max_list_cost": _MONEY,
+    "session.stats": _STATS,
+    "session.usage": _USAGE,
+    "session.usage.cache_creation": _CACHE_CREATION,
+    "session.usage.list_cost": _MONEY,
+    "session.usage.server_tool_use": _SERVER_TOOL_USE,
+    "session.outcome_evaluations": _OUTCOME,
+    "session.agent": _AGENT,
+    "session.agent.execution_identity": _EXECUTION_IDENTITY,
+    "session.agent.model": _MODEL,
+    **{f"session.agent.skills[{kind}]": _SKILL for kind in _SKILL_TYPES},
+    "session.agent.mcp_servers": _SERVER,
+    **{f"session.agent.tools[{kind}]": names for kind, names in _TOOLSETS.items()},
+    f"session.agent.tools[{CUSTOM_TOOL}]": _CUSTOM,
+    **{
+        f"session.agent.tools[{kind}].{node}": names
+        for kind in _TOOLSETS
+        for node, names in (("default_config", _DEFAULT_CONFIG), ("configs", _CONFIG))
+    },
+    **{
+        f"session.agent.tools[{kind}].{node}.permission_policy[{policy}]": _POLICY
+        for kind in _TOOLSETS
+        for node in ("default_config", "configs")
+        for policy in _POLICY_TYPES
+    },
+    **{f"session.resources[{kind}]": names for kind, names in _RESOURCES.items()},
+    **{
+        f"session.resources[github_repository].checkout[{kind}]": names
+        for kind, names in _CHECKOUTS.items()
+    },
+}
+#: Nodes whose contents are not walked: a coordinator roster is refused
+#: whole (`multiagent` must be null); a custom tool's schema is opaque data.
+UNWALKED_NODES: Final[frozenset[str]] = frozenset(
+    {"session.agent.multiagent", f"session.agent.tools[{CUSTOM_TOOL}].input_schema"}
+)
 
-def _refuse() -> NoReturn:
-    raise AdmissionDenied(reason="backend_unsupported")
+#: The refusal detail for a coordinator, which delegates to other agents.
+COORDINATOR_DETAIL: Final[str] = "delegation to other agents (session.agent.multiagent)"
+
+
+def _refuse(detail: str) -> NoReturn:
+    log.warning("unattended.capability_refused", detail=detail)
+    raise AdmissionDenied(reason="backend_unsupported", detail=detail)
+
+
+def _field_at(path: str) -> str:
+    return f"unreviewed provider field {path}"
+
+
+def _value_at(path: str) -> str:
+    return f"unreviewed value at {path}"
+
+
+def _unreviewed_field(path: str) -> NoReturn:
+    _refuse(_field_at(path))
+
+
+def _unreviewed_value(path: str) -> NoReturn:
+    _refuse(_value_at(path))
 
 
 #: The one private attribute the SDK sets, on the response it returns.
 _REQUEST_ID: Final[str] = "_request_id"
 
 
-def _only(value: object, names: frozenset[str]) -> None:
+def _only(value: object, names: frozenset[str], path: str) -> None:
     """Refuse `value` unless it is a parsed model carrying only `names`.
 
     Counts the fields the SDK declares (set or not), the response's extras
     and anything else on the instance, so neither a new provider key nor a
     newly parsed SDK field passes unreviewed. Private attributes are checked
-    by `_no_private_attributes`, over the whole snapshot.
+    by `_no_private_attributes`, over the whole snapshot. The refusal names
+    the first unreviewed field by its `path`.
     """
     if not isinstance(value, BaseModel):
-        _refuse()
+        _unreviewed_value(path)
     present = (
         set(type(value).model_fields)
         | set(value.model_extra or {})
         | {name for name in vars(value) if name != _REQUEST_ID}
     )
-    if present - names:
-        _refuse()
+    if unknown := sorted(present - names):
+        _unreviewed_field(f"{path}.{unknown[0]}")
 
 
-def _no_private_attributes(value: object) -> None:
+def _only_if_model(value: object, names: frozenset[str], path: str) -> None:
+    """`_only` for a node the pinned SDK keeps as a raw extra but a later one parses.
+
+    A raw extra is held to its value shape instead (`_SESSION_SHAPE`).
+    """
+    if isinstance(value, BaseModel):
+        _only(value, names, path)
+
+
+def _no_private_attributes(value: object, path: str) -> None:
     """Refuse any private or dunder attribute on any model in `value`.
 
     Walks every parsed model, list and dict under the snapshot, opaque
@@ -246,86 +339,125 @@ def _no_private_attributes(value: object) -> None:
     """
     if isinstance(value, BaseModel):
         if value.__pydantic_private__:
-            _refuse()
+            _refuse(f"unreviewed private attribute on {path}")
         attributes = vars(value)
         request_id = attributes.get(_REQUEST_ID)
         if request_id is not None and not isinstance(request_id, str):
-            _refuse()
-        if any(name.startswith("_") and name != _REQUEST_ID for name in attributes):
-            _refuse()
+            _refuse(f"unreviewed private attribute {path}.{_REQUEST_ID}")
+        for name in sorted(attributes):
+            if name.startswith("_") and name != _REQUEST_ID:
+                _refuse(f"unreviewed private attribute {path}.{name}")
         for name, entry in attributes.items():
             if name != _REQUEST_ID:
-                _no_private_attributes(entry)
-        for entry in (value.model_extra or {}).values():
-            _no_private_attributes(entry)
+                _no_private_attributes(entry, f"{path}.{name}")
+        for name, entry in (value.model_extra or {}).items():
+            _no_private_attributes(entry, f"{path}.{name}")
     elif isinstance(value, list | tuple):
-        for entry in cast("list[object] | tuple[object, ...]", value):
-            _no_private_attributes(entry)
+        for index, entry in enumerate(cast("list[object] | tuple[object, ...]", value)):
+            _no_private_attributes(entry, f"{path}.{index}")
     elif isinstance(value, dict):
-        for entry in cast("dict[object, object]", value).values():
-            _no_private_attributes(entry)
+        for key, entry in cast("dict[object, object]", value).items():
+            _no_private_attributes(entry, f"{path}.{key}")
 
 
 # Value shapes for the same nodes, checked on the snapshot's raw provider
 # form: a reviewed scalar must be that scalar (or null), so no field can hide
 # inside a value that became an object or a list. Objects and lists are
 # checked all the way down; only metadata and a custom tool's input schema
-# are opaque data.
-type _Shape = Callable[[object], bool]
+# are opaque data. A check returns None when the value fits, else the
+# refusal detail naming the first part that does not, by its path.
+type _Shape = Callable[[object, str], str | None]
 
 
-def _opaque(_value: object) -> bool:
-    return True
+def _opaque(_value: object, _path: str) -> str | None:
+    return None
 
 
 def _scalar(*kinds: type) -> _Shape:
-    def check(value: object) -> bool:
+    def check(value: object, path: str) -> str | None:
         # `bool` is an `int`; only a field typed bool accepts one.
-        return value is None or (
+        fits = value is None or (
             isinstance(value, kinds) and (bool in kinds or not isinstance(value, bool))
         )
+        return None if fits else _value_at(path)
 
     return check
 
 
 def _one_of(*values: str) -> _Shape:
-    return lambda value: value is None or (isinstance(value, str) and value in values)
+    return lambda value, path: (
+        None if value is None or (isinstance(value, str) and value in values) else _value_at(path)
+    )
+
+
+def _exactly(*values: str) -> _Shape:
+    """A required tag: one of `values`, never null."""
+    return lambda value, path: (
+        None if isinstance(value, str) and value in values else _value_at(path)
+    )
+
+
+def _digits(value: object, path: str) -> str | None:
+    fits = isinstance(value, str) and value.isascii() and value.isdigit()
+    return None if fits else _value_at(path)
 
 
 def _list(item: _Shape) -> _Shape:
-    def check(value: object) -> bool:
-        return isinstance(value, list) and all(
-            item(element) for element in cast("list[object]", value)
-        )
+    def check(value: object, path: str) -> str | None:
+        if not isinstance(value, list):
+            return _value_at(path)
+        for index, element in enumerate(cast("list[object]", value)):
+            if (failed := item(element, f"{path}.{index}")) is not None:
+                return failed
+        return None
 
     return check
 
 
 def _object(**fields: _Shape) -> _Shape:
-    def check(value: object) -> bool:
+    def check(value: object, path: str) -> str | None:
         if not isinstance(value, dict):
-            return False
+            return _value_at(path)
         entries = cast("dict[str, object]", value)
-        return set(entries) <= set(fields) and all(
-            fields[key](entry) for key, entry in entries.items()
-        )
+        if unknown := sorted(set(entries) - set(fields)):
+            return _field_at(f"{path}.{unknown[0]}")
+        for key, entry in entries.items():
+            if (failed := fields[key](entry, f"{path}.{key}")) is not None:
+                return failed
+        return None
+
+    return check
+
+
+def _requiring(key: str, shape: _Shape) -> _Shape:
+    """`shape`, refusing an object without `key` (an object's other keys may be absent)."""
+
+    def check(value: object, path: str) -> str | None:
+        if isinstance(value, dict):
+            entries = cast("dict[str, object]", value)
+            if key not in entries:
+                return f"missing provider field {path}.{key}"
+            return shape(entries, path)
+        return shape(value, path)
 
     return check
 
 
 def _nullable(shape: _Shape) -> _Shape:
-    return lambda value: value is None or shape(value)
+    return lambda value, path: None if value is None else shape(value, path)
 
 
 def _tagged(**variants: _Shape) -> _Shape:
     """An object whose `type` picks its shape."""
 
-    def check(value: object) -> bool:
+    def check(value: object, path: str) -> str | None:
         if not isinstance(value, dict):
-            return False
+            return _value_at(path)
         entries = cast("dict[str, object]", value)
         kind = entries.get("type")
-        return isinstance(kind, str) and kind in variants and variants[kind](entries)
+        if not isinstance(kind, str) or kind not in variants:
+            return _value_at(f"{path}.type")
+        return variants[kind](entries, path)
 
     return check
 
@@ -338,26 +470,33 @@ _LEVELS = ("low", "medium", "high", "xhigh", "max")
 _POLICY_SHAPE = _tagged(always_allow=_object(type=_TEXT), always_ask=_object(type=_TEXT))
 _DEFAULT_SHAPE = _object(enabled=_FLAG, permission_policy=_POLICY_SHAPE)
 _CONFIG_SHAPE = _object(name=_TEXT, enabled=_FLAG, permission_policy=_POLICY_SHAPE)
+# Minor units as a decimal string ("2500" is $25.00), never a float.
+_MONEY_SHAPE = _object(amount=_digits, currency=_TEXT)
 
 
-def _builtin_config(value: object) -> bool:
+def _builtin_config(value: object, path: str) -> str | None:
     # A built-in config may echo its own name as `type` (the driver's schema).
     if not isinstance(value, dict):
-        return False
+        return _value_at(path)
     config = dict(cast("dict[str, object]", value))
     if "type" in config and config.pop("type") != config.get("name"):
-        return False
-    return _CONFIG_SHAPE(config)
+        return _value_at(f"{path}.type")
+    return _CONFIG_SHAPE(config, path)
 
 
-def _effort(value: object) -> bool:
-    return _one_of(*_LEVELS)(value) or _object(type=_one_of(*_LEVELS))(value)
+def _effort(value: object, path: str) -> str | None:
+    if _one_of(*_LEVELS)(value, path) is None:
+        return None
+    return _object(type=_one_of(*_LEVELS))(value, path)
 
 
 _SESSION_SHAPE = _object(
     id=_TEXT,
     type=_TEXT,
     archived_at=_TEXT,
+    budget=_nullable(
+        _requiring("type", _object(type=_exactly("limit"), max_list_cost=_MONEY_SHAPE))
+    ),
     created_at=_TEXT,
     updated_at=_TEXT,
     deployment_id=_TEXT,
@@ -378,12 +517,15 @@ _SESSION_SHAPE = _object(
     ),
     stats=_object(active_seconds=_NUMBER, duration_seconds=_NUMBER),
     usage=_object(
+        active_seconds=_NUMBER,
         cache_creation=_nullable(
             _object(ephemeral_1h_input_tokens=_COUNT, ephemeral_5m_input_tokens=_COUNT)
         ),
         cache_read_input_tokens=_COUNT,
         input_tokens=_COUNT,
+        list_cost=_nullable(_MONEY_SHAPE),
         output_tokens=_COUNT,
+        server_tool_use=_nullable(_object(web_fetch_requests=_COUNT, web_search_requests=_COUNT)),
     ),
     vault_ids=_list(_TEXT),
     resources=_list(
@@ -429,6 +571,9 @@ _SESSION_SHAPE = _object(
         description=_TEXT,
         system=_TEXT,
         multiagent=_scalar(),
+        execution_identity=_nullable(
+            _requiring("type", _object(type=_exactly(*_EXECUTION_IDENTITY_TYPES)))
+        ),
         model=_object(
             id=_TEXT,
             speed=_one_of("standard", "fast"),
@@ -456,25 +601,30 @@ _SESSION_SHAPE = _object(
 
 
 def _require_toolset_configs(
-    tool: BetaManagedAgentsAgentToolset20260401 | BetaManagedAgentsMCPToolset,
+    tool: BetaManagedAgentsAgentToolset20260401 | BetaManagedAgentsMCPToolset, path: str
 ) -> None:
-    _only(tool.default_config, _DEFAULT_CONFIG)
+    _only(tool.default_config, _DEFAULT_CONFIG, f"{path}.default_config")
     configs = list(tool.configs)
     if len({config.name for config in configs}) != len(configs):
-        _refuse()
-    for config in configs:
+        _refuse(f"duplicate tool configs ({path}.configs)")
+    for index, config in enumerate(configs):
+        where = f"{path}.configs.{index}"
         if tool.type == BUILTIN_TOOLSET and "type" in (config.model_extra or {}):
             # A built-in config may echo its own name as `type`, as the
             # driver's native schema allows; nothing else.
             if (config.model_extra or {})["type"] != config.name:
-                _refuse()
-            _only(config, _CONFIG | {"type"})
+                _unreviewed_value(f"{where}.type")
+            _only(config, _CONFIG | {"type"}, where)
         else:
-            _only(config, _CONFIG)
-    for policy in (tool.default_config.permission_policy, *(c.permission_policy for c in configs)):
-        _only(policy, _POLICY)
+            _only(config, _CONFIG, where)
+    policies = (
+        (f"{path}.default_config", tool.default_config.permission_policy),
+        *((f"{path}.configs.{i}", c.permission_policy) for i, c in enumerate(configs)),
+    )
+    for where, policy in policies:
+        _only(policy, _POLICY, f"{where}.permission_policy")
         if policy.type not in _POLICY_TYPES:
-            _refuse()
+            _unreviewed_value(f"{where}.permission_policy.type")
 
 
 def require_allowed_capabilities(
@@ -490,54 +640,82 @@ def require_allowed_capabilities(
     default and per-tool config, and their permission policies. An unknown
     field is refused whatever its value, empty or not, and a known field must
     hold its reviewed shape: a scalar stays a scalar of its type (or null),
-    and objects and lists are checked all the way down.
+    and objects and lists are checked all the way down. The refusal's
+    `detail` names what was refused, by its path from `session`.
     """
-    _only(snapshot, _SESSION)
-    _no_private_attributes(snapshot)
-    if not _SESSION_SHAPE(snapshot.model_dump(mode="json", warnings=False)):
-        _refuse()
-    _only(snapshot.stats, _STATS)
-    _only(snapshot.usage, _USAGE)
+    if getattr(getattr(snapshot, "agent", None), "multiagent", None) is not None:
+        # Named first: a coordinator is refused whatever else it carries.
+        _refuse(COORDINATOR_DETAIL)
+    _only(snapshot, _SESSION, "session")
+    _no_private_attributes(snapshot, "session")
+    raw = snapshot.model_dump(mode="json", warnings=False)
+    if (failed := _SESSION_SHAPE(raw, "session")) is not None:
+        _refuse(failed)
+    _only(snapshot.stats, _STATS, "session.stats")
+    _only(snapshot.usage, _USAGE, "session.usage")
     if snapshot.usage.cache_creation is not None:
-        _only(snapshot.usage.cache_creation, _CACHE_CREATION)
-    for outcome in snapshot.outcome_evaluations:
-        _only(outcome, _OUTCOME)
+        _only(snapshot.usage.cache_creation, _CACHE_CREATION, "session.usage.cache_creation")
+    # Extras now, declared fields after an SDK upgrade: read either way.
+    usage = snapshot.usage
+    _only_if_model(getattr(usage, "list_cost", None), _MONEY, "session.usage.list_cost")
+    _only_if_model(
+        getattr(usage, "server_tool_use", None), _SERVER_TOOL_USE, "session.usage.server_tool_use"
+    )
+    budget = getattr(snapshot, "budget", None)
+    _only_if_model(budget, _BUDGET, "session.budget")
+    if isinstance(budget, BaseModel):
+        _only_if_model(
+            getattr(budget, "max_list_cost", None), _MONEY, "session.budget.max_list_cost"
+        )
+    for index, outcome in enumerate(snapshot.outcome_evaluations):
+        _only(outcome, _OUTCOME, f"session.outcome_evaluations.{index}")
     agent = snapshot.agent
-    _only(agent, _AGENT)
-    if agent.multiagent is not None or (agent.skills and not allow_skills):
-        _refuse()
-    _only(agent.model, _MODEL)
-    for skill in agent.skills:
-        _only(skill, _SKILL)
+    _only(agent, _AGENT, "session.agent")
+    identity = getattr(agent, "execution_identity", None)
+    _only_if_model(identity, _EXECUTION_IDENTITY, "session.agent.execution_identity")
+    if isinstance(identity, BaseModel) and (
+        getattr(identity, "type", None) not in _EXECUTION_IDENTITY_TYPES
+    ):
+        _unreviewed_value("session.agent.execution_identity.type")
+    if agent.skills and not allow_skills:
+        _refuse("skills (session.agent.skills)")
+    _only(agent.model, _MODEL, "session.agent.model")
+    for index, skill in enumerate(agent.skills):
+        _only(skill, _SKILL, f"session.agent.skills.{index}")
         if skill.type not in _SKILL_TYPES:
-            _refuse()
+            _unreviewed_value(f"session.agent.skills.{index}.type")
     names = [server.name for server in agent.mcp_servers]
-    if len(set(names)) != len(names) or any(SERVER_SEPARATOR in name for name in names):
-        _refuse()
-    for server in agent.mcp_servers:
-        _only(server, _SERVER)
+    if len(set(names)) != len(names):
+        _refuse("duplicate server names (session.agent.mcp_servers)")
+    for index, name in enumerate(names):
+        if SERVER_SEPARATOR in name:
+            _refuse(f"a server name holding '/' (session.agent.mcp_servers.{index}.name)")
+    for index, server in enumerate(agent.mcp_servers):
+        _only(server, _SERVER, f"session.agent.mcp_servers.{index}")
         if server.type != "url":
-            _refuse()
-    for tool in agent.tools:
+            _unreviewed_value(f"session.agent.mcp_servers.{index}.type")
+    for index, tool in enumerate(agent.tools):
+        where = f"session.agent.tools.{index}"
         if tool.type == CUSTOM_TOOL:
-            _only(tool, _CUSTOM)
+            _only(tool, _CUSTOM, where)
             continue
         if tool.type not in _TOOLSETS:
-            _refuse()
-        _only(tool, _TOOLSETS[tool.type])
+            _unreviewed_value(f"{where}.type")
+        _only(tool, _TOOLSETS[tool.type], where)
         if tool.type == MCP_TOOLSET and SERVER_SEPARATOR in tool.mcp_server_name:
-            _refuse()
-        _require_toolset_configs(tool)
-    for resource in snapshot.resources:
+            _refuse(f"a server name holding '/' ({where}.mcp_server_name)")
+        _require_toolset_configs(tool, where)
+    for index, resource in enumerate(snapshot.resources):
+        where = f"session.resources.{index}"
         kind = getattr(resource, "type", None)
         if not isinstance(kind, str) or kind not in _RESOURCES:
-            _refuse()
-        _only(resource, _RESOURCES[kind])
+            _unreviewed_value(f"{where}.type")
+        _only(resource, _RESOURCES[kind], where)
         checkout = getattr(resource, "checkout", None)
         if checkout is not None:
             if checkout.type not in _CHECKOUTS:
-                _refuse()
-            _only(checkout, _CHECKOUTS[checkout.type])
+                _unreviewed_value(f"{where}.checkout.type")
+            _only(checkout, _CHECKOUTS[checkout.type], f"{where}.checkout")
 
 
 @dataclass(frozen=True)
@@ -625,7 +803,7 @@ def _allowlisted(
     wanted: dict[str, list[str]] = {}
     for server, name in sorted(allowlist):
         if SERVER_SEPARATOR in server:
-            _refuse()
+            _refuse(f"a server name holding '/' (tool allowlist entry {server!r})")
         if server and name and server not in own:
             wanted.setdefault(server, []).append(name)
     kept: list[dict[str, Any]] = []

@@ -6,7 +6,9 @@ import asyncio
 import uuid
 from collections.abc import Callable
 from copy import deepcopy
-from typing import Any, cast, get_args
+from datetime import datetime
+from types import UnionType
+from typing import Annotated, Any, Literal, Union, cast, get_args, get_origin
 from unittest.mock import AsyncMock, MagicMock
 
 import httpx
@@ -37,6 +39,7 @@ from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, send_ev
 from daimon.testing.ma_sessions import session_turn_sse
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import Scope
+from pydantic import BaseModel
 
 from .conftest import make_status_idle
 
@@ -1157,3 +1160,310 @@ def test_the_sdk_request_id_is_the_one_private_attribute_allowed() -> None:
     object.__setattr__(pydantic_private.agent, "__pydantic_private__", {"_tools": True})
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         require_allowed_capabilities(pydantic_private, allow_skills=True)
+
+
+# --- Real provider shapes -------------------------------------------------
+#
+# Built from the installed SDK's own types, not hand-written dicts: every
+# field the SDK declares is populated, recursively, so a new SDK field shows
+# up here without anyone listing it. On top come the fields Managed Agents
+# sends that the pinned SDK does not parse yet, as Preview returned them.
+
+
+def _models_in(annotation: Any) -> list[type[BaseModel]]:
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return [annotation]
+    return [model for arg in get_args(annotation) for model in _models_in(arg)]
+
+
+def _tag(model: type[BaseModel]) -> str:
+    [kind] = get_args(model.model_fields["type"].annotation)
+    return kind
+
+
+# Realistic leaves where a placeholder string would not read as a real one.
+_LEAVES: dict[str, object] = {
+    "url": "https://linear.example/mcp",
+    "name": "linear",
+    "mcp_server_name": "linear",
+    "mount_path": "/workspace/r",
+    "amount": "2500",
+    "currency": "USD",
+    "version": "1",
+}
+_INPUT_SCHEMA = {"type": "object", "properties": {"q": {"type": "string"}}, "required": ["q"]}
+
+
+def _sdk_value(annotation: Any, field: str) -> object:
+    """A realistic value for one SDK annotation; a list holds every union member."""
+    origin = get_origin(annotation)
+    if origin is Annotated:
+        return _sdk_value(get_args(annotation)[0], field)
+    if origin is Literal:
+        return get_args(annotation)[0]
+    if origin is list:
+        [item] = get_args(annotation)
+        if len(members := _models_in(item)) > 1:
+            return [_sdk_payload(member) for member in members]
+        return [_sdk_value(item, field)]
+    if origin is dict:
+        return {"daimon_tenant": "449f4dc5-5990-52c0-96e0-45a4ab3bf0e4"}
+    if origin in (Union, UnionType):
+        options = [arg for arg in get_args(annotation) if arg is not type(None)]
+        if models := _models_in(annotation):
+            return _sdk_payload(models[-1])  # policies: the last is always_ask
+        return _sdk_value(options[0], field)
+    if isinstance(annotation, type) and issubclass(annotation, BaseModel):
+        return _sdk_payload(annotation)
+    if annotation is datetime:
+        return "2026-10-20T09:07:08Z"
+    if annotation is bool:
+        return True
+    if annotation is int:
+        return 3
+    if annotation is float:
+        return 1.5
+    if annotation is str:
+        return _LEAVES.get(field, f"{field}_01")
+    raise AssertionError(f"no realistic value for {field}: {annotation!r}")
+
+
+def _sdk_payload(model: type[BaseModel]) -> dict[str, Any]:
+    payload: dict[str, Any] = {}
+    for field, info in model.model_fields.items():
+        if field == "multiagent":
+            payload[field] = None  # A coordinator is refused; see its own tests.
+        elif field == "input_schema":
+            payload[field] = deepcopy(_INPUT_SCHEMA)
+        else:
+            payload[field] = _sdk_value(info.annotation, field)
+    return payload
+
+
+# Seen on Preview (2026-10-20) on every session and agent, and absent from the
+# pinned SDK: the outage this section guards against.
+_PREVIEW_SESSION_EXTRAS: dict[str, Any] = {"budget": None}
+_PREVIEW_AGENT_EXTRAS: dict[str, Any] = {"execution_identity": {"type": "service_account"}}
+# What a later SDK declares on the same nodes (the session budget as a limit,
+# the agent model's inference settings, usage counters).
+_LATER_SDK_SESSION_EXTRAS: dict[str, Any] = {
+    "budget": {"type": "limit", "max_list_cost": {"amount": "2500", "currency": "USD"}},
+}
+_LATER_SDK_MODEL_EXTRAS: dict[str, Any] = {"inference_geo": "us", "effort": {"type": "high"}}
+_LATER_SDK_USAGE_EXTRAS: dict[str, Any] = {
+    "active_seconds": 2.5,
+    "list_cost": {"amount": "31", "currency": "USD"},
+    "server_tool_use": {"web_fetch_requests": 0, "web_search_requests": 1},
+}
+
+
+def _provider_payload(*, later_sdk: bool = False, skills: bool = True) -> dict[str, Any]:
+    payload = _sdk_payload(BetaManagedAgentsSession)
+    if not skills:
+        payload["agent"]["skills"] = []
+    payload.update(deepcopy(_PREVIEW_SESSION_EXTRAS))
+    payload["agent"].update(deepcopy(_PREVIEW_AGENT_EXTRAS))
+    if later_sdk:
+        payload.update(deepcopy(_LATER_SDK_SESSION_EXTRAS))
+        payload["agent"]["model"].update(deepcopy(_LATER_SDK_MODEL_EXTRAS))
+        payload["usage"].update(deepcopy(_LATER_SDK_USAGE_EXTRAS))
+    return payload
+
+
+def _parsed(payload: dict[str, Any]) -> BetaManagedAgentsSession:
+    """Parsed as the SDK parses a response: validated declared fields, extras kept."""
+    BetaManagedAgentsSession.model_validate(payload)  # Every declared field is well formed.
+    return cast(
+        BetaManagedAgentsSession, construct_type(type_=BetaManagedAgentsSession, value=payload)
+    )
+
+
+def test_the_provider_payload_populates_every_declared_field() -> None:
+    session = BetaManagedAgentsSession.model_validate(_provider_payload())
+    assert session.model_fields_set >= set(BetaManagedAgentsSession.model_fields)
+    assert {tool.type for tool in session.agent.tools} == {
+        "agent_toolset_20260401",
+        "mcp_toolset",
+        "custom",
+    }
+    assert {resource.type for resource in session.resources} == set(caps._RESOURCES)  # pyright: ignore[reportPrivateUsage]
+    assert session.usage.cache_creation is not None
+    assert session.model_extra == _PREVIEW_SESSION_EXTRAS
+    assert session.agent.model_extra == _PREVIEW_AGENT_EXTRAS
+
+
+@pytest.mark.parametrize("later_sdk", [False, True], ids=["preview", "later_sdk"])
+def test_a_real_shaped_session_is_admitted(later_sdk: bool) -> None:
+    """The 2026-10-20 Preview outage: `budget` and `execution_identity` were refused."""
+    session = _parsed(_provider_payload(later_sdk=later_sdk))
+    require_allowed_capabilities(session, allow_skills=True)
+    require_allowed_capabilities(_parsed(_provider_payload(later_sdk=later_sdk, skills=False)))
+
+
+@pytest.mark.parametrize("later_sdk", [False, True], ids=["preview", "later_sdk"])
+@pytest.mark.parametrize("entry_point", ENTRY_POINTS)
+async def test_every_unattended_entry_point_runs_a_real_shaped_session(
+    entry_point: UnattendedEntryPoint, later_sdk: bool
+) -> None:
+    """Read back through the SDK, gated, and sent: the model call happens."""
+    skills = ENTRY_POINT_POLICY[entry_point].allow_skills
+    snapshot = _parsed(_provider_payload(later_sdk=later_sdk, skills=skills))
+    provider, result = await _drive(snapshot, entry_point)
+
+    assert not isinstance(result, AdmissionDenied), result.detail
+    assert result.error is None
+    [agent] = provider.at_send
+    assert agent["execution_identity"] == {"type": "service_account"}
+    assert not _builtins_runnable(agent["tools"])
+
+
+def _sdk_nodes(
+    model: type[BaseModel], path: str, unwalked: set[str]
+) -> list[tuple[str, type[BaseModel]]]:
+    """Every model the SDK can parse under `path`, keyed as `REVIEWED_FIELDS` keys it."""
+    nodes = [(path, model)]
+    for field, info in model.model_fields.items():
+        members = _models_in(info.annotation)
+        for member in members:
+            child = f"{path}.{field}" + (f"[{_tag(member)}]" if len(members) > 1 else "")
+            if child in caps.UNWALKED_NODES:
+                unwalked.add(child)
+            else:
+                nodes += _sdk_nodes(member, child, unwalked)
+    return nodes
+
+
+def test_every_field_the_sdk_declares_has_been_reviewed() -> None:
+    """An SDK upgrade that parses a new field fails here, not on a deployment.
+
+    Each model reachable from the session type must be a reviewed node, and
+    each field it declares a reviewed field of that node, or the node must be
+    one the gate refuses or treats as opaque (`UNWALKED_NODES`).
+    """
+    unwalked: set[str] = set()
+    nodes = _sdk_nodes(BetaManagedAgentsSession, "session", unwalked)
+    assert len(nodes) > 20
+    assert unwalked == caps.UNWALKED_NODES
+    unreviewed = {
+        f"{path}.{field}"
+        for path, model in nodes
+        for field in model.model_fields
+        if field not in caps.REVIEWED_FIELDS.get(path, frozenset())
+    }
+    assert not unreviewed, f"review these SDK fields in unattended_capabilities: {unreviewed}"
+
+
+@pytest.mark.parametrize(
+    ("change", "detail"),
+    [
+        pytest.param(
+            _set("agent.execution_identity", {"type": "user", "user_id": "u_1"}),
+            "unreviewed provider field session.agent.execution_identity.user_id",
+            id="identity_with_a_principal",
+        ),
+        pytest.param(
+            _set("agent.execution_identity", {"type": "user"}),
+            "unreviewed value at session.agent.execution_identity.type",
+            id="identity_of_another_kind",
+        ),
+        pytest.param(
+            _set("agent.execution_identity", "service_account"),
+            "unreviewed value at session.agent.execution_identity",
+            id="identity_as_a_string",
+        ),
+        pytest.param(
+            _set("agent.execution_identity", {}),
+            "missing provider field session.agent.execution_identity.type",
+            id="identity_empty",
+        ),
+        pytest.param(
+            _set("budget", {}),
+            "missing provider field session.budget.type",
+            id="budget_empty",
+        ),
+        pytest.param(
+            _set("budget", {"max_list_cost": {"amount": "2500", "currency": "USD"}}),
+            "missing provider field session.budget.type",
+            id="budget_without_type",
+        ),
+        pytest.param(
+            _set("budget", {"type": "unlimited"}),
+            "unreviewed value at session.budget.type",
+            id="budget_of_another_kind",
+        ),
+        pytest.param(
+            _set(
+                "budget", {"type": "limit", "max_list_cost": {"amount": "1.5", "currency": "USD"}}
+            ),
+            "unreviewed value at session.budget.max_list_cost.amount",
+            id="budget_not_in_minor_units",
+        ),
+        pytest.param(
+            _set("budget", {"type": "limit", "max_list_cost": None, "tools": True}),
+            "unreviewed provider field session.budget.tools",
+            id="budget_field",
+        ),
+        pytest.param(
+            _set("usage.server_tool_use", {"code_execution_requests": 1}),
+            "unreviewed provider field session.usage.server_tool_use.code_execution_requests",
+            id="usage_counter",
+        ),
+        pytest.param(
+            _set("sandbox", {}), "unreviewed provider field session.sandbox", id="session_field"
+        ),
+        pytest.param(
+            _set("agent.tools.1.configs.0.scope", "all"),
+            "unreviewed provider field session.agent.tools.1.configs.0.scope",
+            id="config_field",
+        ),
+    ],
+)
+def test_the_refusal_names_the_unreviewed_path(
+    change: Callable[[dict[str, Any]], object], detail: str
+) -> None:
+    session = _mutated(lambda s: (s.update(deepcopy(_PREVIEW_SESSION_EXTRAS)), change(s)))
+    with pytest.raises(AdmissionDenied, match="backend_unsupported") as refused:
+        require_allowed_capabilities(session)
+    assert refused.value.reason == "backend_unsupported"
+    assert refused.value.detail == detail
+    assert str(refused.value) == f"backend_unsupported: {detail}"
+
+
+def test_only_a_coordinator_is_refused_as_delegation() -> None:
+    with pytest.raises(AdmissionDenied) as refused:
+        require_allowed_capabilities(_coordinator_session(), allow_skills=True)
+    assert refused.value.detail == caps.COORDINATOR_DETAIL
+    with pytest.raises(AdmissionDenied) as refused:
+        require_allowed_capabilities(_mutated(_set("budget", {"type": "unlimited"})))
+    assert "delegat" not in str(refused.value.detail)
+
+
+class _Money(BaseModel):
+    amount: str
+    currency: str
+
+
+class _BudgetLimit(BaseModel):
+    """`BetaManagedAgentsBudgetLimit`, as anthropic 1.11 declares it."""
+
+    max_list_cost: _Money
+    type: Literal["limit"]
+
+
+class _Identity(BaseModel):
+    type: str
+
+
+def _later_sdk_session(identity: str = "service_account") -> BetaManagedAgentsSession:
+    """`budget` and `execution_identity` parsed as models, not kept as extras."""
+    session = _root_session()
+    budget = _BudgetLimit.model_validate(_LATER_SDK_SESSION_EXTRAS["budget"])
+    agent = session.agent.model_copy(update={"execution_identity": _Identity(type=identity)})
+    return session.model_copy(update={"budget": budget, "agent": agent})
+
+
+def test_a_later_sdk_parsing_the_reviewed_fields_is_admitted() -> None:
+    require_allowed_capabilities(_later_sdk_session())
+    with pytest.raises(AdmissionDenied) as refused:
+        require_allowed_capabilities(_later_sdk_session(identity="user"))
+    assert refused.value.detail == "unreviewed value at session.agent.execution_identity.type"

@@ -103,6 +103,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Unattended turns (agent chat `start_turn`/`ask`, routines, watches and wakes)
+  run again on Managed Agents sessions that carry the provider's `budget` and
+  `execution_identity` fields; every one was refused before the model call. A
+  refusal now names the field it could not review (for example
+  `unreviewed provider field session.budget`) instead of claiming the agent
+  delegates to other agents.
+
 - Preserve recorded approval cards for existing backend switches and other
   non-watch actions when the provider omits session overrides after watch gates
   are introduced. Watch enrollment still requires its own verified approval.
