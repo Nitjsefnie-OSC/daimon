@@ -69,3 +69,46 @@ async def install_watch_ports(session: AsyncSession) -> None:
         )
     await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))
     await session.execute(text(f"GRANT USAGE ON SCHEMA {quoted} TO daimon_sidecar"))
+
+
+async def install_poll_ports(session: AsyncSession) -> None:
+    """Install the successor polling ports into the same owned throwaway schema."""
+    await install_watch_ports(session)
+    schema = await session.scalar(text("SELECT current_schema()"))
+    assert isinstance(schema, str) and schema.startswith("test_")
+    quoted = '"' + schema + '"'
+    migration = runpy.run_path(
+        str(Path(__file__).resolve().parents[3] / "core/alembic/versions/0120_watch_polling.py")
+    )
+    for key in ("PROJECT_SQL", "PAGE_SQL", "POLL_SQL", "CLAIM_SQL"):
+        await session.execute(text(migration[key].format(schema=quoted)))
+    await session.execute(
+        text(f"REVOKE ALL ON FUNCTION {quoted}.project_watch_document(jsonb,text) FROM PUBLIC")
+    )
+    await session.execute(
+        text(
+            f"GRANT EXECUTE ON FUNCTION {quoted}.project_watch_document(jsonb,text) "
+            "TO daimon_watch_ingress_owner"
+        )
+    )
+    await session.execute(
+        text(
+            f"REVOKE ALL ON FUNCTION {quoted}.accept_watch_poll_result(uuid,text,jsonb,text) "
+            "FROM PUBLIC,daimon_sidecar,daimon_watch_ingress_owner"
+        )
+    )
+    await session.execute(
+        text(
+            f"GRANT UPDATE(status,revision,lease_owner,lease_expires_at) "
+            f"ON {quoted}.watches TO daimon_watch_ingress_owner"
+        )
+    )
+    await session.execute(text(f"GRANT CREATE ON SCHEMA {quoted} TO daimon_watch_ingress_owner"))
+    await session.execute(text(f"REVOKE ALL ON FUNCTION {quoted}.claim_watch_polls() FROM PUBLIC"))
+    await session.execute(
+        text(f"ALTER FUNCTION {quoted}.claim_watch_polls() OWNER TO daimon_watch_ingress_owner")
+    )
+    await session.execute(
+        text(f"GRANT EXECUTE ON FUNCTION {quoted}.claim_watch_polls() TO daimon_sidecar")
+    )
+    await session.execute(text(f"REVOKE CREATE ON SCHEMA {quoted} FROM daimon_watch_ingress_owner"))

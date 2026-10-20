@@ -274,9 +274,10 @@ def test_session_tools_gate_third_party_toolsets_only() -> None:
     assert out[0] == _tools()[0]
     assert out[1] == _tools()[1] | {
         "configs": [
-            {"name": "add_skill", "enabled": True, "permission_policy": {"type": "always_ask"}}
+            {"name": name, "enabled": True, "permission_policy": {"type": "always_ask"}}
+            for name in ("add_skill", "create_watch", "resume_watch", "rotate_watch_key")
         ]
-    }, "daimon's own toolset stays trusted, except the one tool that confirms"
+    }, "Daimon confirms skill installation and standing watch authority"
     assert out[2]["default_config"] == {"permission_policy": {"type": "always_ask"}}
     assert out[2]["configs"] == [
         {"name": "create_issue", "permission_policy": {"type": "always_ask"}}
@@ -405,8 +406,9 @@ def test_a_disabled_daimon_toolset_keeps_add_skill_disabled() -> None:
     out = session_tools_for_policy(_ON, stored, trusted_servers=frozenset({DAIMON_SERVER_NAME}))
     assert out is not None
     assert out[0]["configs"] == [
-        {"name": "add_skill", "enabled": False, "permission_policy": {"type": "always_ask"}}
-    ], "add_skill is not switched on"
+        {"name": name, "enabled": False, "permission_policy": {"type": "always_ask"}}
+        for name in ("add_skill", "create_watch", "resume_watch", "rotate_watch_key")
+    ], "confirmation gates must not enable a disabled toolset"
 
 
 def test_publish_tools_ask_only_in_a_session_that_asks_before_publishing() -> None:
@@ -727,7 +729,14 @@ def test_a_daimon_rule_makes_call_tool_and_the_named_tool_ask() -> None:
     daimon = out[1]
     assert daimon["default_config"] == {"permission_policy": {"type": "always_allow"}}
     asked = {c["name"] for c in daimon["configs"] if c["permission_policy"]["type"] == "always_ask"}
-    assert asked == {"add_skill", "call_tool", "hubspot_update_objects"}
+    assert asked == {
+        "add_skill",
+        "call_tool",
+        "hubspot_update_objects",
+        "create_watch",
+        "resume_watch",
+        "rotate_watch_key",
+    }
     assert has_confirmation_gate(out, tool_name="call_tool")
     assert not has_confirmation_gate(out, tool_name="search_tools"), "search never asks"
     plain = session_tools_for_policy(_ON, _tools(), trusted_servers=_TRUSTED)
@@ -743,7 +752,14 @@ def test_a_rule_naming_a_confirmed_tool_does_not_duplicate_its_config() -> None:
     )
     assert out is not None
     names = [c["name"] for c in out[1]["configs"]]
-    assert sorted(names) == ["add_skill", "call_tool", "publish_report"]
+    assert sorted(names) == [
+        "add_skill",
+        "call_tool",
+        "create_watch",
+        "publish_report",
+        "resume_watch",
+        "rotate_watch_key",
+    ]
 
 
 def test_daimon_rules_are_inert_for_session_tools_until_both_switches_are_on() -> None:
@@ -786,7 +802,13 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         _RULES_ON, _tools(), trusted_servers=_TRUSTED, daimon_rule_tools=frozenset({"*"})
     )
     assert only is not None
-    assert sorted(c["name"] for c in only[1]["configs"]) == ["add_skill", "call_tool"]
+    assert sorted(c["name"] for c in only[1]["configs"]) == [
+        "add_skill",
+        "call_tool",
+        "create_watch",
+        "resume_watch",
+        "rotate_watch_key",
+    ]
     both = session_tools_for_policy(
         _RULES_ON,
         _tools(),
@@ -797,7 +819,10 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
     assert sorted(c["name"] for c in both[1]["configs"]) == [
         "add_skill",
         "call_tool",
+        "create_watch",
         "get_session",
+        "resume_watch",
+        "rotate_watch_key",
     ]
 
 
