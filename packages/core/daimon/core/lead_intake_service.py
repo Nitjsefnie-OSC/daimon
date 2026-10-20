@@ -23,7 +23,12 @@ from daimon.core.lead_intake import (
     split_dossier,
     verify_lead_evidence,
 )
-from daimon.core.lead_intake_access import LeadReadTarget, discovery_target, read_target
+from daimon.core.lead_intake_access import (
+    LeadReadTarget,
+    actual_thread_id,
+    discovery_target,
+    read_target,
+)
 from daimon.core.stores.lead_intake import IntakeStore
 from pydantic import BaseModel
 
@@ -226,13 +231,10 @@ class IntakeService:
 
     async def _authorize_effects(self, record: IntakeRecord) -> None:
         """Write authority over the record's actual destination and dossier thread."""
-        thread_id = record.progress.discord_thread_id or next(
-            (e.remote_id for e in record.effects if e.step == "thread" and e.remote_id), None
-        )
         await self.reauthorize(
             IntakeAccess(
                 source=record.submission.source if record.submission else None,
-                thread_id=thread_id,
+                thread_id=actual_thread_id(record),
             )
         )
 
