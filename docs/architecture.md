@@ -120,7 +120,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
-| `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Capability callback HTTP ingress; no turns or provider credentials. |
+| `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Signed callback ingress and bounded poll scheduling; no turns or provider credentials. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
@@ -2416,12 +2416,57 @@ send/edit/upload, chunk and terminal success/error uses a latched output check:
 once refused, cleanup and late tasks cannot publish retained content. Watch turns
 start no detached output-file sweeps after their grant ends.
 
-Stop, key rotation and gate revocation cancel queued wakes; re-enabling requires
-fresh events. Evidence is escaped as untrusted text and expires after seven days.
-Account erasure removes registrations, evidence, pending wakes and owner controls;
-the privacy preview includes them. There are no enrollment tools, polls or internal
-watch migration. See [self-hosting](self-hosting.md#signed-page-event-watch-sidecar)
-for source, storage and request limits.
+Revoking a key, stopping a watch or disabling an owner/tenant/global gate cancels
+queued wakes. Re-enabling does not revive them. Evidence expires after seven days;
+independent byte, row and rate quotas prevent a pending batch growing without bound.
+Migration `0120_watch_polling` follows `0119_watches`. Sidecar claims at most four
+poll leases through `claim_watch_polls()`, then submits only a watch UUID and opaque
+60-second lease to the separate private `watch-executor:8767` service's
+`/internal/watches/{watch_id}/poll` endpoint. The public MCP app has no poll route.
+Only fixed private OS origins are supported and redirects are disabled. The lease
+is a scheduling capability; the caller supplies no tool, arguments, identity or
+result. Sidecar cannot read watch rows or submit poll results. The OS executor loads
+the immutable registration and rechecks current membership, agent rules, seals,
+exact destination visibility and source permissions before every read, and again
+before saving its result. It uses existing Discord `read_thread` and `read_channel`
+implementations as the human owner. No AI turn is spent polling. Both producer
+gates apply before a source is read; stopped/expired leases cannot commit.
+
+Polls exclude bot/assistant rows before selecting the latest human-message window
+and before projection; pagination metadata is excluded too. Neither self-reports
+nor cross-watch reports can trigger polls. A scan stops at 201 messages; an
+incomplete human window backs off without changing baseline or evidence.
+Source IDs must match `^[1-9][0-9]{0,19}$`; resolved places are compared before
+reads. Enrollment verifies the attended owner's exact-tool approval with
+`session_card_gap` inside the tool. Unsupported backends and ungated/unreadable
+proofs refuse, including with tool safety off.
+
+`continuity.poll_tools.POLL_TOOLS` is an explicit reviewed READ catalogue; unlisted,
+non-READ and NO_WATCH operations cannot enroll. Poll arguments must explicitly
+name a source different from the reporting thread, preventing self-report wake loops.
+The agent must currently have that read enabled with `always_allow` in its own
+canonical OS MCP toolset; missing, disabled or approval-required reads stop the watch. Arguments exclude URLs and limit
+reads to 20 messages. The safe jq-style projection subset supports identity, object
+fields and numeric indexes, with 4 KiB, depth-16 and 1,024-node input/output limits.
+The first poll saves a baseline without firing. Later `change`, `added` and `updated`
+comparisons save their baseline with evidence and the existing `watch_fired` wake in
+one transaction. False/empty change results re-arm without firing; zero is meaningful.
+Removals alone do not fire added/updated rules. Per-watch/owner caps, coalescing,
+retention and the read-and-report turn path are shared with page events. Poll errors
+back off exponentially to one day; revoked access pauses the watch and cancels wakes.
+
+MCP enrollment requires an attended turn origin and binds its tenant, owner, agent,
+thread, parent and session. Owner/admin management cancels queued wakes on pause,
+rotation and deletion. Fresh signing keys go only to the owner's private DM, once;
+MCP results and stored rows contain no plaintext key. Operators install the delivered
+key on the OS host and sidecar. The offline CLI importer accepts no signing keys,
+imports everything paused, and requires explicit exact-binding confirmation before
+activation. An unmapped source cannot be confirmed or resumed. The existing Discord
+notice poller sends its owner a private migration notice without running a model or
+resuming the watch. Notebook and report hosts do not provide a page document query
+store; imported `artifact_db_query` sources therefore remain `source_unmapped`.
+Account erasure removes owned registrations, evidence, pending wakes and owner
+stop controls; the privacy preview includes the watches it will erase.
 
 
 ## Lead intake

@@ -28,6 +28,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Turns nobody watches (routines, timers and worker wakes, fleet workers, agent chat, `daimon run` and workspace checkpoints) refuse a session whose agent coordinates other agents, before anything is sent: its roster's agents could run tools and MCP writes the unattended gate cannot reach, and Managed Agents cannot remove the roster from a live session. Such a routine fails with `AdmissionDenied: backend_unsupported`, agent chat answers with a tool error, and a checkpoint carries only the conversation. A session carrying a field this release has not reviewed, at any level from the session and its resources down to a tool's permission policy, is refused the same way (including a field hidden inside a setting that should be a plain value), as is an unattended turn on a Managed Agents runtime that cannot read its session. Every MCP call in these sessions now pauses for the unattended decider, Daimon's own tools and calls with tool safety off included; the decider allows what it allowed before. Built-in sandbox tools (bash, file edits and the rest) and custom tools are disabled for every unattended entry point, including watches, with no opt-in. Routines and other unattended runs cannot generate files with sandbox tools, and workspace checkpoints cannot create sandbox archives.
 
 - A conversation can run on a model of its own: `/model` in a Discord thread shows it or switches it to Haiku, Sonnet or Opus (or back to the agent's default), and asking in words ("use opus", "think harder") switches it on any platform. The thread keeps the choice for every later reply, across restarts; other conversations and the stored agent are unchanged. Anyone who may start a turn there may change it; routines and other unattended runs can't. A choice that can no longer run falls back to the agent's own model, and the reply says so. Worker fleets ignore the choice: a fleet root and its workers always run the model the agent's owner approved, and `/model` says so on such a thread.
+- Prevent watch feedback loops with bounded human-only poll windows and canonical
+  source IDs. Verify owner enrollment cards inside create/resume/key rotation;
+  unsupported backends refuse. Document exact isolated preview enable commands.
+
+- Require attended owner approval to enroll, resume or rotate watches; prevent
+  polling the reporting thread, honor the agent's live read toolset, and isolate
+  polling on an authenticated private executor. Scheduling races no longer appear
+  as owner access revocation.
 
 - Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
 
@@ -44,6 +52,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   output write; a failed check latches delivery off through cleanup. Startup audits
   resolve the real ingress schema and refuse unsafe effective database privileges.
   Expired batches never absorb fresh events.
+- Add deterministic polling of reviewed OS read tools, bounded projections, saved
+  baselines, separate poll leases and error backoff. Owner MCP tools manage watches
+  and deliver page signing keys privately once. Offline imports remain paused until
+  their exact owner and destination are confirmed; unmapped page-data polls stay
+  paused and queue a private owner notice.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 
@@ -94,6 +107,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
   refusal now names the field it could not review (for example
   `unreviewed provider field session.budget`) instead of claiming the agent
   delegates to other agents.
+
+- Preserve recorded approval cards for existing backend switches and other
+  non-watch actions when the provider omits session overrides after watch gates
+  are introduced. Watch enrollment still requires its own verified approval.
+
 - Protect legacy destination-free routine previews and diagnostics from non-owner
   readers, including administrators, across MCP and chat panels. Clear retained
   legacy private output once during upgrade; operator backfill output stays redacted.

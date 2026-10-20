@@ -1373,7 +1373,8 @@ HMAC keys (32–256 bytes, at most 16 keys). Supply matching keys only to author
 OS page hosts and the sidecar, never browser HTML or model context. Registrations
 store hashes, not recoverable keys. Initial enrollment binds an existing Discord
 thread, page and key. Hosts check page ACLs and CSRF before using `sign_page_event`;
-there is no public signing route, outside sender mode or live internal migration.
+there is no public signing route or outside sender mode. Offline file imports are
+described below.
 
 POST signed UTF-8 evidence to `/callbacks/watches/{watch_id}` with `X-Page-ID`,
 `X-Watch-Key-ID`, `X-Timestamp`, `X-Event-ID` and `X-Signature`. The signature binds
@@ -1398,9 +1399,148 @@ with producers off; freshness checks prevent replay after ledger pruning.
 Stop/key rotation cancels queued wakes and fences later sends; accepted provider
 requests cannot be undone. Re-enabling requires fresh events. Turns only read and
 report under current access, spend and execution-origin checks; shell, built-ins,
-skills and management tools are unavailable. There are no polling or MCP management
-tools. See [architecture](architecture.md#signed-page-event-watch-entry-point) for
+skills and management tools are unavailable. See
+[architecture](architecture.md#signed-page-event-watch-entry-point) for
 per-write output checks, tool restoration and cancellation behavior.
+
+#### Polling and owner management
+
+Migration `0120_watch_polling` adds leased scheduling and the transactional OS result
+port. Sidecar gains only `claim_watch_polls()`; it still cannot enumerate tables,
+read credentials/policy, submit source results or enqueue arbitrary wakes. The OS
+MCP database login must own the migrations/result function (or receive an explicit
+EXECUTE grant on `accept_watch_poll_result(uuid,text,jsonb,text)` from its owner).
+Do not grant that port to `daimon_sidecar`. The separate `watch-executor` service
+listens on private port 8767, with no published port or proxy route. It has no MCP
+tools; the public MCP app has no poll route. Supply a random 32–256 byte secret as
+`DAIMON_WATCHES__EXECUTOR_SECRET` on the executor and the same value as
+`DAIMON_SIDECAR__EXECUTOR_SECRET` on sidecar (Compose wires both from the former).
+Unset secrets disable poll transport. Authentication and a cheap exact-lease lookup
+precede rate accounting, so invalid requests cannot consume the real-poll budget.
+Sidecar sends only the service secret and short-lived lease, never owner credentials.
+
+Sidecar checks due work every five seconds, at most four polls per tick. A poll
+lease lasts 60 seconds, independently of the durable wake's lease. Each OS executor
+call has a 25-second deadline; the sidecar transport has 30 seconds, follows no
+redirects and ignores proxy environment variables. `DAIMON_SIDECAR__OS_EXECUTOR_ORIGIN`
+accepts only `http://watch-executor:8767` (Compose) or `http://127.0.0.1:8767` (local processes).
+Run the separate private listener with
+`uvicorn daimon.adapters.mcp.watch_executor:create_watch_executor_app --factory --host 127.0.0.1 --port 8767 --no-access-log`.
+`DAIMON_SIDECAR__POLL_INTERVAL_S` controls the 1–60 second tick interval. Both producer
+gates must be on before any poll runs. Source errors back off exponentially from
+the registered interval to a maximum of one day. Revoked owner/source/destination
+access pauses polling and cancels queued work. Expired watches stop automatically.
+
+`create_watch`, `list_watches`, `show_watch`, `pause_watch`, `resume_watch`,
+`rotate_watch_key` and `delete_watch` are owner MCP tools (tenant admins may show, pause or delete
+another owner's watch). Creation, resume and signing-key rotation require an attended
+owner `origin_context_id` and a human confirmation card even with tool safety off;
+admins cannot resume or rotate for someone else. Creation never takes a
+caller-selected owner or destination. Only reviewed `read_thread` and `read_channel`
+are pollable; no arbitrary HTTP or external sender mode is supported. Poll intervals
+are 60–86400 seconds, with 1–30 day lifetime and at most 25 live watches per owner.
+The first successful poll establishes the baseline without waking the agent.
+Polls select human-authored rows before the message limit; bots/assistants and
+pagination metadata never enter projections. Self-reports and cross-watch reports
+cannot trigger polls. At most 201 messages are scanned; an incomplete human window
+backs off without changing the baseline. Poll documents contain only `rows`;
+legacy baselines are re-established without firing, and the versioned saved-value
+envelope shares the 4 KiB bound. Source IDs require canonical positive
+ASCII decimal spelling (1–20 digits). Enrollment verifies the attended owner's
+exact-tool card proof server-side via `session_card_gap`; unsupported backends and
+ungated/unreadable sessions refuse, including with tool safety off.
+Poll arguments must name a source distinct from the reporting thread. The agent
+must have the read enabled without approval on its canonical OS MCP toolset.
+Gate, expiry and lease races release the matching poll lease without marking owner
+access revoked. Actual owner or binding revocation pauses and cancels queued wakes.
+
+Projections accept `.`, `.field.nested` and `.rows[0].content`; unsupported jq must
+be rewritten by an operator. Input and output are limited to 4 KiB, depth 16 and
+1,024 JSON nodes. `change` fires on a new non-empty/non-false value (including zero),
+`added` on new array elements and `updated` on new/changed object keys. Deletions
+alone do not fire. The latest 20 events plus an omitted count are retained per
+pending firing. Daily caps (24/watch, 100/owner), evidence quotas and seven-day
+retention are shared across callbacks and polls. No additional turn path exists.
+
+Fresh page signing keys are sent only to the owner's private DM, once; the MCP
+result contains a key ID but no key. Install that key on the authorized OS page
+host and in the sidecar's secret key map, then reload the service. Rotation revokes
+the old key and cancels its queued wakes. A failed private delivery pauses the watch;
+rotate again to retry with fresh material. List/show never reveal the secret.
+
+#### Offline internal-watch import
+
+Run `daimon watches import /private/watches.json` only against the intended isolated
+OS database. It reads an export file, never connects to internal. The file must be
+at most 1 MiB, be stored privately, and follow this format (`...` values below must
+be replaced with real reviewed OS bindings):
+
+```json
+{
+  "version": 1,
+  "watches": [{
+    "legacy_id": "internal-watch-4",
+    "source": "poll",
+    "instructions": "Report changes.",
+    "tool": "artifact_db_query",
+    "arguments": {"artifact_id": "legacy-page", "collection": "items"},
+    "projection": ".",
+    "rule": "change",
+    "interval": 600,
+    "baseline": {"value": false},
+    "expires_at": "2026-11-01T00:00:00Z",
+    "max_turns_per_day": 24,
+    "os_binding": {
+      "tenant_id": "00000000-0000-0000-0000-000000000001",
+      "platform": "discord",
+      "parent_channel_id": "4241",
+      "thread_id": "4242",
+      "requester_account_id": "00000000-0000-0000-0000-000000000002",
+      "requester_external_user_id": "123",
+      "target_ma_agent_id": "agent-bound",
+      "target_name": "analyst",
+      "requested_work": null,
+      "reason": "watch_fired",
+      "idempotency_key": "00000000-0000-0000-0000-000000000003"
+    }
+  }]
+}
+```
+
+For the internal export, include only the four approved live definitions: source,
+instructions, page ID, tool/arguments, projection, rule, interval, `state.value`
+as `baseline.value`, expiry and daily cap. Map owner and exact destination to
+`os_binding` using the operator's verified OS identities; for callbacks use
+`source: "page_event"` and a mapped OS `page_id`. Never export callback tokens,
+signing keys, saved credentials, active leases or wake prompts. The supplied usage
+snapshot had no unfinished wakes; recheck that independently at cutover. The import
+format deliberately has no unfinished-wake transfer. Expiry must be within thirty
+days; permanent definitions need an explicit finite OS lifetime. Requested daily
+caps above 24 are retained for review but the effective v1 cap is 24.
+
+All imports start PAUSED and unconfirmed; rerunning the same tenant/legacy ID is
+idempotent. Unknown poll tools import with `source_unmapped`, cannot resume, and
+queue this owner DM through the existing Discord notice path:
+`this watch is paused until page data moves to Daimon OS`. Sending the notice never
+resumes the watch. Notebook/report hosts have no queryable page collection store;
+`artifact_db_query` has no OS mapping in this release. No page store is created.
+
+Unsupported callback projections import with `projection_unmapped` and cannot be
+confirmed. Rewrite them into the supported subset before importing a reviewed
+manifest. Reruns preserve existing definitions; delete a paused projection import
+and re-import a corrected manifest after review. For mapped callback imports, the
+owner first calls `rotate_watch_key` to
+receive a fresh key privately; internal keys are never copied. Confirm each mapped
+watch only after reviewing every binding field:
+
+```sh
+daimon watches confirm WATCH_UUID TENANT_UUID OWNER_ACCOUNT_UUID AGENT_ID PARENT_CHANNEL_ID THREAD_ID
+```
+
+Confirmation refuses a mismatched binding, unmapped source/projection, expired
+watch or missing page key. It activates a mapped definition; both producer gates
+still independently control execution. Ordinary owner `resume_watch` cannot bypass
+operator confirmation.
 
 
 Native [lead intake](lead-intake.md) uses the existing `DAIMON_CRYPTO__KEYS`

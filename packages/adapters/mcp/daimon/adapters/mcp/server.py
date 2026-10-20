@@ -558,6 +558,9 @@ def create_mcp_app(
     time.register_time_tools(mcp, runtime)
     routines.register_routines_tools(mcp, runtime)
     register_lead_intake_tools(mcp, runtime)
+    from daimon.adapters.mcp.tools.watches import register_watch_tools
+
+    register_watch_tools(mcp, runtime)
     register_timer_tools(mcp, runtime)  # one-shot timers on the wake queue
     register_cli_token_tool(mcp, runtime)
     if any((effective_settings.discord, effective_settings.slack, effective_settings.teams)):

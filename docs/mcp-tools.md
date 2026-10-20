@@ -1,6 +1,6 @@
 # MCP tool catalogue
 
-The 129 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
+The 136 tools Daimon's MCP server registers, plus the 8 on the hub login mounts.
 Generated from the live registry by `scripts/generate_mcp_tool_catalogue.py` — edit the
 tool's docstring, not this page. CI fails when the two disagree.
 
@@ -458,6 +458,20 @@ Vault tool: list_credentials — safe projection of caller's MCP vault credentia
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
 | `list_credentials` | agent tokens only | List credentials in the caller's MCP vault (safe projection — no secrets). |
+
+## `watches`
+
+Owner-bound watch management.
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `create_watch` | all callers | Watch an OS page event or a reviewed OS read tool from this conversation. |
+| `delete_watch` | all callers | Delete your watch and its retained evidence after cancelling queued wakes; admins may delete within their workspace. |
+| `list_watches` | all callers | List your watches in this workspace, including paused imports and expiry; no signing secrets. |
+| `pause_watch` | all callers | Pause your watch and cancel its queued wakes. |
+| `resume_watch` | all callers | Resume your paused watch from an attended owner turn after fresh access checks. |
+| `rotate_watch_key` | all callers | Rotate an OS page signing key, revoke the old key and cancel queued wakes. |
+| `show_watch` | all callers | Show your watch's immutable destination, source, status and expiry. |
 
 ## `wizard`
 

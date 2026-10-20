@@ -12,6 +12,7 @@ from typing import Literal
 
 import anthropic
 import structlog
+from anthropic.types.beta.beta_managed_agents_mcp_toolset import BetaManagedAgentsMCPToolset
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.resource_ports import mcp_scope, retrieve_session
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -27,7 +28,12 @@ from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import has_confirmation_gate, microsoft_send_tools
+from daimon.core.tool_safety import (
+    DAIMON_SERVER_NAME,
+    WATCH_CONFIRMED_TOOLS,
+    has_confirmation_gate,
+    microsoft_send_tools,
+)
 from daimon.core.turn.approvals import daimon_rule_tools_for
 from mux.errors import ScopeViolation
 
@@ -146,6 +152,10 @@ async def _recorded_as_gated(
     session; equal to the gated tools a session for this caller gets now
     (`session_tools`, asking before publishing or not), it is the server's own
     record of the card. An agent changed since that bind reads as not gated.
+
+    Non-watch actions also recognize the pre-watch hash format, omitting only
+    the newly added watch gates. The requested action must still ask in that
+    exact recorded template. Watch enrollment never uses this compatibility path.
     """
     recorded = live.effective_config
     if recorded is None:
@@ -185,9 +195,8 @@ async def _recorded_as_gated(
                 tool_safety=runtime.settings.tool_safety,
                 public_url=None if public_url is None else str(public_url),
                 asks_before_publishing=asks_before_publishing,
-                confirmed_tools=backend_switch_tools(
-                    enabled=backend_selection_enabled(runtime.settings.turn)
-                )
+                confirmed_tools=WATCH_CONFIRMED_TOOLS
+                | backend_switch_tools(enabled=backend_selection_enabled(runtime.settings.turn))
                 | microsoft_send_tools(
                     enabled=runtime.settings.microsoft_accounts.configured,
                     tool_safety_on=runtime.settings.tool_safety.enabled,
@@ -195,8 +204,32 @@ async def _recorded_as_gated(
                 | await confirmation_tools(runtime.session_factory, auth.tenant_id),
                 daimon_rule_tools=daimon_rule_tools,
             )
-            if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
-                [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
-            ):
-                return True
+            candidates = [tools]
+            if tool_name not in WATCH_CONFIRMED_TOOLS:
+                # Existing non-watch cards remain valid across watch enrollment's
+                # introduction. Reconstruct only that known historical difference;
+                # the whole recorded hash and the requested tool's ask still must
+                # match. This candidate can never prove a watch enrollment card.
+                candidates.append(
+                    [
+                        tool.model_copy(
+                            update={
+                                "configs": [
+                                    config
+                                    for config in tool.configs or []
+                                    if config.name not in WATCH_CONFIRMED_TOOLS
+                                ]
+                            }
+                        )
+                        if isinstance(tool, BetaManagedAgentsMCPToolset)
+                        and tool.mcp_server_name == DAIMON_SERVER_NAME
+                        else tool
+                        for tool in tools
+                    ]
+                )
+            for candidate in candidates:
+                if hash_tools(candidate) == recorded.tools_sha256 and has_confirmation_gate(
+                    [tool.model_dump(mode="json") for tool in candidate], tool_name=tool_name
+                ):
+                    return True
     return False

@@ -9,11 +9,16 @@ import uuid
 from collections import deque
 from collections.abc import AsyncIterator
 
-from aiohttp import web
+from aiohttp import ClientSession, ClientTimeout, web
 from daimon.adapters.sidecar.settings import SidecarSettings
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.page_events import MAX_EVENT_BYTES, SignedPageEvent
-from daimon.core.stores.watches import accept_page_event, audit_sidecar_identity, prune_evidence
+from daimon.core.stores.watches import (
+    accept_page_event,
+    audit_sidecar_identity,
+    claim_poll_watches,
+    prune_evidence,
+)
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
@@ -95,7 +100,10 @@ def create_app(
                 async with sessions.begin() as session:
                     key = await accept_page_event(session, delivery, key=key.get_secret_value())
                 # The context commits before success is observable by the sender.
-                return web.json_response({"accepted": True, "wake_id": str(key)}, status=202)
+                return web.json_response(
+                    {"accepted": key is not None, "wake_id": None if key is None else str(key)},
+                    status=202,
+                )
         except DBAPIError as exc:
             # Never log exception text/parameters, authorization headers or bodies.
             state = getattr(exc.orig, "sqlstate", None)
@@ -150,10 +158,28 @@ def run() -> None:
                     pass  # Retry bounded cleanup; no exception/parameter logging.
                 await asyncio.sleep(3600)
 
+        async def polls() -> None:
+            async with ClientSession(timeout=ClientTimeout(total=30), trust_env=False) as http:
+                while True:
+                    with contextlib.suppress(Exception):
+                        await poll_once(
+                            async_sessionmaker(engine),
+                            http,
+                            origin=settings.os_executor_origin,
+                            executor_secret=settings.executor_secret.get_secret_value()
+                            if settings.executor_secret
+                            else None,
+                        )
+                    await asyncio.sleep(settings.poll_interval_s)
+
+        poll_task = asyncio.create_task(polls(), name="sidecar.polls")
         task = asyncio.create_task(prune(), name="sidecar.retention")
         try:
             yield
         finally:
+            poll_task.cancel()
+            with contextlib.suppress(asyncio.CancelledError):
+                await poll_task
             task.cancel()
             with contextlib.suppress(asyncio.CancelledError):
                 await task
@@ -168,3 +194,34 @@ def run() -> None:
         access_log=None,
         handler_args={"request_timeout": settings.request_timeout_s},
     )
+
+
+async def poll_once(
+    sessions: async_sessionmaker[AsyncSession],
+    http: ClientSession,
+    *,
+    origin: str,
+    executor_secret: str | None = None,
+) -> int:
+    """Schedule at most four reads; only a registered OS executor receives leases."""
+    if not load_watches_settings().enabled:
+        return 0
+    if executor_secret is None:
+        return 0
+    if origin not in {"http://watch-executor:8767", "http://127.0.0.1:8767"}:
+        raise ValueError("Poll executor must be the private OS service")
+    async with sessions.begin() as db:
+        leases = await claim_poll_watches(db)
+
+    async def check(item: dict[str, str]) -> None:
+        if not load_watches_settings().enabled:
+            return
+        async with http.post(
+            f"{origin}/internal/watches/{item['watch_id']}/poll",
+            headers={"X-Watch-Lease": item["lease"], "X-Watch-Executor-Key": executor_secret},
+            allow_redirects=False,
+        ) as response:
+            response.release()
+
+    await asyncio.gather(*(check(item) for item in leases))
+    return len(leases)

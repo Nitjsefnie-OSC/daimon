@@ -24,8 +24,8 @@ Three questions, each a total function of its arguments:
   "Daimon's own" is verified, not a name match: see `trusted_servers_for`
   and `heal_reserved_server`.
   `session_tools_for_policy` applies it to a session's tool list, which
-  `create_session` sends as a per-session override. One daimon tool still
-  asks: `add_skill`, once its input names the reviewed `content_hash`
+  `create_session` sends as a per-session override. Confirmed daimon tools
+  still ask, including: `add_skill`, once its input names the reviewed `content_hash`
   (`CONFIRMED_DAIMON_TOOLS`), since it puts new files in front of everyone
   the agent answers. A run nobody watches never confirms one, whatever
   `unattended_writes` allows. Daimon's `PUBLISH_TOOLS` ask too in a session
@@ -41,9 +41,9 @@ Three questions, each a total function of its arguments:
   then the fixed gates (`PUBLISH_TOOLS`, `CONFIRMED_DAIMON_TOOLS`), then an
   agent `ask`. A rule never loosens a fixed gate.
 
-With `enabled=False` (the default) nothing else changes: every toolset stays
-`always_allow` and every call is allowed, which is the behaviour before this
-module existed.
+With `enabled=False` (the default), ordinary toolsets stay `always_allow`.
+Person-only actions, including watch creation, resume and key rotation, retain
+their confirmation cards regardless of that switch.
 
 Pure module — no I/O, no clock, no settings lookup. The shells (session
 create, turn driver, adapter cards) read a policy value and a `ToolVerdict` from here
@@ -62,6 +62,7 @@ from pydantic import BaseModel, ConfigDict, Field
 __all__ = [
     "APPROVAL_TOOLS",
     "CONFIRMED_DAIMON_TOOLS",
+    "WATCH_CONFIRMED_TOOLS",
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
     "PUBLISH_TOOLS",
@@ -169,6 +170,9 @@ SERVER_SEPARATOR: Final[str] = "/"
 #: to the input field whose presence makes the call the write. Without it the
 #: call only previews, and runs. With it, an unattended run is always refused.
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
+    "create_watch": "source",
+    "resume_watch": "watch_id",
+    "rotate_watch_key": "watch_id",
     "add_skill": "content_hash",
     "lead_intake_resolve": "resolution",
     "request_agent_backend_switch": "preview_digest",
@@ -177,6 +181,11 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     # Every call names its method; asks only with tool safety on.
     "microsoft_write": "method",
 }
+
+
+WATCH_CONFIRMED_TOOLS: Final[frozenset[str]] = frozenset(
+    {"create_watch", "resume_watch", "rotate_watch_key"}
+)
 
 
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:

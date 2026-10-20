@@ -126,6 +126,7 @@ from daimon.core.continuity.wakes import (
     run_wake_poller,
     skip_thread_wakes,
 )
+from daimon.core.continuity.watch_notices import poll_watch_notices
 from daimon.core.credential_form_expiry import run_credential_form_expiry_poller
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -162,6 +163,7 @@ from daimon.core.stores.domain import (
     TenantRow,
     ThreadSessionRow,
     TurnCardIntentRow,
+    WatchRow,
 )
 from daimon.core.stores.github_access_requests import AccessRequest
 from daimon.core.stores.github_connect_notices import ConnectNotice
@@ -1196,6 +1198,7 @@ class DaimonBot(commands.Bot):
                     self.runtime.sessionmaker,
                     platform="discord",
                     deliver=self._send_connect_notice,
+                    after_poll=self._poll_watch_import_notices,
                     should_stop=lambda: self.draining or self.is_closed(),
                 )
             )
@@ -3702,6 +3705,22 @@ class DaimonBot(commands.Bot):
             return True
         except discord.HTTPException:
             return False
+
+    async def _poll_watch_import_notices(self) -> None:
+        from daimon.adapters.discord.budget_notice import send_member_notice
+
+        async def deliver(watch: WatchRow, workspace_id: str, text: str) -> bool:
+            return await send_member_notice(
+                self.runtime,
+                self.open_member_dm,
+                self.is_closed,
+                tenant_id=watch.tenant_id,
+                workspace_id=workspace_id,
+                recipient_id=watch.owner_external_id,
+                text=text,
+            )
+
+        await poll_watch_notices(self.runtime.sessionmaker, deliver=deliver)
 
     async def open_member_dm(self, guild_id: int, user_id: int) -> discord.abc.Messageable:
         """A DM with a human member of `guild_id` (routine delivery fallback).

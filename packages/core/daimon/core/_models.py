@@ -3949,6 +3949,7 @@ class Watch(Base):
     """Owner-registered source and immutable conversation binding."""
 
     __tablename__ = "watches"
+    __table_args__ = (Index("watch_poll_due_idx", "source", "status", "next_check_at"),)
     id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), primary_key=True, server_default=func.gen_random_uuid()
     )
