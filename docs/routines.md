@@ -560,8 +560,9 @@ owner already has a DM turn running, the scheduled slot is skipped with
 `owner_busy`; no prompt waits for later execution.
 
 DM routines support Managed Agents only and refuse other runtimes before session
-allocation. They run with `attended=False`: the shared S1 gate checks the actual
-session before each message or confirmation batch, including after replacement.
+allocation. They run with `attended=False`: the shared unattended session gate
+checks the actual session before each message or confirmation batch, including
+after replacement.
 Tool rules, trusted annotations and their credentials use that session's frozen
 agent and endpoints. DM execution has no channel tool-rule scope; its saved
 budget channel does not grant tool permissions. Card-only actions are refused,
