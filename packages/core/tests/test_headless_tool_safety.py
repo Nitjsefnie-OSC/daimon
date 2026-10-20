@@ -11,17 +11,25 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 import pytest
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
 from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session, with_coordinator
+from daimon.testing.ma_models import (
+    ma_agent,
+    ma_environment,
+    ma_session,
+    with_coordinator,
+    with_hidden_capability,
+)
 from pydantic import HttpUrl
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)
@@ -75,7 +83,7 @@ def _router(
     events: list[dict[str, Any]] | None = None,
     agent_tools: list[dict[str, Any]] | None = None,
     agent_servers: list[dict[str, Any]] | None = None,
-    coordinator: bool = False,
+    unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession] | None = None,
     updates: list[dict[str, Any]] | None = None,
 ) -> MARouter:
     router = MARouter()
@@ -115,8 +123,8 @@ def _router(
             or [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
         ),
     )
-    if coordinator:
-        frozen = with_coordinator(frozen)
+    if unconstrainable is not None:
+        frozen = unconstrainable(frozen)
     router.add(
         "GET",
         r"/v1/sessions/ses_1$",
@@ -471,14 +479,22 @@ _BUILTINS: dict[str, object] = {
 }
 
 
+@pytest.mark.parametrize(
+    "unconstrainable",
+    [with_coordinator, with_hidden_capability],
+    ids=["coordinator", "hidden_field"],
+)
 @pytest.mark.parametrize("enabled", [True, False])
 async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
     enabled: bool,
+    unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession],
 ) -> None:
     """The roster cannot be removed from a live session, so nothing is sent."""
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
-    client = build_fake_anthropic(_router(creates=creates, sends=sends, coordinator=True).dispatch)
+    client = build_fake_anthropic(
+        _router(creates=creates, sends=sends, unconstrainable=unconstrainable).dispatch
+    )
 
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await run_turn(

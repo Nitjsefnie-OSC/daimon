@@ -107,6 +107,68 @@ def _mutated(change: Callable[[dict[str, Any]], object]) -> BetaManagedAgentsSes
     )
 
 
+def _set(path: str, value: object) -> Callable[[dict[str, Any]], object]:
+    """Set a dotted path (list indices as numbers) in a raw snapshot."""
+
+    def change(session: dict[str, Any]) -> None:
+        *parents, leaf = path.split(".")
+        node: Any = session
+        for key in parents:
+            node = node[int(key)] if key.isdigit() else node[key]
+        node[int(leaf) if leaf.isdigit() else leaf] = value
+
+    return change
+
+
+_HIDDEN = {"future_capability": True}
+_ASKING = {"enabled": True, "permission_policy": {"type": "always_ask"}}
+
+# A reviewed scalar that became an object or a list, at each kind of node.
+_HIDDEN_SHAPES: dict[str, Callable[[dict[str, Any]], object]] = {
+    "effort_list": _set("agent.model.effort", [_HIDDEN]),
+    "effort_type_object": _set("agent.model.effort", {"type": _HIDDEN}),
+    "effort_unknown_level": _set("agent.model.effort", "unbounded"),
+    "inference_geo_object": _set("agent.model.inference_geo", _HIDDEN),
+    "speed_list": _set("agent.model.speed", ["fast", _HIDDEN]),
+    "model_id_object": _set("agent.model.id", _HIDDEN),
+    "agent_version_object": _set("agent.version", _HIDDEN),
+    "system_list": _set("agent.system", [_HIDDEN]),
+    "server_url_object": _set("agent.mcp_servers.0.url", _HIDDEN),
+    "builtin_enabled_object": _set("agent.tools.0.default_config.enabled", _HIDDEN),
+    "builtin_config_enabled_list": _set("agent.tools.0.configs.0.enabled", [_HIDDEN]),
+    "mcp_config_name_object": _set("agent.tools.1.configs.0.name", _HIDDEN),
+    "policy_type_object": _set("agent.tools.1.default_config.permission_policy.type", _HIDDEN),
+    "policy_list": _set("agent.tools.1.default_config.permission_policy", [_HIDDEN]),
+    "tool_null": _set("agent.tools.1", None),
+    "tool_list": _set("agent.tools.1", [_HIDDEN]),
+    "vault_id_object": _set("vault_ids", [_HIDDEN]),
+    "resource_mount_object": lambda s: s["resources"].append({**_FILE, "mount_path": _HIDDEN}),
+    "checkout_name_list": lambda s: s["resources"].append(
+        {
+            "id": "sesrsc_2",
+            "type": "github_repository",
+            "url": "https://github.com/o/r",
+            "mount_path": "/workspace/r",
+            "checkout": {"type": "branch", "name": [_HIDDEN]},
+            "created_at": "2026-10-01T00:00:00Z",
+            "updated_at": "2026-10-01T00:00:00Z",
+        }
+    ),
+    # Nothing to rewrite (already asking, built-ins allowed): no update would
+    # run the native schema, so admission alone must catch it.
+    "no_change_enabled_object": lambda s: s["agent"].update(
+        tools=[
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "linear",
+                "default_config": {**_ASKING, "enabled": _HIDDEN},
+                "configs": [{"name": "create_issue", **_ASKING}],
+            }
+        ]
+    ),
+}
+
+
 class _FutureModelConfig(BetaManagedAgentsModelConfig):
     """An SDK upgrade that starts parsing a field this release never reviewed."""
 
@@ -399,6 +461,10 @@ async def test_attended_chat_posture_is_unchanged() -> None:
             id="resource_type",
         ),
         pytest.param(_sdk_recognized_field, id="sdk_recognized_field"),
+        *(
+            pytest.param(lambda change=change: _mutated(change), id=f"shape_{name}")
+            for name, change in _HIDDEN_SHAPES.items()
+        ),
     ],
 )
 @pytest.mark.parametrize("entry_point", ENTRY_POINTS)
@@ -732,3 +798,24 @@ def test_model_inference_settings_daimon_writes_pass(effort: object) -> None:
 def test_a_builtin_config_may_echo_its_own_name_as_type() -> None:
     session = _mutated(lambda s: s["agent"]["tools"][0]["configs"][0].update(type="bash"))
     require_allowed_capabilities(session)
+
+
+def test_a_hidden_field_in_a_session_needing_no_update_is_still_refused(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The no-change fast path never reaches the native update schema."""
+    clean = _mutated(
+        lambda s: s["agent"].update(
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "linear",
+                    "default_config": _ASKING,
+                    "configs": [{"name": "create_issue", **_ASKING}],
+                }
+            ]
+        )
+    )
+    require_allowed_capabilities(clean)
+    with pytest.raises(AdmissionDenied):
+        require_allowed_capabilities(_mutated(_HIDDEN_SHAPES["no_change_enabled_object"]))

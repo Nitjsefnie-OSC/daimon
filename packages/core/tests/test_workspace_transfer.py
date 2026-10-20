@@ -1590,17 +1590,22 @@ async def test_a_checkpoint_follows_its_conversations_rules_not_its_budget_chann
     assert answers == [expected]
 
 
+@pytest.mark.parametrize(
+    "unconstrainable",
+    ["with_coordinator", "with_hidden_capability"],
+    ids=["coordinator", "hidden_field"],
+)
 async def test_a_coordinator_session_is_never_checkpointed(
-    db_session_factory: async_sessionmaker[AsyncSession],
+    unconstrainable: str, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
     """The checkpoint turn is unattended: a coordinator roster is refused before
     its message, so only the conversation crosses and nothing is sent."""
-    from daimon.testing.ma_models import with_coordinator
+    from daimon.testing import ma_models
 
     state = FakeSessionsState(ma=FakeMAState())
     client = _client(state)
     old_session = await _make_session(client)
-    state.sessions[old_session] = with_coordinator(state.sessions[old_session])
+    state.sessions[old_session] = getattr(ma_models, unconstrainable)(state.sessions[old_session])
     _seed_conversation(state, old_session, with_reply=True)
     before = state.sessions[old_session].agent.tools
 

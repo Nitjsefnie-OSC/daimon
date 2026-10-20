@@ -7,9 +7,10 @@ entirely. Every pause is then decided by `unattended_posture`, which always
 answers through `unattended_decider` and never `AutoApprove`. Safety off is
 the explicit `enabled=False` policy from settings, under which the decider
 allows ordinary third-party calls. Prepared fleet/wake turns require a fresh
-Managed Agents snapshot before every confirmation batch. A runtime without
-that read capability refuses every unattended confirmation, even with safety
-off; it never falls back to an allow decision.
+Managed Agents snapshot before every confirmation batch; a Managed Agents
+runtime without that read is refused before its first message
+(`run_prepared_turn`). A non-Anthropic runtime refuses every unattended
+confirmation, even with safety off; it never falls back to an allow decision.
 
 What the session may still do beyond gated MCP tools (a coordinator, the
 built-in sandbox, skills, fields this release does not know) is decided per

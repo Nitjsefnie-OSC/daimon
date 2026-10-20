@@ -1082,7 +1082,11 @@ checks every capability-bearing node (session, resources and checkouts,
 agent, model, skills, servers, tools, toolset defaults, per-tool configs,
 permission policies) against a field allowlist frozen in the module rather
 than read from the SDK, before any update: an unknown field, empty or not,
-and an unknown tool, resource or policy type are refused.
+and an unknown tool, resource or policy type are refused. The snapshot's raw
+form is also checked against the reviewed value shapes (`_SESSION_SHAPE`): a
+scalar leaf must be that scalar or null, objects and lists are walked to the
+bottom, and only telemetry, metadata and a custom tool's `input_schema` stay
+opaque, so a field cannot hide in a value that turned into an object.
 `constrain_capabilities` computes the arrays to send (built-ins disabled when
 the policy says so, an optional `server/tool` allowlist, and every retained
 MCP toolset's default and per-tool configs on `always_ask`, trusted

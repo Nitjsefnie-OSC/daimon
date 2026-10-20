@@ -941,9 +941,11 @@ async def run_prepared_turn_impl(
     says whether a person is waiting (default: every origin but `routine`).
     Unattended turns always use the unattended decider, policy on or off.
     Managed Agents re-reads and gates the session before every message and
-    confirmation batch, including recovery. Non-Anthropic runtimes and mux
-    backends without a session read refuse every unattended confirmation
-    with a plain reason; a gate failure prevents the batch from being sent.
+    confirmation batch, including recovery; a Managed Agents backend without
+    a session read is refused with `AdmissionDenied` before its first message,
+    since its session cannot be checked. Non-Anthropic runtimes refuse every
+    unattended confirmation with a plain reason; a gate failure prevents the
+    batch from being sent.
     Attended writes use the adapter's card hook when the policy requires it;
     a missing hook refuses them with `no_confirmation_surface`.
 

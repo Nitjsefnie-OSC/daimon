@@ -142,10 +142,11 @@ with it on.
 
 ## What an unattended session may carry
 
-Every turn nobody watches builds its session through one helper,
-`daimon.core.turn.unattended_capabilities`, before its message and before
-each confirmation batch. It refuses the turn, before anything is sent or
-changed, when the session:
+Every turn nobody watches on Managed Agents builds its session through one
+helper, `daimon.core.turn.unattended_capabilities`, before its message and
+before each confirmation batch. (A turn on another backend has no such
+session to check; it refuses every tool call that pauses.) The helper refuses
+the turn, before anything is sent or changed, when the session:
 
 - belongs to an agent that coordinates other agents (`multiagent`). The
   roster's agents carry their own tools and MCP servers, which the gate cannot
@@ -156,8 +157,11 @@ changed, when the session:
   stores), the agent, its model, skills and MCP servers, each tool, a
   toolset's default and per-tool settings, and their permission policies.
   An unknown field is refused even when it is empty, and so is one a newer
-  SDK has started to parse. A tool type, resource type or permission policy
-  type it does not know is refused the same way.
+  SDK has started to parse. A known field must also hold its reviewed shape:
+  a setting that should be a word, number or true/false is refused when it
+  arrives as an object or a list, so nothing new can hide inside it. A tool
+  type, resource type or permission policy type it does not know is refused
+  the same way.
 - carries skills on an entry point that does not allow them.
 - runs on a Managed Agents runtime that cannot read the live session, so the
   checks above cannot be made. Nothing is sent, not even the first message.

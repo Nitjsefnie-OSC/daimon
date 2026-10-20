@@ -25,7 +25,7 @@ from __future__ import annotations
 
 import asyncio
 import uuid
-from collections.abc import Mapping
+from collections.abc import Callable, Mapping
 from dataclasses import dataclass
 from typing import Any, Final, Literal, NoReturn, cast, get_args
 
@@ -145,7 +145,6 @@ _AGENT = _fields(
 # Inference settings only (Daimon's own driver writes `inference_geo` and
 # `effort`, which the SDK does not parse yet); none of them grants a tool.
 _MODEL = _fields("id speed inference_geo effort")
-_EFFORT = _fields("type")
 # The two skill kinds the SDK knows, by their own `type` literals.
 _SKILL_TYPES = frozenset(
     kind
@@ -196,6 +195,176 @@ def _only(value: object, names: frozenset[str]) -> None:
         _refuse()
 
 
+# Value shapes for the same nodes, checked on the snapshot's raw provider
+# form: a reviewed scalar must be that scalar (or null), so no field can hide
+# inside a value that became an object or a list. Objects and lists are
+# checked all the way down; only telemetry, metadata and a custom tool's
+# input schema are opaque data.
+type _Shape = Callable[[object], bool]
+
+
+def _opaque(_value: object) -> bool:
+    return True
+
+
+def _scalar(*kinds: type) -> _Shape:
+    def check(value: object) -> bool:
+        # `bool` is an `int`; only a field typed bool accepts one.
+        return value is None or (
+            isinstance(value, kinds) and (bool in kinds or not isinstance(value, bool))
+        )
+
+    return check
+
+
+def _one_of(*values: str) -> _Shape:
+    return lambda value: value is None or (isinstance(value, str) and value in values)
+
+
+def _list(item: _Shape) -> _Shape:
+    def check(value: object) -> bool:
+        return isinstance(value, list) and all(
+            item(element) for element in cast("list[object]", value)
+        )
+
+    return check
+
+
+def _object(**fields: _Shape) -> _Shape:
+    def check(value: object) -> bool:
+        if not isinstance(value, dict):
+            return False
+        entries = cast("dict[str, object]", value)
+        return set(entries) <= set(fields) and all(
+            fields[key](entry) for key, entry in entries.items()
+        )
+
+    return check
+
+
+def _nullable(shape: _Shape) -> _Shape:
+    return lambda value: value is None or shape(value)
+
+
+def _tagged(**variants: _Shape) -> _Shape:
+    """An object whose `type` picks its shape."""
+
+    def check(value: object) -> bool:
+        if not isinstance(value, dict):
+            return False
+        entries = cast("dict[str, object]", value)
+        kind = entries.get("type")
+        return isinstance(kind, str) and kind in variants and variants[kind](entries)
+
+    return check
+
+
+_TEXT = _scalar(str)
+_FLAG = _scalar(bool)
+_LEVELS = ("low", "medium", "high", "xhigh", "max")
+_POLICY_SHAPE = _tagged(always_allow=_object(type=_TEXT), always_ask=_object(type=_TEXT))
+_DEFAULT_SHAPE = _object(enabled=_FLAG, permission_policy=_POLICY_SHAPE)
+_CONFIG_SHAPE = _object(name=_TEXT, enabled=_FLAG, permission_policy=_POLICY_SHAPE)
+
+
+def _builtin_config(value: object) -> bool:
+    # A built-in config may echo its own name as `type` (the driver's schema).
+    if not isinstance(value, dict):
+        return False
+    config = dict(cast("dict[str, object]", value))
+    if "type" in config and config.pop("type") != config.get("name"):
+        return False
+    return _CONFIG_SHAPE(config)
+
+
+def _effort(value: object) -> bool:
+    return _one_of(*_LEVELS)(value) or _object(type=_one_of(*_LEVELS))(value)
+
+
+_SESSION_SHAPE = _object(
+    id=_TEXT,
+    type=_TEXT,
+    archived_at=_TEXT,
+    created_at=_TEXT,
+    updated_at=_TEXT,
+    deployment_id=_TEXT,
+    environment_id=_TEXT,
+    status=_TEXT,
+    title=_TEXT,
+    metadata=_opaque,
+    outcome_evaluations=_opaque,
+    stats=_opaque,
+    usage=_opaque,
+    vault_ids=_list(_TEXT),
+    resources=_list(
+        _tagged(
+            file=_object(
+                id=_TEXT,
+                type=_TEXT,
+                file_id=_TEXT,
+                mount_path=_TEXT,
+                created_at=_TEXT,
+                updated_at=_TEXT,
+            ),
+            github_repository=_object(
+                id=_TEXT,
+                type=_TEXT,
+                url=_TEXT,
+                mount_path=_TEXT,
+                created_at=_TEXT,
+                updated_at=_TEXT,
+                checkout=_nullable(
+                    _tagged(
+                        branch=_object(type=_TEXT, name=_TEXT),
+                        commit=_object(type=_TEXT, sha=_TEXT),
+                    )
+                ),
+            ),
+            memory_store=_object(
+                type=_TEXT,
+                memory_store_id=_TEXT,
+                access=_TEXT,
+                description=_TEXT,
+                instructions=_TEXT,
+                mount_path=_TEXT,
+                name=_TEXT,
+            ),
+        )
+    ),
+    agent=_object(
+        id=_TEXT,
+        type=_TEXT,
+        version=_scalar(int),
+        name=_TEXT,
+        description=_TEXT,
+        system=_TEXT,
+        multiagent=_scalar(),
+        model=_object(
+            id=_TEXT,
+            speed=_one_of("standard", "fast"),
+            inference_geo=_one_of("us", "global"),
+            effort=_effort,
+        ),
+        skills=_list(_object(skill_id=_TEXT, type=_TEXT, version=_scalar(str, int))),
+        mcp_servers=_list(_object(name=_TEXT, type=_TEXT, url=_TEXT)),
+        tools=_list(
+            _tagged(
+                agent_toolset_20260401=_object(
+                    type=_TEXT, default_config=_DEFAULT_SHAPE, configs=_list(_builtin_config)
+                ),
+                mcp_toolset=_object(
+                    type=_TEXT,
+                    mcp_server_name=_TEXT,
+                    default_config=_DEFAULT_SHAPE,
+                    configs=_list(_CONFIG_SHAPE),
+                ),
+                custom=_object(type=_TEXT, name=_TEXT, description=_TEXT, input_schema=_opaque),
+            )
+        ),
+    ),
+)
+
+
 def _require_toolset_configs(
     tool: BetaManagedAgentsAgentToolset20260401 | BetaManagedAgentsMCPToolset,
 ) -> None:
@@ -228,19 +397,18 @@ def require_allowed_capabilities(
     has not reviewed, at every capability-bearing level: the session and its
     resources, the agent, its model, skills and servers, each tool, toolset
     default and per-tool config, and their permission policies. An unknown
-    field is refused whatever its value, empty or not.
+    field is refused whatever its value, empty or not, and a known field must
+    hold its reviewed shape: a scalar stays a scalar of its type (or null),
+    and objects and lists are checked all the way down.
     """
     _only(snapshot, _SESSION)
+    if not _SESSION_SHAPE(snapshot.model_dump(mode="json", warnings=False)):
+        _refuse()
     agent = snapshot.agent
     _only(agent, _AGENT)
     if agent.multiagent is not None or (agent.skills and not allow_skills):
         _refuse()
     _only(agent.model, _MODEL)
-    effort = getattr(agent.model, "effort", None)
-    if isinstance(effort, BaseModel):
-        _only(effort, _EFFORT)
-    elif isinstance(effort, dict) and set(cast("dict[str, object]", effort)) - _EFFORT:
-        _refuse()
     for skill in agent.skills:
         _only(skill, _SKILL)
         if skill.type not in _SKILL_TYPES:

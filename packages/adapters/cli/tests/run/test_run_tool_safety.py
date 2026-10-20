@@ -9,12 +9,13 @@ built-in exemption never covers it.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
 import pytest
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.cli.run import command as cmd_mod
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
@@ -23,7 +24,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, sse_response
-from daimon.testing.ma_models import ma_agent, ma_session, with_coordinator
+from daimon.testing.ma_models import ma_agent, ma_session, with_coordinator, with_hidden_capability
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -77,7 +78,9 @@ class _Session:
         self.servers = servers
         self.metadata: dict[str, str] = {}
         self.wire: list[tuple[str, Any]] = []
-        self.coordinator = False
+        self.unconstrainable: (
+            Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession] | None
+        ) = None
 
     def model(self) -> dict[str, Any]:
         snapshot = ma_session(
@@ -86,9 +89,8 @@ class _Session:
             status="idle",
             metadata=self.metadata,
         )
-        return (with_coordinator(snapshot) if self.coordinator else snapshot).model_dump(
-            mode="json"
-        )
+        changed = self.unconstrainable(snapshot) if self.unconstrainable else snapshot
+        return changed.model_dump(mode="json")
 
     def router(self, events: list[dict[str, Any]]) -> MARouter:
         router = MARouter()
@@ -401,12 +403,19 @@ async def test_cli_uses_only_trusted_session_annotations(
     assert catalogues == ([str(_LINEAR["url"])] if trusted else [])
 
 
+@pytest.mark.parametrize(
+    "unconstrainable",
+    [with_coordinator, with_hidden_capability],
+    ids=["coordinator", "hidden_field"],
+)
 async def test_an_operator_run_on_a_coordinator_session_is_refused_before_anything_is_sent(
-    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+    unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession],
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     """The roster's children could write unasked; MA cannot remove it mid-session."""
     session = _Session([_toolset("linear")], [_LINEAR])
-    session.coordinator = True
+    session.unconstrainable = unconstrainable
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         await _run(
             monkeypatch,

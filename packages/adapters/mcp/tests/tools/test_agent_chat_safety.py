@@ -43,7 +43,13 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_tool_rules, session_settle_state
 from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
-from daimon.testing import ma_agent, ma_environment, ma_session, with_coordinator
+from daimon.testing import (
+    ma_agent,
+    ma_environment,
+    ma_session,
+    with_coordinator,
+    with_hidden_capability,
+)
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, send_events_response
 from fastmcp.exceptions import ToolError
@@ -109,7 +115,7 @@ class FakeSession:
         self.calls: list[tuple[str, Any]] = []
         self.page_size = 1000
         self.fail_update = False
-        self.coordinator = False
+        self.unconstrainable: Callable[[Any], Any] | None = None
         self.fail_confirm = False
         self.on_confirm: Callable[[], None] | None = None
         self.honor_permissions = False
@@ -215,7 +221,7 @@ class FakeSession:
             status="idle",
             metadata=self.metadata,
         )
-        return with_coordinator(snapshot) if self.coordinator else snapshot
+        return self.unconstrainable(snapshot) if self.unconstrainable else snapshot
 
     def router(self, router: MARouter | None = None) -> MARouter:
         router = router or MARouter()
@@ -503,16 +509,21 @@ async def test_a_failed_gate_sends_nothing_and_starts_no_worker(
 
 
 @pytest.mark.parametrize(
+    "unconstrainable",
+    [with_coordinator, with_hidden_capability],
+    ids=["coordinator", "hidden_field"],
+)
+@pytest.mark.parametrize(
     "entry",
     [_entry_start, _entry_continue, _entry_ask_existing, _entry_hub_continue],
     ids=["start_turn", "continue_turn", "ask_existing", "hub_continue_turn"],
 )
 async def test_a_coordinator_session_is_refused_before_anything_is_sent(
-    entry: Entry, factory: async_sessionmaker[AsyncSession]
+    entry: Entry, unconstrainable: Callable[[Any], Any], factory: async_sessionmaker[AsyncSession]
 ) -> None:
     """Its roster's children could write unasked, and MA cannot drop it mid-session."""
     fake = FakeSession()
-    fake.coordinator = True
+    fake.unconstrainable = unconstrainable
     runtime = _runtime(fake, factory, _ENABLED)
     with pytest.raises(ToolError, match="cannot run here"):
         await entry(runtime, fake)

@@ -3898,9 +3898,11 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
 
 
 @pytest.mark.parametrize(("origin", "entry_point"), [("chat", "wake"), ("worker", "fleet_worker")])
+@pytest.mark.parametrize("unconstrainable", ["with_coordinator", "with_hidden_capability"])
 async def test_unattended_prepared_turn_refuses_a_coordinator_and_keeps_builtins_by_policy(
     origin: Any,
     entry_point: str,
+    unconstrainable: str,
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
@@ -3916,7 +3918,7 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_keeps_builtins
     from daimon.core.turn.posture import PolicyApproval
     from daimon.core.turn.unattended import session_gate
     from daimon.core.turn.unattended_capabilities import ENTRY_POINT_POLICY
-    from daimon.testing.ma_models import ma_session, with_coordinator
+    from daimon.testing.ma_models import ma_session
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)
@@ -3930,7 +3932,9 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_keeps_builtins
     )
     await db_session.commit()
     agent = ma_agent(id="ag_1", tenant_id=tenant.id)
-    snapshot = with_coordinator(ma_session(id="sess_coordinator", agent=agent))
+    from daimon.testing import ma_models
+
+    snapshot = getattr(ma_models, unconstrainable)(ma_session(id="sess_coordinator", agent=agent))
     updates: list[object] = []
     router = MARouter()
     router.add(

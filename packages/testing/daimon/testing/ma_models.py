@@ -360,3 +360,14 @@ def with_coordinator(session: BetaManagedAgentsSession) -> BetaManagedAgentsSess
     dumped = session.model_dump(mode="json")
     dumped["agent"]["multiagent"] = {"type": "coordinator", "agents": [child]}
     return BetaManagedAgentsSession.model_validate(dumped)
+
+
+def with_hidden_capability(session: BetaManagedAgentsSession) -> BetaManagedAgentsSession:
+    """`session` whose model hides an unreviewed field inside a scalar setting.
+
+    `effort` is a level string; here it is a list carrying a new key, as a
+    provider change could send it. The SDK keeps it (the model allows extras).
+    """
+    dumped = session.model_dump(mode="json")
+    dumped["agent"]["model"]["effort"] = [{"future_capability": True}]
+    return BetaManagedAgentsSession.model_validate(dumped)
