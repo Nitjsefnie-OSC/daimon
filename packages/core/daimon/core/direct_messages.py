@@ -56,7 +56,11 @@ from daimon.core.stores.slack_turn_contexts import (
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding
-from daimon.core.stores.thread_sessions import get_live_thread_session, mark_dead
+from daimon.core.stores.thread_sessions import (
+    get_live_thread_session,
+    mark_dead,
+    retire_dm_scope,
+)
 from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -66,6 +70,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
+from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.profiles import MANAGED_AGENTS
 from sqlalchemy.exc import SQLAlchemyError
@@ -425,8 +430,6 @@ async def start_cold_dm(
         await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
         if current is not None:
             # Retired mappings can never be reused by a later private turn.
-            from daimon.core.stores.thread_sessions import retire_dm_scope
-
             await retire_dm_scope(
                 session,
                 tenant_id=current.tenant_id,
@@ -555,13 +558,10 @@ async def _run_admitted_dm_turn(
         await on_sealed()
     if outcome.state.error is not None:
         raise outcome.state.error
-    if origin == "routine":
-        from daimon.core.turn.termination import TerminationReason
-
-        if outcome.state.termination != TerminationReason.COMPLETED:
-            raise DirectMessageAccessRevoked(
-                "execution_incomplete", message="The run did not complete."
-            )
+    if origin == "routine" and outcome.state.termination != TerminationReason.COMPLETED:
+        raise DirectMessageAccessRevoked(
+            "execution_incomplete", message="The run did not complete."
+        )
     answer = (
         extract_final_response(outcome.state.content) or "The turn completed without a text reply."
     )
