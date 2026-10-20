@@ -654,7 +654,9 @@ def _saved_agent_page(
             f"{html.escape(owner)}</h2>"
             + "".join(
                 '<div class="gh-saved-row">'
-                + f'<span class="gh-row-icon">{icon("book-marked")}</span>'
+                + '<span class="gh-row-icon">'
+                + icon("book-marked" if repo.repo_id in (visible_ids or set()) else "lock")
+                + "</span>"
                 + '<span class="gh-saved-name">'
                 + (
                     html.escape(repo.full_name.partition("/")[2])
@@ -662,7 +664,11 @@ def _saved_agent_page(
                     else "Hidden repo"
                 )
                 + "</span>"
-                + (" <span>Working repo</span>" if repo.is_working_repo else "")
+                + (
+                    f'<span class="gh-working-badge">{icon("pin")}Working repo</span>'
+                    if repo.is_working_repo
+                    else ""
+                )
                 + "</div>"
                 for repo in repos
             )
@@ -1277,7 +1283,10 @@ def _agent_editor_page(
             + f'{urlencode({"state": state})}">Check again</a></p>'
         )
     if selection_error:
-        parts.append(f'<p class="gh-inline-error" role="alert">{esc(selection_error)}</p>')
+        parts.append(
+            f'<p class="gh-inline-error" role="alert">{icon("triangle-alert")}'
+            f"{esc(selection_error)}</p>"
+        )
     working_name = (
         '<span class="gh-working-owner">'
         + esc(working.full_name.partition("/")[0])
@@ -1323,12 +1332,12 @@ def _agent_editor_page(
             + ("" if owner_grants else " hidden")
             + f'><h3 class="gh-owner-heading">{_owner_avatar(installation)}{esc(owner)}'
             + (
-                " <span>Paused on GitHub</span>"
+                f" <span>{icon('triangle-alert')}Paused on GitHub</span>"
                 if installation and installation.state == "suspended"
                 else ""
             )
             + (
-                " <span>GitHub list unavailable</span>"
+                f" <span>{icon('triangle-alert')}GitHub list unavailable</span>"
                 if installation and installation.fetch_state == "error"
                 else ""
             )
@@ -1364,17 +1373,25 @@ def _agent_editor_page(
             )
             parts.append('</div></div><div class="gh-row-meta">')
             if repo.status != "active":
-                parts.append('<span class="gh-repo-state">Unavailable</span>')
+                parts.append(
+                    f'<span class="gh-repo-state">{icon("triangle-alert")}Unavailable</span>'
+                )
             parts.append("</div>")
             if repo.repo_id in past_cap_ids:
                 parts.append(
-                    '<p class="gh-repo-locked">Past the 2,000-repo limit, '
-                    "so you can only remove it here.</p>"
+                    f'<p class="gh-repo-locked">{icon("triangle-alert")}'
+                    "Past the 2,000-repo limit, so you can only remove it here.</p>"
                 )
             elif not editable:
-                parts.append('<p class="gh-repo-locked">You can\'t see this repo on GitHub.</p>')
+                parts.append(
+                    f'<p class="gh-repo-locked">{icon("triangle-alert")}'
+                    "You can't see this repo on GitHub.</p>"
+                )
             if repo.repo_id in needed and needed[repo.repo_id]:
-                parts.append('<p class="gh-repo-state">Needs read and write to finish setup.</p>')
+                parts.append(
+                    f'<p class="gh-repo-state">{icon("triangle-alert")}'
+                    "Needs read and write to finish setup.</p>"
+                )
             parts.append(f'<input type="hidden" name="remove" value="{repo.repo_id}" disabled>')
             if editable and repo in repairable:
                 parts.append(
@@ -1386,7 +1403,8 @@ def _agent_editor_page(
         parts.append("</div></section>")
     parts.append("</div>")
     parts.append(
-        '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">Add repos</button>'
+        '<button id="open-repo-picker" class="gh-add-button gh-js" type="button">'
+        f"{icon('plus')}Add repos</button>"
     )
     owner_choice_rows: list[str] = []
     for item in installations:
@@ -1395,30 +1413,40 @@ def _agent_editor_page(
             for repo in grants
         )
         disabled = item.state == "suspended" or item.fetch_state == "error"
-        owner_choice_rows.append(
-            '<button class="gh-owner-button" type="button" '
+        row = (
+            '<div class="gh-owner-row"><button class="gh-owner-button" type="button" '
             f'data-owner="{esc(item.owner_login, quote=True)}"'
             + (" disabled" if disabled else "")
             + f'>{_owner_avatar(item)}<span class="gh-owner-login">{esc(item.owner_login)}</span>'
             + (
-                f'<small class="gh-owner-added">{count} '
+                f'<small class="gh-owner-added">{icon("circle-check")}{count} '
                 f"{'repo' if count == 1 else 'repos'} added</small>"
                 if count
                 else ""
             )
             + '<small class="gh-owner-selected"></small>'
-            + ("<small>Paused on GitHub</small>" if item.state == "suspended" else "")
-            + ("<small>Could not load repos.</small>" if item.fetch_state == "error" else "")
+            + (
+                f'<small class="gh-owner-warning">{icon("triangle-alert")}Paused on GitHub</small>'
+                if item.state == "suspended"
+                else ""
+            )
+            + (
+                f'<small class="gh-owner-warning">{icon("triangle-alert")}'
+                "Could not load repos.</small>"
+                if item.fetch_state == "error"
+                else ""
+            )
             + icon("chevron-right")
             + "</button>"
         )
         if item.fetch_state == "error":
-            owner_choice_rows.append(
+            row += (
                 f'<a class="gh-link gh-owner-retry" '
                 f'data-owner="{esc(item.owner_login, quote=True)}" '
                 f'href="{esc(root, quote=True)}/oauth/github/confirm?'
                 f'{urlencode({"state": state})}">Try again</a>'
             )
+        owner_choice_rows.append(row + "</div>")
     parts.append(
         '<dialog id="repo-picker" class="gh-repo-dialog" aria-labelledby="repo-picker-title">'
         '<div class="gh-dialog-head">'
@@ -1430,7 +1458,8 @@ def _agent_editor_page(
         '<div id="repo-owner-choice" class="gh-owner-choice">'
         f"<p>{esc(agent_name)} can read and change the repos you add.</p>"
         + "".join(owner_choice_rows)
-        + '<p class="gh-dialog-link gh-not-listed">Not listed? <a class="gh-add-button" href="'
+        + f'<p class="gh-dialog-link gh-not-listed"><span>{icon("info")}Not listed?</span>'
+        '<a class="gh-add-button" href="'
         + esc(install_url, quote=True)
         + '">Open GitHub setup</a></p>'
         '<div class="gh-dialog-footer" hidden><span id="owner-picker-count">0 selected</span>'
@@ -1444,7 +1473,7 @@ def _agent_editor_page(
         + "".join(
             f'<p class="gh-owner-truncated gh-dialog-copy" '
             f'data-owner="{esc(item.owner_login, quote=True)}" hidden>'
-            "This list is limited to 2,000 repos.</p>"
+            f"{icon('triangle-alert')}This list is limited to 2,000 repos.</p>"
             for item in installations
             if item.truncated
         )
