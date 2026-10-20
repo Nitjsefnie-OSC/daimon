@@ -427,10 +427,10 @@ async def test_an_operator_run_on_a_coordinator_session_is_refused_before_anythi
     assert session.wire == []
 
 
-async def test_an_operator_run_keeps_its_sandbox_by_the_entry_point_policy(
+async def test_an_operator_run_disables_its_sandbox_and_refuses_bash(
     monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
 ) -> None:
-    """`daimon run` keeps today's built-ins: a paused bash call is allowed."""
+    """`daimon run` disables built-ins and denies even a paused bash call."""
     builtins = {
         "type": "agent_toolset_20260401",
         "configs": [],
@@ -446,8 +446,8 @@ async def test_an_operator_run_keeps_its_sandbox_by_the_entry_point_policy(
         "evaluated_permission": "ask",
     }
     await _run(monkeypatch, db_session_factory, session, events, ToolSafetyPolicy(enabled=True))
-    assert session.tools[0]["default_config"]["enabled"] is True
-    assert _confirmations(session) == ["allow"]
+    assert session.tools[0]["default_config"]["enabled"] is False
+    assert _confirmations(session) == ["deny"]
 
 
 @pytest.mark.parametrize(

@@ -3268,8 +3268,10 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
     snapshot["agent"]["tools"] = [
         {
             "type": "agent_toolset_20260401",
-            "default_config": {"enabled": True},
-            "configs": [{"name": "bash", "enabled": True}],
+            "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            "configs": [
+                {"name": "bash", "enabled": True, "permission_policy": {"type": "always_allow"}}
+            ],
         }
     ]
 

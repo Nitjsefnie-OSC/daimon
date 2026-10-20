@@ -337,6 +337,11 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
     def resources(call, match):
         if call.method == "POST":
             payload = json.loads(call.content)
+            if call.url.path == "/v1/sessions/worker-session":
+                raw = native["session"].model_dump(mode="json")
+                raw["agent"].update(payload["agent"])
+                native["session"] = type(native["session"]).model_validate(raw)
+                return httpx.Response(200, json=raw)
             if call.url.path == "/v1/agents":
                 native["agent"] = ma_agent(
                     id="new-worker",
@@ -430,6 +435,7 @@ async def native_worker(db_preflight, db_nullpool_engine, db_clean, source_read_
     router.add("GET", r"/v1/agents/.*", resources)
     router.add("GET", r"/v1/environments/.*", resources)
     router.add("GET", r"/v1/sessions/worker-session", resources)
+    router.add("POST", r"/v1/sessions/worker-session$", resources)
 
     def archive(call, match):
         native["session"] = native["session"].model_copy(update={"archived_at": NOW})
