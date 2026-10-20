@@ -3,7 +3,7 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from email.utils import getaddresses
 from enum import StrEnum
 from typing import Annotated
@@ -416,24 +416,10 @@ def authorize_intake_actor(
 
 
 DISCORD_MESSAGE_LIMIT = 2000
-_DISCORD_EPOCH_MS = 1420070400000
-# Recovery starts before durable acceptance to absorb clock skew with Discord.
-_RECOVERY_LEAD = timedelta(seconds=60)
 _FENCE = "```"
 # Room for a reopened fence line before a chunk and a closing fence after it.
 _MAX_REOPENED_FENCE = 40
 _FENCE_RESERVE = 2 * _MAX_REOPENED_FENCE + len("\n") + len("\n" + _FENCE)
-
-
-def get_recovery_cursor(accepted_at: datetime) -> str:
-    """Snowflake just before acceptance: every post for the intake comes after it."""
-    milliseconds = int((accepted_at - _RECOVERY_LEAD).timestamp() * 1000)
-    return str(max(0, (milliseconds - _DISCORD_EPOCH_MS) << 22))
-
-
-def get_starter_content(thread_title: str) -> str:
-    """The whole visible channel post; Discord trims surrounding whitespace itself."""
-    return thread_title.strip()
 
 
 def split_dossier(content: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
@@ -480,16 +466,6 @@ def split_dossier(content: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]
             chunks.append(chunk)
         start = end
     return chunks
-
-
-def count_posted_dossier_chunks(posted: list[str], chunks: list[str]) -> int:
-    """Length of the dossier prefix already visible, in order, among posted messages."""
-    count = 0
-    for message, chunk in zip(posted, chunks, strict=False):
-        if message != chunk:
-            break
-        count += 1
-    return count
 
 
 def _split_long_line(line: str, width: int) -> list[str]:
