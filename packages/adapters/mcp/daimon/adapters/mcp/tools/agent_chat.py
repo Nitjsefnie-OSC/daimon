@@ -25,18 +25,8 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``list_events`` returns the transcript; the caller reads the reply from the
   ``agent.message`` events. Read-only, not gated.
 
-Nobody watches these turns, so they run under the unattended tool policy
-(``_agent_chat_safety``). Before every message the session's own tool config
-is rewritten from the current policy so every gated call pauses, and the
-sending process answers its own turn's pauses: reads run, writes are refused
-unless the operator allowed them in unattended runs, Daimon's card-only
-actions are always refused, and the turn's channel's tool rules apply. With
-tool safety off (the explicit ``enabled=False`` setting) ordinary paused
-third-party calls are allowed. A read never answers a pause. After a restart
-a paused turn stays paused and gated, and status reads report ``paused``
-until the session's owner calls ``continue_turn``, which re-gates the
-session and answers the pauses from the current policy, only on a turn agent
-chat started.
+Nobody watches these turns, so they run under the unattended tool policy;
+``_agent_chat_safety`` says how their pauses are answered.
 - ``list_sessions`` enumerates this agent's sessions for resume. Read-only,
   not gated.
 - ``ask`` starts a turn, polls until idle for at most two minutes, and returns
