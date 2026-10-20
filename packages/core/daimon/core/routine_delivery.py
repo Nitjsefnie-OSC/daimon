@@ -723,9 +723,8 @@ async def poll_deliveries_once(
             session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
         )
     for row in claimed:
-        if not (
-            decode_payload(payload_for(row)).text.strip() or decode_payload(payload_for(row)).files
-        ):
+        payload = decode_payload(payload_for(row))
+        if not (payload.text.strip() or payload.files):
             outcome = DeliveryOutcome(status="skipped", note="no_result")
         else:
             try:
@@ -741,7 +740,7 @@ async def poll_deliveries_once(
                     status="skipped",
                     note=(
                         "File delivery failed or was interrupted; it will not be retried."
-                        if decode_payload(payload_for(row)).files
+                        if payload.files
                         else "post_failed"
                     ),
                 )
