@@ -14,10 +14,9 @@ Daimon posts its full final reply there after the run (see
 existed, and any created without it — nothing is delivered anywhere: the
 result is only recorded on the row, and if it should land in a channel the
 prompt has to tell the agent to call `send_message` itself (see
-[mcp-tools.md](mcp-tools.md#channels)). Session output files, which an
-interactive Slack turn uploads to the thread, are **not** swept for a routine
-either way; [slack.md](slack.md) says so, and the code agrees: the headless
-path installs a no-op lifecycle with nothing to render to.
+[mcp-tools.md](mcp-tools.md#channels)). Session output files go out with
+the reply only when the routine has a destination (see
+[Generated files](#generated-files)); without one they stay in the workspace.
 
 For Discord private delivery, set `destination_kind="dm"` and omit
 `destination_id`. Daimon resolves it to the authenticated owner's Discord
