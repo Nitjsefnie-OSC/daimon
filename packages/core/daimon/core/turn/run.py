@@ -106,7 +106,11 @@ from daimon.core.turn.provider_actions import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
-from daimon.core.turn.unattended import refuse_ungated_confirmation, session_gate
+from daimon.core.turn.unattended import (
+    dm_session_authority,
+    refuse_ungated_confirmation,
+    session_gate,
+)
 from daimon.core.turn.unattended_capabilities import (
     capability_posture,
     protected_tools,
@@ -1081,8 +1085,6 @@ async def run_prepared_turn_impl(
                     if admission.grant is not None and admission.grant.is_dm:
                         if not gateable:
                             raise AdmissionDenied(reason="backend_unsupported")
-                        from daimon.core.turn.unattended import dm_session_authority
-
                         posture, dm_gate = await dm_session_authority(
                             deps,
                             admission,
