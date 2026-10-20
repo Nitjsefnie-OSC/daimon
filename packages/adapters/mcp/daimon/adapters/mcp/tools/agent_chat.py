@@ -665,6 +665,7 @@ async def _start_turn_impl(
             resources=resources,
             tool_safety=runtime.settings.tool_safety,
             billing_exempt=billing_exempt,
+            agent_chat=True,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
@@ -710,6 +711,7 @@ async def _start_turn_impl(
             github_app_private_key=github_app_private_key,
             agent_github_app=runtime.settings.github_app,
             billing_exempt=billing_exempt,
+            agent_chat=True,
             memory_read_only=memory_read_only,
             budget_channel_id=budget_channel_id,
             origin_channel_id=channel_id,
@@ -770,6 +772,8 @@ async def _continue_turn_impl(
     used). ``_verify_agent_owns_session`` guards against cross-tenant AND
     same-tenant cross-agent handles (Tampering threat mitigation). A
     chat turn's own credential is refused (``require_outside_chat_turn``).
+    Only a session opened through agent chat can be mutated here; a platform
+    conversation never lends its attended execution grant to this caller.
     ``recheck`` runs the access decision again immediately before the send.
 
     A channel-bound key's channel sealed since the session opened refuses the
@@ -940,8 +944,10 @@ async def _archive_my_session_impl(
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
     cross-agent handles.
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    require_outside_chat_turn(auth)
+    require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
     async with session_mutation_fence(runtime.session_factory, handle):
+        require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await archive_session_record(runtime.client, handle, scope=mcp_scope(auth))
     try:
         await close_headless_app_session(
@@ -981,8 +987,10 @@ async def _cancel_turn_impl(
     ``_verify_agent_owns_session`` guards cross-tenant AND same-tenant
     cross-agent handles before any send.
     """
-    await _verify_agent_owns_session(runtime, auth, handle)
+    require_outside_chat_turn(auth)
+    require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
     async with session_mutation_fence(runtime.session_factory, handle):
+        require_session_driver(await _verify_agent_owns_session(runtime, auth, handle), auth)
         await send_session_events(
             runtime.client, handle, events=[{"type": "user.interrupt"}], scope=mcp_scope(auth)
         )
@@ -1456,6 +1464,8 @@ def register_agent_chat_tools(
         images are embedded by default; short-lived download links are added when private
         artifact storage is configured. Pass ``handle`` from a previous result to
         continue that conversation instead of starting a new one.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         auth = await _check_admission(
             ctx,
@@ -1501,6 +1511,8 @@ def register_agent_chat_tools(
         about 90 seconds. A turn waiting on someone's approval card in chat
         is refused: only that card answers it. Any other session needs a
         ``message``.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         auth = await _check_admission(
             ctx,
@@ -1537,6 +1549,8 @@ def register_agent_chat_tools(
         usage collection. This is NOT a cancel — to stop a running turn, use
         the cancel tool instead. Returns ``{"handle": "<session_id>",
         "archived": "true"}``.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         return await _archive_my_session_impl(runtime, await _auth(ctx), handle)
 
@@ -1552,6 +1566,8 @@ def register_agent_chat_tools(
         ``terminated``. An interrupted turn is still billed for what it
         already consumed before the interrupt landed: the model work already
         done is real work and is not refunded.
+        Use a handle opened through agent chat. Platform conversations and
+        older sessions without headless creation provenance cannot be driven here.
         """
         return await _cancel_turn_impl(runtime, await _auth(ctx), handle)
 

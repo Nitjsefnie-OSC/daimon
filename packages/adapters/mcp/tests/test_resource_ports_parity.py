@@ -62,7 +62,11 @@ SCOPE = resource_ports.mcp_scope(AUTH)
 SESSION = ma_session(
     id="session",
     agent=AGENT,
-    metadata={"daimon_tenant": str(TENANT), "daimon_account": str(ACCOUNT)},
+    metadata={
+        "daimon_tenant": str(TENANT),
+        "daimon_account": str(ACCOUNT),
+        "daimon_agent_chat": "true",
+    },
 )
 BODY = SESSION.model_dump(mode="json")
 MESSAGE = [{"type": "user.message", "content": [{"type": "text", "text": 'hi "世界"\n'}]}]
@@ -406,6 +410,8 @@ async def test_agent_session_tools_keep_ownership_then_mutation_order(
     session_read_body: dict[str, Any],
 ) -> None:
     replies = [("GET", "/v1/sessions/session", 200, session_read_body)]
+    if operation in ("cancel", "archive"):
+        replies.append(("GET", "/v1/sessions/session", 200, session_read_body))
     if operation == "cancel":
         replies += [
             ("POST", "/v1/sessions/session/events", 200, ECHO),
@@ -419,6 +425,8 @@ async def test_agent_session_tools_keep_ownership_then_mutation_order(
     old, new = script(replies), script(replies)
     async with old.client() as before, new.client() as after:
         expected = await before.beta.sessions.retrieve("session")
+        if operation in ("cancel", "archive"):
+            await before.beta.sessions.retrieve("session")
         if operation == "cancel":
             await before.beta.sessions.events.send("session", events=[{"type": "user.interrupt"}])
             expected = await before.beta.sessions.retrieve("session")

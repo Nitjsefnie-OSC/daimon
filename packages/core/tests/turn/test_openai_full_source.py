@@ -488,7 +488,13 @@ async def test_full_default_public_switch_real_factory_and_authenticated_session
     body = wire.posts[0]
     assert len(body["environment"]["skills"]) == 11
     mcp = body["agent"]["tools"][0]
-    assert mcp["transport"]["authorization"] == "Bearer " + token
+    import jwt
+
+    installed = mcp["transport"]["authorization"].removeprefix("Bearer ")
+    claims = jwt.decode(installed, options={"verify_signature": False})
+    original = jwt.decode(token, options={"verify_signature": False})
+    assert claims.pop("chat_session_id") == prepared.native_chat_session_id
+    assert claims == original, "installed derivative retains source expiry and revocation"
     assert mcp["allowed_tools"] == ["search_tools", "call_tool"]
     from daimon.testing.asgi import mcp_session
 
@@ -708,3 +714,214 @@ async def test_live_native_defaults_declare_only_fetch_loss_and_preserve_sibling
     tools = wire.posts[0]["agent"]["tools"]
     assert any(tool["type"] == "web_search" for tool in tools)
     assert next(tool for tool in tools if tool["type"] == "mcp")["allowed_tools"] == expected
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_native_creation_grant_human_reuse_unattended_and_child_handoffs(full_openai):
+    """Capture the real creation bearer, then use it through registered MCP in the driver."""
+    import jwt
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.adapters.mcp.server import create_mcp_app
+    from daimon.core._models import Account, Tenant
+    from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings
+    from daimon.core.stores.domain import Role
+    from daimon.core.stores.task_continuations import list_pending_continuations
+    from daimon.core.stores.turn_origins import create_origin, delete_origin, get_active_origin
+    from daimon.core.turn_origin import execution_origin, turn_origin
+    from daimon.testing.asgi import call_mcp_tool
+    from daimon.testing.factories import make_platform_principal
+    from daimon.testing.ma import list_response
+    from daimon.testing.ma_models import ma_agent
+    from pydantic import SecretStr
+
+    request, _, _, wire, source_token, *rest = full_openai
+    router = rest[4]
+    sessions = request.deps.sessionmaker
+    account_id = request.session_account_id
+    async with sessions.begin() as db:
+        tenant = await db.get(Tenant, request.tenant_id)
+        tenant.platform = request.platform
+        await make_platform_principal(
+            db,
+            tenant=tenant,
+            account=await db.get(Account, account_id),
+            platform=request.platform,
+            external_id="caller",
+        )
+    target = ma_agent(id="handoff-target", name="daimon", tenant_id=request.tenant_id)
+    router.add(
+        "GET",
+        r"/v1/agents",
+        lambda *_: list_response(
+            [request.admission.agent.model_dump(mode="json"), target.model_dump(mode="json")]
+        ),
+    )
+    router.routes.insert(0, router.routes.pop())
+    app = create_mcp_app(
+        settings=Settings(
+            database=DatabaseSettings(url="postgresql+asyncpg://offline/db"),
+            anthropic=AnthropicSettings(api_key=SecretStr("offline")),
+            mcp=request.deps.mcp,
+        ),
+        sessionmaker=sessions,
+        anthropic=request.deps.anthropic,
+        auth=DaimonJWTVerifier(
+            secret=request.deps.mcp.jwt_secret.get_secret_value().encode(), sessionmaker=sessions
+        ),
+    )
+    previous_grant = None
+    for index, kind in enumerate(("human", "human", "timer", "worker")):
+        worker = kind == "worker"
+        if worker:
+            wire.session_id = "source-child-session"
+            wire.turns.clear()
+            wire.items.clear()
+        thread_id = "child-thread" if worker else request.thread_id
+        async with turn_origin(
+            sessions,
+            tenant_id=request.tenant_id,
+            account_id=account_id,
+            platform=request.platform,
+            parent_channel_id="channel",
+            thread_id=thread_id,
+            responder_ma_agent_id=request.admission.agent.id,
+            responder_name="test-agent",
+            role=Role.USER,
+            attended=True,
+        ) as origin:
+            # Simulate an inherited parent execution during child construction.
+            # Construction must install a fresh slot grant, never this origin's.
+            parent = None
+            if worker:
+                async with sessions.begin() as db:
+                    parent = await create_origin(
+                        db,
+                        tenant_id=request.tenant_id,
+                        account_id=account_id,
+                        platform=request.platform,
+                        parent_channel_id="channel",
+                        thread_id=request.thread_id,
+                        responder_ma_agent_id=request.admission.agent.id,
+                        responder_name="test-agent",
+                        configuration_target_ma_agent_id=None,
+                        configuration_target_name=None,
+                        role=Role.USER,
+                        now=datetime.now(UTC),
+                        expires_at=datetime.now(UTC) + timedelta(hours=1),
+                        attended=True,
+                        chat_session_id=previous_grant,
+                    )
+            with execution_origin(parent.id if parent is not None else None):
+                prepared = await bind_session_impl(
+                    request.deps,
+                    request.admission,
+                    tenant_id=request.tenant_id,
+                    platform=request.platform,
+                    external_user_id="caller",
+                    thread_id=thread_id,
+                    session_account_id=account_id,
+                    reuse_existing=index in (1, 2),
+                )
+            installed = wire.posts[-1]["agent"]["tools"][0]["transport"][
+                "authorization"
+            ].removeprefix("Bearer ")
+            grant = jwt.decode(installed, options={"verify_signature": False})["chat_session_id"]
+            assert grant == prepared.native_chat_session_id and grant != str(origin.id)
+            if index in (1, 2):
+                assert grant == previous_grant and prepared.reused
+            elif worker:
+                assert grant != previous_grant
+            previous_grant = grant
+
+            async def live_origin():
+                async with sessions() as db:
+                    return await get_active_origin(
+                        db,
+                        origin_id=origin.id,
+                        tenant_id=request.tenant_id,
+                        account_id=account_id,
+                        platform=request.platform,
+                        now=datetime.now(UTC),
+                    )
+
+            assert (await live_origin()).chat_session_id is None, (
+                "preparation alone grants no origin authority"
+            )
+
+            async def handoff(installed=installed, index=index):
+                return await call_mcp_tool(
+                    app,
+                    token=installed,
+                    name="call_tool",
+                    arguments={
+                        "name": "hand_off_task",
+                        "arguments": {
+                            "origin_context_id": str(origin.id),
+                            "agent_id": target.id,
+                            "continuation": f"finish requested chart {index}",
+                        },
+                    },
+                )
+
+            async def before_send(
+                worker=worker, grant=grant, thread_id=thread_id, index=index, kind=kind
+            ):
+                bound = await live_origin()
+                assert bound.chat_session_id == (None if worker else grant)
+                result = await handoff()
+                assert bool(result.get("result", result).get("isError", False)) is worker, result
+                async with sessions() as db:
+                    rows = await list_pending_continuations(
+                        db,
+                        tenant_id=request.tenant_id,
+                        platform=request.platform,
+                        thread_id=thread_id,
+                    )
+                assert len(rows) == (0 if worker else index + 1), result
+                if rows:
+                    assert rows[-1].attended is (kind == "human")
+
+            async def no_recovery():
+                pytest.fail("native session must not recover into another backend")
+
+            outcome = await run_prepared_turn(
+                request.deps,
+                prepared,
+                tenant_id=request.tenant_id,
+                platform=request.platform,
+                thread_id=thread_id,
+                external_user_id="caller",
+                user_message="do requested work",
+                lifecycle=RecordingLifecycle(),
+                cancel=asyncio.Event(),
+                reseed_user_message=no_recovery,
+                recovery_lifecycle=lambda _: RecordingLifecycle(),
+                before_send=before_send,
+                attended=kind == "human",
+                origin="worker" if worker else "chat",
+                operation_key=f"origin-lifecycle:{index}",
+            )
+            assert outcome.state.error is None, (index, kind, outcome.state.error)
+            assert (await live_origin()).chat_session_id is None
+            assert "isError" in str(await handoff()), (
+                "an ended execution cannot reuse its installed bearer"
+            )
+            if parent is not None:
+                async with sessions.begin() as db:
+                    retained = await get_active_origin(
+                        db,
+                        origin_id=parent.id,
+                        tenant_id=request.tenant_id,
+                        account_id=account_id,
+                        platform=request.platform,
+                        now=datetime.now(UTC),
+                    )
+                    assert retained.attended and retained.chat_session_id == parent.chat_session_id
+                    await delete_origin(db, origin_id=parent.id)
+
+    assert len(wire.posts) == 2, (
+        "human reuse retains one provider session; child gets a separate one"
+    )
+    assert (
+        jwt.decode(source_token, options={"verify_signature": False}).get("chat_session_id") is None
+    )

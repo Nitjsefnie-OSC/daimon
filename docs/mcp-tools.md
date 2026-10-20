@@ -403,6 +403,15 @@ Tenant summary: the balance, funding mode and every configured channel in one re
 | --- | --- | --- |
 | `get_tenant_summary` | admin only, operator tokens with tenant:read | Summarize this server or workspace: balance, funding mode and each channel. |
 
+## `thread_model`
+
+Switch this conversation's model when someone asks in words ("use opus", "think
+harder").
+
+| Tool | Who can call it | Purpose |
+| --- | --- | --- |
+| `set_thread_model` | all callers | Run this conversation on another model when the person asks in words: "use opus here", "think harder". |
+
 ## `thread_participation`
 
 Thread-participation tools: follow a thread (or a channel, or the workspace).

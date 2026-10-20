@@ -88,6 +88,7 @@ from daimon.adapters.mcp.tools.skill_uploads import register_skill_upload_tools
 from daimon.adapters.mcp.tools.task_continuity import register_task_continuity_tools
 from daimon.adapters.mcp.tools.teams._client import build_teams_client
 from daimon.adapters.mcp.tools.tenant_summary import register_tenant_summary_tools
+from daimon.adapters.mcp.tools.thread_model import register_thread_model_tools
 from daimon.adapters.mcp.tools.thread_participation import (
     register_thread_participation_tools,
 )
@@ -487,6 +488,7 @@ def create_mcp_app(
     register_credential_request_tools(mcp, runtime)
     register_setup_target_tools(mcp, runtime)
     register_task_continuity_tools(mcp, runtime)  # hand off a task / start fresh
+    register_thread_model_tools(mcp, runtime)  # switch this conversation's model
     if effective_settings.fleet.enabled:
         from daimon.adapters.mcp.tools.fleet import HostFleetToolService, register_fleet_tools
 

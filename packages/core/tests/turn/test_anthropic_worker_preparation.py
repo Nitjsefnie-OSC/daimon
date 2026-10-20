@@ -502,3 +502,32 @@ async def test_worker_allocation_keeps_fresh_mentions_on_original_agent(native_w
         )
         == []
     )
+
+
+async def test_a_native_worker_never_runs_the_root_conversations_model_choice(native_worker):
+    """A worker dispatched from a thread with a `/model` choice runs its approved model."""
+    from daimon.core.headless_runner import run_worker
+
+    request, root, claimed, trace, _ = native_worker
+    chosen = "claude-opus-5-5"
+    # What `for_worker` derives from a root request still carrying the choice:
+    # the source agent re-read as authored, the choice itself left on the admission.
+    request = replace(
+        request,
+        admission=replace(
+            request.admission, model_override=chosen, authored_agent=request.admission.agent
+        ),
+    )
+    result = await run_worker(
+        request,
+        parent=root,
+        worker=claimed,
+        trigger_message="Complete the task",
+        prices=tariffs(root),
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded" and result.turns_used == 1
+    body = next(call.json() for call in trace.requests if call.path == "/v1/sessions")
+    assert body["agent"] == "new-worker", "the worker session takes no model override"
+    assert all(chosen.encode() not in call.body for call in trace.requests)
+    trace.assert_consumed()

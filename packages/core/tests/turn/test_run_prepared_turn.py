@@ -3626,17 +3626,36 @@ async def test_unattended_wake_regates_each_batch_or_refuses_without_a_session_r
 
 
 @pytest.mark.parametrize("replay", [False, True], ids=["live", "replay"])
-@pytest.mark.parametrize("abort", ["stop", "cancel", "ceiling", "normal"])
+@pytest.mark.parametrize(
+    "abort,boundary",
+    [
+        ("stop", "pending"),
+        ("cancel", "pending"),
+        ("ceiling", "pending"),
+        ("normal", "pending"),
+        ("cancel", "decision_join"),
+        ("ceiling", "decision_join"),
+        ("cancel", "stop_join"),
+        ("ceiling", "stop_join"),
+        ("cancel", "stop_retire"),
+        ("ceiling", "stop_retire"),
+        ("cancel_twice", "decision_join"),
+        ("cancel_twice", "stop_join"),
+        ("cancel_twice", "stop_retire"),
+    ],
+)
 async def test_prepared_runtime_without_session_reads_aborts_without_confirmations(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     monkeypatch: pytest.MonkeyPatch,
     replay: bool,
     abort: str,
+    boundary: str,
 ) -> None:
     """Exercise the actual prepared non-gateable context and real driver/transport."""
     from daimon.core.mux_backend import managed_agents, resource_ref
     from daimon.core.tool_safety import ToolCall
+    from daimon.core.turn import driver
     from daimon.core.turn.posture import ToolConfirmationResult
     from daimon.core.turn.prepare import admitted_session_scope
     from daimon.core.turn.unattended import refuse_ungated_confirmation
@@ -3723,10 +3742,28 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
     )
     entered = asyncio.Event()
     cancel = asyncio.Event()
+    joining = asyncio.Event()
+    abort_entered = asyncio.Event()
+    release_abort = asyncio.Event()
+    original_bounded = driver._bounded
+
+    async def bounded(task: asyncio.Task[Any], *, what: str, session_id: str) -> None:
+        step = "retire_unsent_confirmations" if boundary == "stop_retire" else "decide_task_join"
+        if boundary != "pending" and what == step and not joining.is_set():
+            # First outside cancellation lands after the decision race, while
+            # joining a completed refusal or a Stop winner, or retiring its cards.
+            joining.set()
+            await asyncio.Event().wait()
+        if abort == "cancel_twice" and what == "deadline_refusal":
+            abort_entered.set()
+            await release_abort.wait()
+        await original_bounded(task, what=what, session_id=session_id)
+
+    monkeypatch.setattr(driver, "_bounded", bounded)
 
     async def refusal(call: ToolCall) -> ToolConfirmationResult:
         entered.set()
-        if abort != "normal":
+        if abort != "normal" and boundary != "decision_join":
             await asyncio.Event().wait()
         return await refuse_ungated_confirmation(call)
 
@@ -3750,11 +3787,18 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
         )
     )
     await asyncio.wait_for(entered.wait(), timeout=5)
-    if abort == "stop":
+    if abort == "stop" or boundary.startswith("stop_"):
         cancel.set()
-    elif abort == "cancel":
+    if boundary != "pending":
+        await asyncio.wait_for(joining.wait(), timeout=5)
+        assert not turn.done()
+    if abort in ("cancel", "cancel_twice"):
         turn.cancel()
-    if abort == "cancel":
+    if abort == "cancel_twice":
+        await asyncio.wait_for(abort_entered.wait(), timeout=5)
+        turn.cancel()
+        release_abort.set()
+    if abort in ("cancel", "cancel_twice"):
         with pytest.raises(asyncio.CancelledError):
             await turn
     else:
@@ -3768,6 +3812,15 @@ async def test_prepared_runtime_without_session_reads_aborts_without_confirmatio
     else:
         assert confirmations == []
         assert any(event["type"] == "user.interrupt" for event in sent)
+
+    assert not [
+        task
+        for task in asyncio.all_tasks()
+        if task is not asyncio.current_task()
+        and task.get_name().startswith(
+            ("turn.decide", "turn.retire_unsent", "turn.refuse_blocked", "turn.decision_abort")
+        )
+    ]
 
 
 @pytest.mark.parametrize(

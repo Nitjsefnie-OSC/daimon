@@ -53,6 +53,7 @@ from daimon.core.credential_env import (
 )
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_AGENT_CHAT,
     MA_METADATA_KEY_BILLING_EXEMPT,
     MA_METADATA_KEY_BUDGET_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
@@ -456,6 +457,7 @@ def _session_metadata(
     tenant_id: uuid.UUID | None,
     billing_exempt: ExemptReason | None,
     budget_channel_id: str | None = None,
+    agent_chat: bool = False,
 ) -> dict[str, str]:
     """The metadata stamp every Daimon-created session carries.
 
@@ -466,6 +468,8 @@ def _session_metadata(
     `daimon_budget_channel` is the channel whose budget the sweep charges.
     """
     metadata: dict[str, str] = {}
+    if agent_chat:
+        metadata[MA_METADATA_KEY_AGENT_CHAT] = "true"
     if account_id is not None:
         metadata[MA_METADATA_KEY_ACCOUNT] = str(account_id)
     if tenant_id is not None:
@@ -529,6 +533,7 @@ async def create_session(
     http_client: httpx.AsyncClient | None = None,
     extra_resources: Sequence[Resource] = (),
     billing_exempt: ExemptReason | None = None,
+    agent_chat: bool = False,
     memory_read_only: bool = False,
     personal_memory: bool = False,
     tool_safety: ToolSafetyPolicy,
@@ -580,6 +585,9 @@ async def create_session(
 
     ``model_override`` replaces the model for this session through
     ``agent_with_overrides``. It never changes the stored agent.
+
+    ``agent_chat`` records headless surface provenance at creation. Only those
+    sessions may later be continued, cancelled or archived through agent chat.
 
     ``budget_channel_id`` is the channel whose budget the session's spend counts
     toward (for a DM, the channel it was moved from). It is stamped apart from
@@ -1081,6 +1089,7 @@ async def create_session(
             tenant_id=tenant_id,
             billing_exempt=billing_exempt,
             budget_channel_id=budget_channel_id,
+            agent_chat=agent_chat,
         )
         if chat_session_id is not None:
             metadata["daimon_chat_session_id"] = chat_session_id
@@ -1422,6 +1431,7 @@ async def create_isolated_session(
     resources: list[Resource],
     tool_safety: ToolSafetyPolicy,
     billing_exempt: ExemptReason | None = None,
+    agent_chat: bool = False,
     memory_read_only: bool = False,
     budget_channel_id: str | None = None,
     origin_channel_id: str | None = None,
@@ -1463,6 +1473,7 @@ async def create_isolated_session(
         tenant_id=tenant_id,
         billing_exempt=billing_exempt,
         budget_channel_id=budget_channel_id,
+        agent_chat=agent_chat,
     )
     if origin_channel_id is not None:
         metadata.update(

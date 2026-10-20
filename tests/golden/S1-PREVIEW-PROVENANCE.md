@@ -19,3 +19,19 @@ The documented runner in [README.md](README.md) replayed all four affected
 scenarios successfully with `--turn-path legacy`: `mcp_start_turn`,
 `mcp_continue_turn`, `handoff_full`, and `handoff_transcript`. The merge required
 no regeneration, projection changes, or hand edits to recorded JSON.
+
+## Execution-grant follow-up (2026-10-19)
+
+The later execution-provenance fixes intentionally update only
+`mcp_continue_turn.json` and `mcp_cancel_turn.json`, using the documented legacy
+recording runner. Their source scenarios model sessions opened through agent
+chat, so recorded session responses now carry `daimon_agent_chat=true`.
+Continue's requests and effects retain their order and content apart from that
+fixture stamp. Cancel adds one ownership/surface read inside its mutation fence,
+after its pre-fence read: unauthorized nested callers must be refused before
+waiting on a human driver's fence, and authorized callers must be checked again
+after waiting. The interrupt remains unconditional after authorization.
+
+These recordings supersede the byte-identical MCP statement above for this
+follow-up only. No other recording, projection or oracle rule changes.
+Both legacy and mux replay against the same two updated recordings.

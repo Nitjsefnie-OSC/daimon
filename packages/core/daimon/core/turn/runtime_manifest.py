@@ -80,7 +80,18 @@ _ADMISSION_FACTS = {
     name: TypeAdapter(annotation)
     for name, annotation in get_type_hints(Admission).items()
     if name
-    not in ("agent", "environment", "observation", "backend_counterpart", "backend_agent_revision")
+    not in (
+        "agent",
+        "environment",
+        "observation",
+        "backend_counterpart",
+        "backend_agent_revision",
+        # A conversation's model choice never reaches a fleet root
+        # (`bind_session_impl` drops it first), so it is never frozen.
+        "model_override",
+        "model_fell_back",
+        "authored_agent",
+    )
 }
 
 #: Admission facts a root retained before they existed read as their default.

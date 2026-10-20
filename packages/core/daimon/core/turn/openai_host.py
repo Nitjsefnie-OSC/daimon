@@ -16,6 +16,7 @@ from typing import cast
 from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_auth import native_mcp_session
 from daimon.core.mux_backend import (
     TurnBackend,
     TurnBackendRequest,
@@ -395,6 +396,18 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         thread=ThreadRef(channel=revision.channel, thread_id=request.thread_id),
         account_id=request.scope.account_id,
     )
+    # OpenAI captures MCP bearers during creation, before an origin is bound.
+    # A stable slot grant survives reuse; only the executing driver binds it to
+    # an origin. Including it in the spec digest rejects ungranted old receipts.
+    chat_session_id = (
+        str(uuid5(NAMESPACE_URL, "openai:mcp-session:" + slot.model_dump_json()))
+        if runtime.mcp_secrets is not None
+        else None
+    )
+    if chat_session_id is not None:
+        spec = spec.model_copy(
+            update={"metadata": {**spec.metadata, "daimon_chat_session_id": chat_session_id}}
+        )
     plan_digest = request_digest(
         {"spec": spec.model_dump(mode="json"), "controls": runtime.controls.model_dump(mode="json")}
     )
@@ -416,7 +429,8 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         )
     backend = driver(runtime, revision, request.scope, binding)
     if binding is None:
-        native = await _create(request, store, slot, backend, spec, runtime)
+        with native_mcp_session(request.scope, chat_session_id):
+            native = await _create(request, store, slot, backend, spec, runtime)
         # An acknowledged cached create may predate a process restart. Validate
         # actual provider ownership/model/environment before publishing it.
         verifying = driver(runtime, revision, request.scope, native.binding)
@@ -476,6 +490,11 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
                 "account_scope": runtime.account_scope_id,
                 "model": "gpt-6-luna",
                 "plan_digest": plan_digest,
+                **(
+                    {"daimon_chat_session_id": chat_session_id}
+                    if chat_session_id is not None
+                    else {}
+                ),
             },
             generation=1,
             config_revision=revision.local,
@@ -547,6 +566,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         backend=backend,
         session_ref=ref,
         native_footer_cost=footer_cost,
+        native_chat_session_id=binding.native_refs.get("daimon_chat_session_id"),
     )
 
 

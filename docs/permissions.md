@@ -106,6 +106,17 @@ rules on two channels, a thread, a category and two agents with rules.
 
 ## Agent-chat turns
 
+Native OpenAI session credentials carry an isolated session grant installed
+during preparation. Preparation alone grants no origin authority: the driver
+binds the grant to the current execution and its attendance, and revokes that
+binding when the turn ends. Reuse binds a new origin; child sessions receive
+a separate grant and cannot borrow a parent execution.
+
+Agent chat and the hub can drive only sessions created through agent chat.
+They cannot continue, cancel or archive a platform conversation, even for the
+same account and agent. Older sessions without this creation provenance must
+be replaced with a new agent-chat conversation. Transcript read access is unchanged.
+
 A turn started through agent chat (`start_turn`, `continue_turn` and `ask`,
 with an agent key or on the hub) has nobody to press Approve, so it runs
 under the same tool-safety rules as a routine: reads run, a third-party write
@@ -133,7 +144,8 @@ In-process unattended runs leave pending calls paused and interrupt the session
 when a decision is cancelled, its turn ceiling expires, or its confirmation
 gate fails. Stop, cancellation and ceiling cleanup send no confirmations, including
 on runtimes without a confirmation gate. Those runtimes still refuse unattended
-confirmations during a normal, uninterrupted decision.
+confirmations during a normal, uninterrupted decision. Cancellation during decision-task
+or card cleanup also finishes bounded interrupt cleanup before propagating.
 
 Reading a session never answers a tool call. If the service restarts while an
 agent-chat turn waits on one, the turn stays paused, and `get_session` and

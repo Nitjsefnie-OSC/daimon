@@ -5,8 +5,8 @@ downgrade: unsupported
 
 from alembic import op
 
-revision = "0116_lead_intake"
-down_revision = "0115_origin_session_grants"
+revision = "0117_lead_intake"
+down_revision = "0116_thread_model_settings"
 branch_labels = None
 depends_on = None
 

@@ -99,7 +99,7 @@ class _Paused:
                 mcp_servers=[{"name": "linear", "type": "url", "url": "https://l.example/mcp"}],
             ),
             status="idle",
-            metadata={MA_METADATA_KEY_ACCOUNT: self.account},
+            metadata={"daimon_agent_chat": "true", MA_METADATA_KEY_ACCOUNT: self.account},
         ).model_dump(mode="json")
 
     def route(self, router: MARouter) -> None:

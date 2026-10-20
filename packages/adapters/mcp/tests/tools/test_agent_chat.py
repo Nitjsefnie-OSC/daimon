@@ -218,7 +218,9 @@ def _session_json(
         agent_id=agent_id,
         environment_id=_ENV_ID,
         status=status,
-        metadata=None if account_id is None else {MA_METADATA_KEY_ACCOUNT: str(account_id)},
+        metadata=None
+        if account_id is None
+        else {"daimon_agent_chat": "true", MA_METADATA_KEY_ACCOUNT: str(account_id)},
     ).model_dump(mode="json")
 
 
@@ -2102,6 +2104,7 @@ async def test_continue_turn_by_billed_caller_leaves_exempt_stamp_in_place() -> 
         environment_id=_ENV_ID,
         status="idle",
         metadata={
+            "daimon_agent_chat": "true",
             MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID),
             MA_METADATA_KEY_BILLING_EXEMPT: "mcp-internal-caller",
         },
@@ -2474,6 +2477,7 @@ async def test_start_turn_returns_the_accepted_events_boundary(
         "session_factory",
         "fernet",
         "app_session_unmapped",
+        "agent_chat",
         "tool_safety",
         "github_fallback_pat",
         "github_app_id",
@@ -2505,6 +2509,7 @@ async def test_continue_turn_gates_on_the_sessions_own_budget_channel(billed: bo
         environment_id=_ENV_ID,
         status="idle",
         metadata={
+            "daimon_agent_chat": "true",
             MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID),
             MA_METADATA_KEY_BUDGET_CHANNEL: "chan-spent",
         },
@@ -2909,9 +2914,9 @@ async def test_cancel_turn_issues_no_status_precheck_between_ownership_and_send(
 
     result = await _cancel_turn_impl(runtime, auth, "ses_test001")
 
-    assert calls == ["retrieve", "send", "retrieve"], (
-        "expected ownership-retrieve, send, status-retrieve in that order with no "
-        f"extra status read between the ownership check and the send; got {calls!r}"
+    assert calls == ["retrieve", "retrieve", "send", "retrieve"], (
+        "expected ownership before and inside the fence, then unconditional send and status; "
+        f"got {calls!r}"
     )
     assert result == {"handle": "ses_test001", "status": "running"}
 
@@ -3097,7 +3102,7 @@ async def test_get_turn_cost_returns_none_but_still_counts_events_for_unpriced_m
         agent_id=_MA_AGENT_ID,
         model="claude-unpriced-model-x",
         environment_id=_ENV_ID,
-        metadata={MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID)},
+        metadata={"daimon_agent_chat": "true", MA_METADATA_KEY_ACCOUNT: str(_ACCOUNT_ID)},
     ).model_dump(mode="json")
     usage = ma_model_usage(input_tokens=100, output_tokens=50)
     router = MARouter()
