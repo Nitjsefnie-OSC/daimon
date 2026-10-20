@@ -393,11 +393,8 @@ async def test_live_revocation_stops_next_effect(
     lead_sessions: async_sessionmaker[AsyncSession],
 ) -> None:
     store, _, ports = await setup(lead_sessions, "active")
-    calls = 0
 
     async def reauthorize(access: IntakeAccess) -> None:
-        nonlocal calls
-        calls += 1
         if access.create_thread:
             raise PermissionError("revoked")
 
