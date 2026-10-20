@@ -837,8 +837,8 @@ def _lead_prompt(evidence: str, **resolution: object) -> ConfirmationPrompt:
 def _lead_view(
     prompt: ConfirmationPrompt, state: ConfirmationCardState = "pending", *, allowed: bool = True
 ) -> discord.ui.LayoutView:
-    async def lead_details(_prompt: ConfirmationPrompt, _clicker: str) -> bool:
-        return allowed
+    async def lead_details(_prompt: ConfirmationPrompt, _clicker: str) -> tuple[str, ...]:
+        return ("Live record evidence: " + "*_~`|>\\@everyone " * 200,) if allowed else ()
 
     card = build_confirmation_card(
         prompt,
@@ -873,10 +873,8 @@ async def test_lead_details_send_max_escape_heavy_evidence_in_bounded_pages() ->
     assert 1 < len(pages) <= confirmation_module.DETAILS_MAX_PAGES
     assert all(len(page) <= confirmation_module.DETAILS_PAGE_LIMIT for page in pages)
     assert all(not page.endswith("\\") or page.endswith("\\\\") for page in pages)
-    expected = "\n".join(confirmation_module._safe_text(line) for line in prompt.detail_lines)  # pyright: ignore[reportPrivateUsage]
-    assert "".join(pages).replace("\n", "") == expected.replace("\n", "")
-    for value in (_INTAKE, *_IDS.values()):
-        assert value in "".join(pages)
+    assert prompt.detail_lines == ()
+    assert "Live record evidence:" in pages[0]
     for sent in click.followup.send.await_args_list:
         assert sent.kwargs["ephemeral"] is True
         assert sent.kwargs["allowed_mentions"].to_dict() == {"parse": []}

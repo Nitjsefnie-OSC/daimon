@@ -285,7 +285,9 @@ class World:
             )
             return str(interaction.followup.send.await_args.args[0])
 
-    async def details(self, member: str, intake_id: uuid.UUID) -> list[str]:
+    async def details(
+        self, member: str, intake_id: uuid.UUID, *, remove: str | None = None
+    ) -> list[str]:
         """What `member` is sent on clicking Details of a resolve card for this lead."""
         call = ToolCall(
             tool_use_id="resolve",
@@ -320,6 +322,21 @@ class World:
                 for item in posted[0].walk_children()
                 if isinstance(item, discord.ui.Button) and item.label == "Details"
             )
+            if remove == "erase":
+                from daimon.core.stores.lead_intake import erase_actor
+
+                async with self.sessions() as session, session.begin():
+                    await erase_actor(session, self.tenant_id, A_ONLY)
+            elif remove == "expire":
+                from daimon.core._models import LeadIntakeRecord
+                from sqlalchemy import update
+
+                async with self.sessions() as session, session.begin():
+                    await session.execute(
+                        update(LeadIntakeRecord)
+                        .where(LeadIntakeRecord.id == intake_id)
+                        .values(expires_at=dt.datetime.now(dt.UTC) - dt.timedelta(seconds=1))
+                    )
             click = MagicMock()
             click.user.id = int(member)
             click.response.defer = AsyncMock()
@@ -446,7 +463,7 @@ async def test_mcp_get_leads_and_card_details_agree_for_every_member_and_record(
             queue = await world.leads(member, intake)
             assert (_sentinel(kind) in queue) is allowed, (kind, member, queue)
             sent = await world.details(member, intake)
-            shown = any(_sentinel("card") in page for page in sent)
+            shown = any(_sentinel(kind) in page for page in sent)
             assert shown is allowed, (kind, member, sent)
             assert shown or sent == [LEAD_DETAILS_REFUSED_MESSAGE]
 
@@ -525,3 +542,73 @@ async def set_policy(world: World, policy: TenantAccessPolicy) -> None:
     async with world.sessions() as session:
         await set_access_policy(session, tenant_id=world.tenant_id, policy=policy)
         await session.commit()
+
+
+@pytest.mark.parametrize("remove", ["erase", "expire"])
+async def test_pending_card_loses_evidence_when_the_live_record_is_removed(
+    sessions: async_sessionmaker[AsyncSession], remove: str
+) -> None:
+    world = await _world(sessions, reconfigure=False)
+    intake = world.records["private"]
+    assert await world.details(OUTSIDE_PRIVATE, intake) == [LEAD_DETAILS_REFUSED_MESSAGE]
+    for member in (OUTSIDE_PRIVATE, A_ONLY):
+        assert await world.details(member, intake, remove=remove) == [
+            "This lead is no longer available."
+        ]
+
+
+@pytest.mark.parametrize("empty", [True, False])
+async def test_resume_mailbox_checks_history_even_without_readable_records(
+    sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch, empty: bool
+) -> None:
+    from daimon.adapters.mcp.services.lead_intake import HttpIntakePorts
+
+    scan = AsyncMock(return_value=(["synthetic-discovery"], None))
+    monkeypatch.setattr(HttpIntakePorts, "scan", scan)
+    world = await _world(sessions, reconfigure=False)
+    if empty:
+        from daimon.core.stores.lead_intake import erase_actor
+
+        async with sessions() as session, session.begin():
+            await erase_actor(session, world.tenant_id, A_ONLY)
+    refused, text = await world.mcp(NO_HISTORY, "lead_intake_resume")
+    assert refused and "synthetic-discovery" not in text
+    scan.assert_not_awaited()
+    refused, text = await world.mcp(BOTH, "lead_intake_resume")
+    assert not refused and "synthetic-discovery" in text
+    revoked = {
+        **CHANNELS[A],
+        "permission_overwrites": [*CHANNELS[A]["permission_overwrites"], _deny(BOTH, HISTORY)],
+    }
+    monkeypatch.setitem(CHANNELS, A, revoked)
+    refused, text = await world.mcp(BOTH, "lead_intake_resume")
+    assert refused and "synthetic-discovery" not in text
+
+
+async def test_list_pages_past_a_hundred_hidden_records(
+    sessions: async_sessionmaker[AsyncSession],
+) -> None:
+    world = await _world(sessions, reconfigure=False)
+    config, _ = await world.store.configuration()
+    template = (await world.store.get(world.records["capture"])).submission
+    assert template is not None
+    for index in range(101):
+        draft = template.model_copy(
+            update={"source": template.source.model_copy(update={"message_id": f"hidden-{index}"})}
+        )
+        record = await world.store.accept(config, draft, A_ONLY)
+        record.progress.discord_thread_id = PRIVATE
+        await world.store.save(record)
+    expected: list[str] = []
+    for index in range(3):
+        draft = template.model_copy(
+            update={"source": template.source.model_copy(update={"message_id": f"visible-{index}"})}
+        )
+        record = await world.store.accept(config, draft, A_ONLY)
+        expected.append(str(record.id))
+    refused, first = await world.mcp(OUTSIDE_PRIVATE, "lead_intake_list")
+    assert not refused
+    assert all(identity in first for identity in expected)
+    refused, second = await world.mcp(OUTSIDE_PRIVATE, "lead_intake_list", after_id=expected[0])
+    assert not refused and expected[0] not in second
+    assert all(identity in second for identity in expected[1:])

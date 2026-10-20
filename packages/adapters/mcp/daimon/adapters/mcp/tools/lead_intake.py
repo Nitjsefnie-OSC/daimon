@@ -420,16 +420,16 @@ async def service(
             native = McpNativeLeadPermissions(client, member)
 
             async def check(target: LeadReadTarget) -> None:
-                try:
-                    await authorize_lead_read(target, reader, native)
-                except LeadReadDenied as exc:
-                    raise ToolError(str(exc)) from None
+                await authorize_lead_read(target, reader, native)
 
             yield check
 
     async def authorize_read(target: LeadReadTarget) -> None:
         async with reads() as check:
-            await check(target)
+            try:
+                await check(target)
+            except LeadReadDenied as exc:
+                raise ToolError(str(exc)) from None
 
     await reauthorize(IntakeAccess(source=draft.source if draft else None, write=not read_only))
     async with httpx.AsyncClient(timeout=30, follow_redirects=False) as client:
@@ -549,8 +549,11 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         Leads the caller may not read are omitted; pass the last listed ID as
         after_id for the next page.
         """
-        async with service(runtime, await _auth(ctx), read_only=True) as intake:
-            return await intake.visible(await intake.service.store.list(after_id=after_id))
+        async with (
+            service(runtime, await _auth(ctx), read_only=True) as intake,
+            intake.reads() as check,
+        ):
+            return await intake.service.store.list(after_id=after_id, authorize_read=check)
 
     @mcp.tool(tags={"discord"})
     async def lead_intake_health(  # pyright: ignore[reportUnusedFunction]

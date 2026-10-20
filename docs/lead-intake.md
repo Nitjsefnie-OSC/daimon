@@ -212,8 +212,10 @@ Human resolution requires the requester's approval card, even when third-party
 tool safety is disabled. The card shows the intake ID, each selected company,
 contact, deal and starter ID and both confirmations in every state, so the
 approved selections stay visible after the answer; a selection too long to show
-denies the call. Evidence is behind Details, sent privately in pages, and only
-to someone who may read the lead. The resolver must also be able to read the
+denies the call. Details loads the live record after authorizing the clicker on every click and
+sends it privately in pages. The card caches no evidence. Erased, expired or
+missing records show “no longer available”. Resolution evidence is supplied with
+the tool call; review the live record before approving the visible selections. The resolver must also be able to read the
 lead. The handler verifies the live gated session before committing the resolution.
 Routine submit/resume does not acquire a resolution grant through that card.
 
@@ -224,3 +226,8 @@ the configured sales channel is still the one the record was captured for.
 Interactive intake calls require an attended origin bound to the calling
 provider session’s signed execution grant. Other concurrent conversations grant
 no read or resolution authority; missing or ambiguous bindings refuse the call.
+
+Lead lists apply live read authorization while traversing the store query, before
+counting the visible page limit. Hidden records do not consume a page or become
+pagination cursors. Batch resume also authorizes mailbox discovery readback under
+the current sales channel, including when no pending leads exist.

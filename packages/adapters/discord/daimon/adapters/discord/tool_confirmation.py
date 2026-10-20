@@ -77,7 +77,7 @@ DETAILS_UNAVAILABLE_MESSAGE = "Details unavailable; deny and retry with shorter 
 LEAD_DETAILS_REFUSED_MESSAGE = "You can't read this lead, so its details aren't shown."
 
 #: Whether the clicker may read the lead behind a card's Details.
-type LeadDetailsCheck = Callable[[ConfirmationPrompt, str], Awaitable[bool]]
+type LeadDetailsCheck = Callable[[ConfirmationPrompt, str], Awaitable[tuple[str, ...]]]
 
 
 def _body(card: ConfirmationCard) -> list[str]:
@@ -290,21 +290,28 @@ class _ConfirmationView(discord.ui.LayoutView):
     async def _on_details(self, interaction: discord.Interaction) -> None:
         none = discord.AllowedMentions.none()
         deferred = self._prompt.lead_intake_id is not None
+        lines = self._prompt.detail_lines
         if deferred:
+            lines = ()
             # A lead's evidence is read under the lead's own readers, by whoever clicks.
             await interaction.response.defer(ephemeral=True, thinking=True)
             try:
-                allowed = self._lead_details is not None and await self._lead_details(
-                    self._prompt, str(interaction.user.id)
+                if self._lead_details is None:
+                    raise PermissionError("missing lead reader")
+                lines = await self._lead_details(self._prompt, str(interaction.user.id))
+            except LookupError:
+                await interaction.followup.send(
+                    "This lead is no longer available.", ephemeral=True, allowed_mentions=none
                 )
+                return
             except Exception:
-                allowed = False
-            if not allowed:
+                lines = ()
+            if not lines:
                 await interaction.followup.send(
                     LEAD_DETAILS_REFUSED_MESSAGE, ephemeral=True, allowed_mentions=none
                 )
                 return
-        pages = details_pages(self._prompt.detail_lines)
+        pages = details_pages(lines)
         if pages is None:
             pages = [DETAILS_UNAVAILABLE_MESSAGE]
         elif not pages:
@@ -428,7 +435,7 @@ def discord_confirmation_hook(
 
     rule_factory = runtime.sessionmaker if runtime is not None else None
 
-    async def lead_details(prompt: ConfirmationPrompt, clicker: str) -> bool:
+    async def lead_details(prompt: ConfirmationPrompt, clicker: str) -> tuple[str, ...]:
         from daimon.adapters.discord.lead_access import require_lead_readable
 
         fernet = runtime.turn_deps.fernet if runtime is not None else None
@@ -441,8 +448,8 @@ def discord_confirmation_hook(
             or prompt.lead_intake_id is None
             or not isinstance(channel, (discord.Thread, discord.TextChannel))
         ):
-            return False
-        await require_lead_readable(
+            raise PermissionError("missing lead reader")
+        return await require_lead_readable(
             sessionmaker=runtime.sessionmaker,
             fernet=fernet,
             resolver=resolver,
@@ -451,7 +458,6 @@ def discord_confirmation_hook(
             user_id=clicker,
             intake_id=prompt.lead_intake_id,
         )
-        return True
 
     async def rule_subject(clicker: str) -> Subject:
         from daimon.adapters.discord.bot import requester_role

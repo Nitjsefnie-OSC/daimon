@@ -356,14 +356,6 @@ def prompt_for_tool_call(
         title = "Confirm lead resolution?"
         denied_action = "Lead resolution not applied"
         consequence = "Use these selections and resume intake. No email is sent."
-        detail_lines = (
-            f"Intake: {data.get('intake_id')}",
-            *(
-                f"{key.replace('_', ' ').capitalize()}: {value}"
-                for key, value in fields.items()
-                if value is not None
-            ),
-        )
         # The exact selections stay on the card; evidence stays behind Details.
         visible = (
             f"Intake: {data.get('intake_id')}",
@@ -382,7 +374,7 @@ def prompt_for_tool_call(
             consequence=consequence,
             action=action,
             denied_action=denied_action,
-            detail_lines=detail_lines,
+            detail_lines=(),
             visible_lines=tuple(str(line) for line in visible),
             lead_intake_id=str(data.get("intake_id") or ""),
             requester_platform_user_id=requester_platform_user_id,

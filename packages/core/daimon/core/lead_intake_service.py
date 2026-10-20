@@ -475,6 +475,7 @@ class IntakeService:
     async def scan(self) -> dict[str, object]:
         await self.reauthorize(IntakeAccess())
         config, _ = await self.store.configuration()
+        await self.authorize_read(discovery_target(config, self.store.tenant_id))
         async with self.store.claim(f"mailbox:{self.store.mailbox_key(config)}"):
             state = await self.store.mailbox(config)
             anchor = state.checkpoint or config.reconciliation_start

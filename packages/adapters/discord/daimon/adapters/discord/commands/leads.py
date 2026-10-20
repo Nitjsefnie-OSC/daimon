@@ -6,8 +6,7 @@ from uuid import UUID
 from daimon.adapters.discord.checks import require_registered_guild, resolve_tenant_for_interaction
 from daimon.adapters.discord.lead_access import discord_lead_reads
 from daimon.adapters.discord.runtime import DiscordRuntime
-from daimon.core.lead_intake import IntakeRecord
-from daimon.core.lead_intake_access import LeadReadDenied, read_target
+from daimon.core.lead_intake_access import read_target
 from daimon.core.stores.lead_intake import IntakeStore
 
 import discord
@@ -50,13 +49,6 @@ class LeadsCog(commands.Cog):
             )
             config = reads.config
 
-            async def visible(record: IntakeRecord) -> bool:
-                try:
-                    await reads.check(read_target(record))
-                except LeadReadDenied:
-                    return False
-                return True
-
             # Private data never falls back to the invocation channel.
             if intake_id:
                 record = await store.get(UUID(intake_id))
@@ -73,9 +65,11 @@ class LeadsCog(commands.Cog):
                 # The queue lists the current sales channel's records; each is
                 # still read under the destination it was captured for.
                 records = await store.list(
-                    limit=20, pending_only=True, destination_channel_id=config.channel_id
+                    limit=20,
+                    pending_only=True,
+                    destination_channel_id=config.channel_id,
+                    authorize_read=reads.check,
                 )
-                records = [record for record in records if await visible(record)]
                 content = "\n".join(f"{r.id} · {r.status} · {r.error_code or ''}" for r in records)
                 content = content or "No pending leads."
             await interaction.followup.send(

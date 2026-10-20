@@ -4,7 +4,7 @@ from __future__ import annotations
 
 import hashlib
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Awaitable, Callable
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from uuid import UUID, uuid4
@@ -29,6 +29,7 @@ from daimon.core.lead_intake import (
     LeadEffectState,
     LeadSubmission,
 )
+from daimon.core.lead_intake_access import LeadReadDenied, LeadReadTarget, read_target
 from pydantic import BaseModel, Field
 from sqlalchemy import case, delete, func, literal, select, text, tuple_, update
 from sqlalchemy.dialects.postgresql import insert
@@ -295,6 +296,7 @@ class IntakeStore:
         pending_only: bool = False,
         after_id: UUID | None = None,
         destination_channel_id: str | None = None,
+        authorize_read: Callable[[LeadReadTarget], Awaitable[None]] | None = None,
     ) -> list[IntakeRecord]:
         async with self.sessions() as session:
             query = select(LeadIntakeRecord).where(LeadIntakeRecord.tenant_id == self.tenant_id)
@@ -314,15 +316,28 @@ class IntakeStore:
                     tuple_(LeadIntakeRecord.created_at, LeadIntakeRecord.id)
                     > tuple_(literal(after.created_at), literal(after.id))
                 )
-            rows = (
-                await session.execute(
-                    query.order_by(LeadIntakeRecord.created_at, LeadIntakeRecord.id).limit(
-                        min(limit, 100)
-                    )
+            # Stream the query and apply the live permission predicate before
+            # counting the visible page. Hidden IDs never become client cursors.
+            rows = await session.stream_scalars(
+                query.order_by(LeadIntakeRecord.created_at, LeadIntakeRecord.id).execution_options(
+                    yield_per=100
                 )
-            ).scalars()
-            identities = [row.id for row in rows]
-        return [await self.get(identity) for identity in identities]
+            )
+            records: list[IntakeRecord] = []
+            try:
+                async for row in rows:
+                    record = await self.get(row.id)
+                    if authorize_read is not None:
+                        try:
+                            await authorize_read(read_target(record))
+                        except LeadReadDenied:
+                            continue
+                    records.append(record)
+                    if len(records) >= min(limit, 100):
+                        break
+            finally:
+                await rows.close()
+            return records
 
     async def health(self) -> dict[str, object]:
         async with self.sessions() as session:

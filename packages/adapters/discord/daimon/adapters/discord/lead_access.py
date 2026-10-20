@@ -166,8 +166,8 @@ async def require_lead_readable(
     channel: discord.abc.GuildChannel | discord.Thread,
     user_id: str,
     intake_id: str,
-) -> None:
-    """Raise unless this person may read the lead: an approval card's Details uses it."""
+) -> tuple[str, ...]:
+    """Authorize and render a live lead; approval cards retain no evidence."""
     store = IntakeStore(sessionmaker, fernet, tenant_id)
     reads = await discord_lead_reads(
         sessionmaker=sessionmaker,
@@ -178,4 +178,15 @@ async def require_lead_readable(
         user_id=user_id,
         origin=channel,
     )
-    await reads.check(read_target(await store.get(UUID(intake_id))))
+    try:
+        record = await store.get(UUID(intake_id))
+    except ValueError as exc:
+        raise LookupError("This lead is no longer available.") from exc
+    if record.submission is None:
+        raise LookupError("This lead is no longer available.")
+    await reads.check(read_target(record))
+    return (
+        f"Intake: {record.id}",
+        record.submission.model_dump_json(),
+        record.progress.model_dump_json(),
+    )

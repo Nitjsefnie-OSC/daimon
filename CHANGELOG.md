@@ -7,6 +7,13 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Lead approval Details loads authorized live evidence on each click and shows
+  removed records as no longer available. Cards retain no cached evidence.
+  Batch mailbox readback requires the common lead read check, and hidden leads
+  no longer consume list pages.
+
 ### Added
 
 - Native tenant-scoped lead intake with encrypted capture, Gmail qualification,
