@@ -1092,3 +1092,8 @@ The driver namespace is a scaffold. Runtime capabilities remain unknown and
 admission refuses turns until usage observations have driver evidence. Steer,
 multiagent, vaults, memory stores, workspace export/import and native skill
 versions are explicitly unsupported.
+
+`mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
+turn requests, approval decisions, durable event replay and typed event data.
+These models require no provider SDK. Inline image parts use `data_b64`;
+credentials in MCP configuration are environment variable names.
