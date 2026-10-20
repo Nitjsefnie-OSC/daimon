@@ -72,7 +72,7 @@ from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.ceiling import ceiling_error, remaining_s, turn_deadline
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.driver import run_turn, unattended_sends
-from daimon.core.turn.errors import SessionBusyError
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import LegacyTurnIO, TurnIO, turn_io
 from daimon.core.turn.lifecycle import (
     Acknowledgment,
@@ -106,7 +106,12 @@ from daimon.core.turn.provider_actions import (
 )
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
-from daimon.core.turn.unattended import protected_tools, refuse_ungated_confirmation, session_gate
+from daimon.core.turn.unattended import refuse_ungated_confirmation, session_gate
+from daimon.core.turn.unattended_capabilities import (
+    capability_posture,
+    protected_tools,
+    unattended_entry_point,
+)
 from daimon.core.turn_origin import current_origin_id, execution_origin
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
@@ -935,9 +940,11 @@ async def run_prepared_turn_impl(
     says whether a person is waiting (default: every origin but `routine`).
     Unattended turns always use the unattended decider, policy on or off.
     Managed Agents re-reads and gates the session before every message and
-    confirmation batch, including recovery. Non-Anthropic runtimes and mux
-    backends without a session read refuse every unattended confirmation
-    with a plain reason; a gate failure prevents the batch from being sent.
+    confirmation batch, including recovery; a Managed Agents backend without
+    a session read is refused with `AdmissionDenied` before its first message,
+    since its session cannot be checked. Non-Anthropic runtimes refuse every
+    unattended confirmation with a plain reason; a gate failure prevents the
+    batch from being sent.
     Attended writes use the adapter's card hook when the policy requires it;
     a missing hook refuses them with `no_confirmation_surface`.
 
@@ -1085,6 +1092,7 @@ async def run_prepared_turn_impl(
                 ),
             )
         )
+        tool_confirmation = capability_posture(tool_confirmation)
 
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
@@ -1155,7 +1163,8 @@ async def run_prepared_turn_impl(
                 stack.enter_context(execution_origin(origin_id))
                 if unattended:
                     revision = admission.backend_revision
-                    gateable = revision is None or revision.profile == MANAGED_AGENTS.profile_id
+                    managed = revision is None or revision.profile == MANAGED_AGENTS.profile_id
+                    gateable = managed
                     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None
                     injected = (backend or deps.backend) if selected_path == "mux" else None
                     gate_scope = admitted_session_scope(
@@ -1185,6 +1194,12 @@ async def run_prepared_turn_impl(
 
                                 read_session = read_injected_session
 
+                    if managed and not gateable:
+                        # A Managed Agents session that cannot be read cannot be
+                        # checked or constrained (`unattended_capabilities`):
+                        # a coordinator, or a tool that never pauses, would run
+                        # on its first message. Refuse before anything is sent.
+                        raise AdmissionDenied(reason="backend_unsupported")
                     if gateable:
                         stack.enter_context(
                             unattended_sends(
@@ -1197,6 +1212,7 @@ async def run_prepared_turn_impl(
                                     session_factory=deps.sessionmaker,
                                     tenant_id=tenant_id,
                                     read_session=read_session,
+                                    entry_point=unattended_entry_point(origin),
                                 )
                             )
                         )

@@ -43,7 +43,13 @@ from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_tool_rules, session_settle_state
 from daimon.core.tool_safety import ToolAnnotations, ToolCall, ToolSafetyPolicy
-from daimon.testing import ma_agent, ma_environment, ma_session
+from daimon.testing import (
+    ma_agent,
+    ma_environment,
+    ma_session,
+    with_coordinator,
+    with_hidden_capability,
+)
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, send_events_response
 from fastmcp.exceptions import ToolError
@@ -109,6 +115,7 @@ class FakeSession:
         self.calls: list[tuple[str, Any]] = []
         self.page_size = 1000
         self.fail_update = False
+        self.unconstrainable: Callable[[Any], Any] | None = None
         self.fail_confirm = False
         self.on_confirm: Callable[[], None] | None = None
         self.honor_permissions = False
@@ -208,12 +215,13 @@ class FakeSession:
 
     @property
     def model(self) -> Any:
-        return ma_session(
+        snapshot = ma_session(
             id=_SESSION,
             agent=ma_agent(id=_MA_AGENT_ID, tools=self.tools, mcp_servers=self.servers),
             status="idle",
             metadata=self.metadata,
         )
+        return self.unconstrainable(snapshot) if self.unconstrainable else snapshot
 
     def router(self, router: MARouter | None = None) -> MARouter:
         router = router or MARouter()
@@ -500,6 +508,58 @@ async def test_a_failed_gate_sends_nothing_and_starts_no_worker(
     assert _no_workers()
 
 
+@pytest.mark.parametrize(
+    "unconstrainable",
+    [with_coordinator, with_hidden_capability],
+    ids=["coordinator", "hidden_field"],
+)
+@pytest.mark.parametrize(
+    "entry",
+    [_entry_start, _entry_continue, _entry_ask_existing, _entry_hub_continue],
+    ids=["start_turn", "continue_turn", "ask_existing", "hub_continue_turn"],
+)
+async def test_a_coordinator_session_is_refused_before_anything_is_sent(
+    entry: Entry, unconstrainable: Callable[[Any], Any], factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Its roster's children could write unasked, and MA cannot drop it mid-session."""
+    fake = FakeSession()
+    fake.unconstrainable = unconstrainable
+    runtime = _runtime(fake, factory, _ENABLED)
+    with pytest.raises(ToolError, match="cannot run here"):
+        await entry(runtime, fake)
+    assert fake.calls == []
+    assert _no_workers()
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [_entry_start, _entry_continue, _entry_ask_existing, _entry_hub_continue],
+    ids=["start_turn", "continue_turn", "ask_existing", "hub_continue_turn"],
+)
+@pytest.mark.parametrize(
+    ("server", "policy"),
+    [("linear", _DISABLED), ("daimon-mcp", _ENABLED), ("daimon-mcp", _DISABLED)],
+    ids=["foreign-safety-off", "trusted-safety-on", "trusted-safety-off"],
+)
+async def test_every_mcp_call_of_an_agent_chat_turn_pauses_for_the_decider(
+    entry: Entry, server: str, policy: ToolSafetyPolicy, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Trusted Daimon tools, and foreign ones with safety off, still pause; the
+    decider allows them as before."""
+    fake = FakeSession(script=[[(server, "list_agents", {})]]).with_daimon()
+    runtime = _runtime(fake, factory, policy, public_url=_PUBLIC)
+    await entry(runtime, fake)
+    await _settle(runtime)
+
+    kinds = fake.kinds()
+    assert kinds.index("update") < kinds.index("message")
+    tools = fake.calls[kinds.index("update")][1]["tools"]
+    for toolset in tools:
+        assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+        assert all(c["permission_policy"] == {"type": "always_ask"} for c in toolset["configs"])
+    assert [c["result"] for c in fake.confirmations] == ["allow"]
+
+
 async def test_every_pause_of_a_turn_is_decided_and_each_call_on_its_own(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
@@ -701,10 +761,8 @@ async def test_owner_continue_after_restart_resumes_under_current_policy(
     assert started["turn_event_id"] == boundary
     assert [c["result"] for c in fake.confirmations] == [expected]
     assert "message" not in fake.kinds()
-    if policy.enabled:
-        assert fake.calls[0][0] == "update" and _asks(fake.calls[0][1]["tools"])
-    else:
-        assert fake.calls[0][0] == "confirm"
+    # Policy on or off, the resume first makes every call pause for the decider.
+    assert fake.calls[0][0] == "update" and _asks(fake.calls[0][1]["tools"])
     assert (await _get_session_impl(runtime, _auth(), _SESSION)).status == "idle"
 
 
@@ -735,7 +793,9 @@ async def test_the_message_after_a_resume_is_gated_again_under_the_policy_then(
     fake.on_confirm = turn_safety_on
     await _continue_turn_impl(runtime, _auth(), _SESSION, "next")
     await _settle(runtime)
-    assert fake.kinds() == ["confirm", "update", "message", "confirm"]
+    # The session already asks after the resume's gate, so the policy that
+    # changed meanwhile reaches the new message through the decider.
+    assert fake.kinds() == ["update", "confirm", "message", "confirm"]
     assert [c["result"] for c in fake.confirmations] == ["allow", "deny"]
 
 
@@ -746,14 +806,16 @@ async def test_a_failed_gate_after_the_resume_leaves_the_message_unsent(
     await _record(factory, fake.pause())
     runtime = _runtime(fake, factory, _DISABLED)
 
-    def turn_safety_on_and_break_updates() -> None:
+    def drift_and_break_updates() -> None:
+        # Something reset the session to always_allow while it was resumed.
         runtime.settings.tool_safety = _ENABLED
+        fake.tools = [_toolset("linear", "always_allow", "create_issue")]
         fake.fail_update = True
 
-    fake.on_confirm = turn_safety_on_and_break_updates
+    fake.on_confirm = drift_and_break_updates
     with pytest.raises(Exception):  # noqa: B017 - the provider's refusal
         await _continue_turn_impl(runtime, _auth(), _SESSION, "next")
-    assert fake.kinds() == ["confirm"]
+    assert fake.kinds() == ["update", "confirm"]
 
 
 async def test_continue_with_a_message_refuses_when_the_resumed_turn_runs_on(

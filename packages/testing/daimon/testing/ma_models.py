@@ -330,3 +330,44 @@ def ma_model_usage(
         cache_read_input_tokens=cache_read_input_tokens,
         speed=speed,
     )
+
+
+def with_coordinator(session: BetaManagedAgentsSession) -> BetaManagedAgentsSession:
+    """`session` with a coordinator roster of one child that may do anything.
+
+    The child is a full agent definition, as the provider resolves one: the
+    root's tools and servers plus a built-in toolset and an MCP write, all on
+    `always_allow`. Validated against the SDK's real shape.
+    """
+    allow = {"enabled": True, "permission_policy": {"type": "always_allow"}}
+    child = ma_session_agent(
+        id="agent_child",
+        tools=[
+            {
+                "type": "agent_toolset_20260401",
+                "default_config": allow,
+                "configs": [{"name": name, **allow} for name in ("bash", "write", "edit")],
+            },
+            {
+                "type": "mcp_toolset",
+                "mcp_server_name": "child_linear",
+                "default_config": allow,
+                "configs": [{"name": "create_issue", **allow}],
+            },
+        ],
+        mcp_servers=[{"name": "child_linear", "type": "url", "url": "https://linear.example/mcp"}],
+    ).model_dump(mode="json", exclude={"multiagent"})
+    dumped = session.model_dump(mode="json")
+    dumped["agent"]["multiagent"] = {"type": "coordinator", "agents": [child]}
+    return BetaManagedAgentsSession.model_validate(dumped)
+
+
+def with_hidden_capability(session: BetaManagedAgentsSession) -> BetaManagedAgentsSession:
+    """`session` whose model hides an unreviewed field inside a scalar setting.
+
+    `effort` is a level string; here it is a list carrying a new key, as a
+    provider change could send it. The SDK keeps it (the model allows extras).
+    """
+    dumped = session.model_dump(mode="json")
+    dumped["agent"]["model"]["effort"] = [{"future_capability": True}]
+    return BetaManagedAgentsSession.model_validate(dumped)
