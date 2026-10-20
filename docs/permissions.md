@@ -7,7 +7,10 @@ third-party MCP tool on one agent with `daimon agents tool-rules` or the
 `set_agent_tool_rule` MCP tool. An agent-wide
 rule applies where the agent runs; a channel rule applies in its parent
 channel and threads under it. When both match, `deny` wins over `ask`, which
-wins over `allow`. The key is exactly `server/tool`. A rule is
+wins over `allow`. The key is exactly `server/tool`, and a server name
+never contains `/`: attaching one is refused, and a call on a server
+attached with one before that asks in chat and is refused unattended,
+whatever its keys or rules say. A rule is
 bound to the agent's stable id and the server URL attached under that name;
 changing either makes the rule stop matching. `chat` is the default scope.
 An `allow` rule reaches unattended routines only with `chat_and_routines`.

@@ -54,6 +54,7 @@ from daimon.core.session_ports_compat import update_session_record
 from daimon.core.stores.thread_sessions import invalidate_session_tools
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
+    SERVER_SEPARATOR,
     ToolCall,
     ToolSafetyPolicy,
     backend_switch_tools,
@@ -76,8 +77,6 @@ UnattendedEntryPoint = Literal[
 BUILTIN_TOOLSET: Final[str] = "agent_toolset_20260401"
 MCP_TOOLSET: Final[str] = "mcp_toolset"
 CUSTOM_TOOL: Final[str] = "custom"
-#: Joins a server and a tool in operator keys, so never part of a server name.
-SERVER_SEPARATOR: Final[str] = "/"
 
 
 class ServerTool(NamedTuple):

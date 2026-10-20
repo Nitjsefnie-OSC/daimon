@@ -2,7 +2,7 @@ from __future__ import annotations
 
 import re
 import uuid
-from typing import Any
+from typing import Any, cast
 from unittest.mock import MagicMock
 
 import httpx
@@ -5677,3 +5677,52 @@ async def test_create_agent_impl_renders_no_face_for_the_deployment_default(
 
     assert (tenant_id, "daimon") not in agent_identity._face_tasks  # pyright: ignore[reportPrivateUsage]
     assert rendered == []
+
+
+_BRIDGE_SERVER: dict[str, str] = {
+    "name": "linear/bridge",
+    "type": "url",
+    "url": "https://bridge.example/mcp",
+}
+
+
+async def test_attach_mcp_server_impl_refuses_a_server_name_with_a_slash() -> None:
+    """`linear/bridge/get_issue` would also read as linear's `bridge/get_issue`."""
+    client = MagicMock()
+    auth = AuthIdentity(
+        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, is_admin=True
+    )
+    with pytest.raises(ToolError, match="cannot contain '/'"):
+        await _attach_mcp_server_impl(
+            _runtime(client),
+            auth,
+            agent_name="a",
+            server_name=_BRIDGE_SERVER["name"],
+            url=_BRIDGE_SERVER["url"],
+        )
+    with pytest.raises(ToolError, match="cannot contain '/'"):
+        await _update_agent_impl(
+            _runtime(client),
+            auth,
+            name="a",
+            model=None,
+            description=None,
+            system=None,
+            tools=None,
+            mcp_servers=[cast(Any, _BRIDGE_SERVER)],
+            skills=None,
+        )
+    assert not client.mock_calls
+
+
+async def test_build_create_spec_refuses_a_server_name_with_a_slash() -> None:
+    with pytest.raises(ToolError, match="cannot contain '/'"):
+        _build_create_spec(
+            name="x",
+            model="claude-sonnet-4-6",
+            description=None,
+            system=None,
+            tools=[{"type": "mcp_toolset", "mcp_server_name": "linear/bridge"}],
+            mcp_servers=[cast(Any, _BRIDGE_SERVER)],
+            skill_repos=None,
+        )

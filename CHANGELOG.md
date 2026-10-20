@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - An unattended session with an MCP server whose name contains `/` is refused before anything is sent. A watch's tool allowlist is kept as server and tool pairs, so a server named `linear/bridge` can no longer enable an absent `bridge/get_issue` tool on the `linear` server.
 
+- MCP server names can no longer contain `/`: attaching one (`attach_mcp_server`, `create_agent`, `update_agent`, a credential request, or an agent spec for `daimon agents create`/`update`) is refused, because tool keys use `/` between the server and the tool. A call on a server that already has such a name is never allowed by an operator key or a tool rule: it asks in chat and is refused in unattended runs, unless the operator's deny list refuses it outright.
+
 - An unattended session's telemetry (timing, token usage and cache creation, outcome evaluations) must match its reviewed schema; a new or reshaped field there is refused like one anywhere else in the session.
 
 - An unattended session carrying a private attribute at any level is refused; only the SDK's own request ID is allowed.

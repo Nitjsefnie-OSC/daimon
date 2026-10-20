@@ -91,6 +91,7 @@ from daimon.core.specs import (
 )
 from daimon.core.stores.domain import BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
+from daimon.core.tool_safety import get_mcp_server_name_rejection
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import Provider
@@ -460,6 +461,9 @@ def _build_create_spec(
     raw validator output.
     """
     _reject_unknown_model(model)
+    for server in mcp_servers or []:
+        if (rejection := get_mcp_server_name_rejection(str(server.get("name") or ""))) is not None:
+            raise ToolError(f"create_agent: {rejection} Nothing was saved.")
     try:
         return AgentSpec(
             name=name,
@@ -578,7 +582,9 @@ def _reject_reserved_servers(
             and url.rstrip("/") == public_url.rstrip("/")
         ):
             continue
-        rejection = get_reserved_mcp_rejection(server_name=name, url=url, public_url=public_url)
+        rejection = get_mcp_server_name_rejection(name) or get_reserved_mcp_rejection(
+            server_name=name, url=url, public_url=public_url
+        )
         if rejection is not None:
             raise ToolError(f"update_agent: {rejection} Nothing was saved.")
 
@@ -839,7 +845,9 @@ async def _attach_mcp_server_impl(
         if runtime.settings.mcp.public_url is not None
         else None
     )
-    rejection = get_reserved_mcp_rejection(server_name=server_name, url=url, public_url=public_url)
+    rejection = get_mcp_server_name_rejection(server_name) or get_reserved_mcp_rejection(
+        server_name=server_name, url=url, public_url=public_url
+    )
     if rejection is not None:
         raise ToolError(rejection)
     origin = await get_chat_origin(runtime, auth, origin_context_id)

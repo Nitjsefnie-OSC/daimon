@@ -65,6 +65,7 @@ __all__ = [
     "DAIMON_SERVER_NAME",
     "OPEN_TOOL_SAFETY",
     "PUBLISH_TOOLS",
+    "SERVER_SEPARATOR",
     "PermissionPolicyType",
     "ToolAnnotations",
     "ToolCall",
@@ -73,6 +74,7 @@ __all__ = [
     "ToolVerdict",
     "VerdictReason",
     "backend_switch_tools",
+    "get_mcp_server_name_rejection",
     "microsoft_send_tools",
     "classify_tool",
     "daimon_endpoint",
@@ -156,6 +158,12 @@ DAIMON_SERVER_NAME: Final[str] = "daimon-mcp"
 
 #: `unattended_writes` entry that allows every write in unattended runs.
 ANY_KEY: Final[str] = "*"
+
+#: Joins a server and a tool in `server/tool` keys. A server name never holds
+#: it: attaching one is refused, so the first `/` of a key always ends the
+#: server. A call on a server that holds it anyway (attached before the
+#: refusal) matches no key reliably, and `decide_tool_call` never allows it.
+SERVER_SEPARATOR: Final[str] = "/"
 
 #: Daimon's own tools that wait for the card like a third-party write, keyed
 #: to the input field whose presence makes the call the write. Without it the
@@ -433,6 +441,21 @@ class ToolSafetyPolicy(BaseModel):
 
 
 OPEN_TOOL_SAFETY: Final[ToolSafetyPolicy] = ToolSafetyPolicy()
+
+
+def get_mcp_server_name_rejection(server_name: str) -> str | None:
+    """Return the rejection reason when ``server_name`` holds ``/``, else None.
+
+    Tool keys are ``server/tool``, so a server named ``linear/bridge`` would
+    stand for tools on ``linear``: its rules, operator keys and unattended
+    allowlists could reach the wrong server. Pure; the caller surfaces it.
+    """
+    if SERVER_SEPARATOR in server_name:
+        return (
+            f"MCP server names cannot contain '{SERVER_SEPARATOR}' ('{server_name}'): it "
+            "separates a server from a tool in tool keys. Pick a different server name."
+        )
+    return None
 
 
 class ToolCall(BaseModel):
@@ -734,6 +757,16 @@ def decide_tool_call(
         return ToolVerdict(outcome="allow", effect="read", reason="disabled")
     if call.server_name is None:
         return ToolVerdict(outcome="allow", effect="read", reason="not_attached")
+    if SERVER_SEPARATOR in call.server_name and _gated(call.server_name, trusted_servers):
+        # Its keys alias another server's tools, so neither an operator
+        # override nor a rule can be trusted to mean it: always a write.
+        if _listed(policy.denied, server_name=call.server_name, tool_name=call.tool_name):
+            return ToolVerdict(outcome="deny", effect="write", reason="denied_by_operator")
+        return ToolVerdict(
+            outcome="ask" if attended else "deny",
+            effect="write",
+            reason="write_needs_confirmation" if attended else "unattended_write",
+        )
     effect: ToolEffect
     if _gated(call.server_name, trusted_servers):
         effect = classify_tool(
