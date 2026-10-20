@@ -693,3 +693,10 @@ and live owner access. Creator fallback DMs also recheck current DM controls,
 recipient eligibility and isolation, including a resolved Discord thread parent,
 before each file and after download. Owner DM delivery retains the same privacy and
 no-personal-memory rules as text. Run-failure notices never carry files.
+
+Retained output and diagnostics on destination-free routines (no destination kind,
+destination ID, or channel ID) are owner-only, like DM results. Administrators can
+manage their metadata but cannot read those private previews, errors, delivery
+payloads, or delivery notes. Upgrade migration `0117_clear_legacy_routine_output`
+erases previously retained output for these legacy rows; see the
+[self-hosting rollout instructions](self-hosting.md#clearing-retained-legacy-routine-output).

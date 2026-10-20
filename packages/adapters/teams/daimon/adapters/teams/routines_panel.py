@@ -40,7 +40,12 @@ from daimon.core.cron import InvalidScheduleError, validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.posted_controls.routines import apply_routine_action
-from daimon.core.routines import can_manage_routine, panel_rows
+from daimon.core.routines import (
+    can_manage_routine,
+    can_read_routine_output,
+    panel_rows,
+    routine_for_reader,
+)
 from daimon.core.stores import routines as store
 from daimon.core.stores.domain import RoutineRow
 from microsoft_teams.api import (
@@ -96,6 +101,7 @@ class RoutinesPanel:
         if not is_admin:
             # A routine's label and trigger are its creator's work.
             rows = [row for row in rows if row.created_by_user_id == user_id]
+        rows = [routine_for_reader(row, user_id=user_id) for row in rows]
         shown, hidden = panel_rows(rows)
         return panel_card(shown, hidden, user_id=user_id, is_admin=is_admin, notice=notice)
 
@@ -140,6 +146,8 @@ class RoutinesPanel:
                     if not can_manage_routine(row, user_id=actor.user_id, is_admin=actor.is_admin):
                         return toast(NOT_OWNER)
                     if op == "output":
+                        if not can_read_routine_output(row, user_id=actor.user_id):
+                            return toast("Only the owner can read a private routine result.")
                         return replace_card(output_card(row))
                     if op == "delete":
                         return replace_card(confirm_delete_card(row))

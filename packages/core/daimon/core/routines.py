@@ -49,3 +49,31 @@ def can_manage_routine(row: RoutineRow, *, user_id: str | None, is_admin: bool) 
     ownerless routine is admin-only.
     """
     return is_admin or (user_id is not None and row.created_by_user_id == user_id)
+
+
+def has_private_output(row: RoutineRow) -> bool:
+    """Legacy destination-free runs could mount the owner's personal memory."""
+    return row.destination_kind == "dm" or (
+        row.destination_kind is None and row.destination_id is None and row.channel_id is None
+    )
+
+
+def can_read_routine_output(row: RoutineRow, *, user_id: str | None) -> bool:
+    """Private output requires an identified owner, including for admins."""
+    return not has_private_output(row) or (
+        user_id is not None and row.created_by_user_id == user_id
+    )
+
+
+def routine_for_reader(row: RoutineRow, *, user_id: str | None) -> RoutineRow:
+    """Keep management metadata while removing private previews and diagnostics."""
+    if can_read_routine_output(row, user_id=user_id):
+        return row
+    return row.model_copy(
+        update={
+            "last_result_tail": None,
+            "last_error": "Private routine run failed." if row.last_error is not None else None,
+            "delivery_payload": None,
+            "delivery_note": None,
+        }
+    )

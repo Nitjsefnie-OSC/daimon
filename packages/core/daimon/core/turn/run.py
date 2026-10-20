@@ -1195,7 +1195,11 @@ async def run_prepared_turn_impl(
                         from daimon.core.turn.unattended import dm_session_authority
 
                         posture, dm_gate = await dm_session_authority(
-                            deps, admission, session_id, tenant_id=tenant_id, read_session=read_session
+                            deps,
+                            admission,
+                            session_id,
+                            tenant_id=tenant_id,
+                            read_session=read_session,
                         )
                         stack.enter_context(unattended_sends(dm_gate))
                     elif gateable:

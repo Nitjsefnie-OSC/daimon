@@ -2308,6 +2308,9 @@ Discord `/routines` includes an owner-only delivery choice and delivery failure
 reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
 the authenticated owner; the operator CLI has `routines create --destination dm`
 and a verifying dry-run. Slack and Teams explicitly reject DM writes.
+Retained previews, errors and delivery diagnostics for DM and legacy
+destination-free routines are owner-only on every reading surface, including
+administrator panels. The rollout migration clears legacy retained output.
 
 DM routines are scheduled owner messages through core's normal live-DM admission,
 binding and runner, with ordinary owner credentials, tools and personal/shared

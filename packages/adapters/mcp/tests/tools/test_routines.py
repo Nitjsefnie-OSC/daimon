@@ -2801,3 +2801,63 @@ async def test_update_rejects_a_revision_changed_after_mcp_authorization(
         assert current.trigger_message == "work"
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_legacy_private_output_on_all_mcp_reads(
+    committing_sessionmaker, db_session, enabled, failed
+):
+    from sqlalchemy import text
+
+    tenant = await make_tenant(db_session, platform="discord")
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_legacy", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    async with committing_sessionmaker.begin() as session:
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="ag_legacy",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="legacy",
+            enabled=enabled,
+        )
+        await session.execute(
+            text(
+                "UPDATE routines SET last_result_tail = 'personal-memory-sentinel', "
+                "last_error = :error, delivery_payload = 'private-payload', "
+                "delivery_note = 'private-diagnostic' WHERE id = :id"
+            ),
+            {"id": row.id, "error": "private-error" if failed else None},
+        )
+    owner = _auth_identity(tenant_id=tenant.id, platform_user_id="123", talking_to="ag_legacy")
+    admin = dataclasses.replace(owner, platform_user_id="999", is_admin=True)
+    for reader in (owner, admin, dataclasses.replace(admin, platform_user_id=None)):
+        results = [
+            await _get_routine_impl(runtime, reader, routine_id=row.id),
+            *(await _list_routines_impl(runtime, reader)),
+            await _update_routine_impl(runtime, reader, routine_id=row.id),
+        ]
+        assert len(results) == 3
+        for result in results:
+            if reader == owner:
+                assert result.last_result_tail == "personal-memory-sentinel"
+                assert result.delivery_payload == "private-payload"
+                assert result.delivery_note == "private-diagnostic"
+                assert result.last_error == ("private-error" if failed else None)
+            else:
+                assert result.last_result_tail is None
+                assert result.delivery_payload is None and result.delivery_note is None
+                assert "private-error" not in result.model_dump_json()
+                assert "personal-memory-sentinel" not in result.model_dump_json()
+    outsider = dataclasses.replace(admin, is_admin=False)
+    assert await _list_routines_impl(runtime, outsider) == []
+    with pytest.raises(ToolError, match="routine not found"):
+        await _get_routine_impl(runtime, outsider, routine_id=row.id)
+    await client.close()

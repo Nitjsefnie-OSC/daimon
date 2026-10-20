@@ -1340,3 +1340,18 @@ Discord bot credentials for live membership resolution. A missing or failed
 membership lookup cannot authorize private delivery. Inspect routine
 `delivery_status` and `delivery_note` when a DM fails; do not manually reset an
 uncertain or partially sent claim to pending, because delivery is at most once.
+
+### Clearing retained legacy routine output
+
+Migration `0117_clear_legacy_routine_output` clears `last_result_tail`,
+`last_error`, `delivery_payload`, and `delivery_note` on existing routines whose
+`destination_kind`, `destination_id`, and `channel_id` are all NULL, including
+paused and failed routines. Older runners could save the owner's personal-memory
+output in these rows. The cleanup does not change schedules or destinations.
+Downgrade is a no-op for this erased data; it cannot restore previews or errors.
+
+Stop all old scheduler, adapter, and MCP processes before applying this migration,
+then start the upgraded processes. An old producer left running could repopulate
+private data after the purge. Upgraded readers restrict these rows' previews and
+diagnostics to the identified owner, including when an administrator manages the
+routine. The same owner restriction applies to explicit DM results.

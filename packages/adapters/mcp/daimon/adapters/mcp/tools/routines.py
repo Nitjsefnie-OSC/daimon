@@ -66,6 +66,7 @@ from daimon.core.permissions import (
     limiting_ids_at,
 )
 from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.routines import routine_for_reader
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import ScopeContext
 from daimon.core.security_audit import record_authz_denial
@@ -89,15 +90,7 @@ class DeleteResult(BaseModel):
 
 def _routine_for_reader(auth: AuthIdentity, row: RoutineRow) -> RoutineRow:
     """Admins can manage metadata without reading a personal-memory result."""
-    if row.destination_kind == "dm" and row.created_by_user_id != auth.platform_user_id:
-        return row.model_copy(
-            update={
-                "last_result_tail": None,
-                "delivery_payload": None,
-                "last_error": "Private routine run failed." if row.last_error is not None else None,
-            }
-        )
-    return row
+    return routine_for_reader(row, user_id=auth.platform_user_id)
 
 
 def _require_platform_user_id(auth: AuthIdentity) -> str:
