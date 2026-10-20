@@ -175,13 +175,7 @@ async def may_choose_thread_model(
 def with_model_override(
     agent: BetaManagedAgentsAgent, model_override: str | None
 ) -> BetaManagedAgentsAgent:
-    """The agent as a turn runs it: the stored agent with the conversation's model, if any.
-
-    Every place that re-reads the stored agent for an admitted turn (a fleet
-    root restored from its frozen preparation, a fresh source capture) puts
-    the turn's override back, so the effective model is what is compared and
-    run, while any edit to the stored agent itself still shows.
-    """
+    """The agent as a turn runs it: the stored agent with the conversation's model, if any."""
     if model_override is None:
         return agent
     return agent.model_copy(
