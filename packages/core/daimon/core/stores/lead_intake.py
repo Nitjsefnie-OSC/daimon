@@ -726,45 +726,7 @@ class IntakeStore:
     async def purge(self, now: datetime) -> None:
         """Erase all lead content/effects/audit, keeping only the source tombstone."""
         async with self.sessions() as session, session.begin():
-            await purge_auxiliary(session, now, self.tenant_id)
-            expired = list(
-                await session.scalars(
-                    select(LeadIntakeRecord.id)
-                    .where(
-                        LeadIntakeRecord.tenant_id == self.tenant_id,
-                        LeadIntakeRecord.expires_at <= now,
-                    )
-                    .with_for_update()
-                )
-            )
-            for model in (
-                LeadIntakeEffect,
-                LeadResolutionAudit,
-                LeadOpportunityRecord,
-                LeadMailboxMessageRecord,
-            ):
-                await session.execute(
-                    delete(model).where(
-                        model.tenant_id == self.tenant_id, model.intake_id.in_(expired)
-                    )
-                )
-            await session.execute(
-                update(LeadIntakeRecord)
-                .where(
-                    LeadIntakeRecord.tenant_id == self.tenant_id,
-                    LeadIntakeRecord.raw_expires_at <= now,
-                )
-                .values(encrypted_raw=None)
-            )
-            await session.execute(
-                update(LeadIntakeRecord)
-                .where(
-                    LeadIntakeRecord.tenant_id == self.tenant_id, LeadIntakeRecord.expires_at <= now
-                )
-                .values(
-                    encrypted_payload=None, encrypted_raw=None, status="expired", actor_digest=None
-                )
-            )
+            await _purge(session, now, self.tenant_id)
 
 
 @asynccontextmanager
@@ -816,33 +778,68 @@ async def execution_is_active(
 
 async def purge_expired(session: AsyncSession, now: datetime) -> None:
     """Scheduler maintenance uses only ciphertext expiry; no decryption key needed."""
-    await purge_auxiliary(session, now)
-    expired = list(
-        (
+    await _purge(session, now, None)
+
+
+# An intake's child rows, deleted in this order by retention and erasure.
+_INTAKE_CHILDREN = (
+    LeadIntakeEffect,
+    LeadResolutionAudit,
+    LeadOpportunityRecord,
+    LeadMailboxMessageRecord,
+)
+
+
+async def _delete_children(
+    session: AsyncSession, tenant_id: UUID | None, ids: list[UUID] | list[tuple[UUID, UUID]]
+) -> None:
+    """Delete the child rows of `ids`: intake ids in `tenant_id`, or (tenant, id) pairs."""
+    for model in _INTAKE_CHILDREN:
+        if tenant_id is None:
             await session.execute(
-                select(LeadIntakeRecord.tenant_id, LeadIntakeRecord.id)
-                .where(LeadIntakeRecord.expires_at <= now)
+                delete(model).where(tuple_(model.tenant_id, model.intake_id).in_(ids))
+            )
+        else:
+            await session.execute(
+                delete(model).where(model.tenant_id == tenant_id, model.intake_id.in_(ids))
+            )
+
+
+async def _purge(session: AsyncSession, now: datetime, tenant_id: UUID | None) -> None:
+    """Expire lead content in one tenant, or in every tenant when `tenant_id` is None."""
+    await purge_auxiliary(session, now, tenant_id)
+    expired: list[UUID] | list[tuple[UUID, UUID]]
+    if tenant_id is None:
+        expired = list(
+            (
+                await session.execute(
+                    select(LeadIntakeRecord.tenant_id, LeadIntakeRecord.id)
+                    .where(LeadIntakeRecord.expires_at <= now)
+                    .with_for_update()
+                )
+            ).tuples()
+        )
+    else:
+        expired = list(
+            await session.scalars(
+                select(LeadIntakeRecord.id)
+                .where(
+                    LeadIntakeRecord.tenant_id == tenant_id,
+                    LeadIntakeRecord.expires_at <= now,
+                )
                 .with_for_update()
             )
-        ).tuples()
-    )
-    for model in (
-        LeadIntakeEffect,
-        LeadResolutionAudit,
-        LeadOpportunityRecord,
-        LeadMailboxMessageRecord,
-    ):
-        await session.execute(
-            delete(model).where(tuple_(model.tenant_id, model.intake_id).in_(expired))
         )
+    await _delete_children(session, tenant_id, expired)
+    in_tenant = () if tenant_id is None else (LeadIntakeRecord.tenant_id == tenant_id,)
     await session.execute(
         update(LeadIntakeRecord)
-        .where(LeadIntakeRecord.raw_expires_at <= now)
+        .where(*in_tenant, LeadIntakeRecord.raw_expires_at <= now)
         .values(encrypted_raw=None)
     )
     await session.execute(
         update(LeadIntakeRecord)
-        .where(LeadIntakeRecord.expires_at <= now)
+        .where(*in_tenant, LeadIntakeRecord.expires_at <= now)
         .values(encrypted_payload=None, encrypted_raw=None, status="expired", actor_digest=None)
     )
 
@@ -859,15 +856,7 @@ async def erase_actor(session: AsyncSession, tenant_id: UUID, actor_id: str) -> 
         LeadIntakeRecord.encrypted_payload.is_not(None),
     )
     identities = list(await session.scalars(ids.with_for_update()))
-    for model in (
-        LeadIntakeEffect,
-        LeadResolutionAudit,
-        LeadOpportunityRecord,
-        LeadMailboxMessageRecord,
-    ):
-        await session.execute(
-            delete(model).where(model.tenant_id == tenant_id, model.intake_id.in_(identities))
-        )
+    await _delete_children(session, tenant_id, identities)
     await session.execute(
         update(LeadIntakeRecord)
         .where(LeadIntakeRecord.tenant_id == tenant_id, LeadIntakeRecord.id.in_(identities))
