@@ -12,6 +12,12 @@ from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.core.stores.domain import TurnOriginRow
 from fastmcp.exceptions import ToolError
 
+NEEDS_ORIGIN = (
+    "Pass the origin_context_id from the current chat and call again: it is needed on every "
+    "call, to be sure the request comes from the person's own chat. If this conversation was "
+    "not given one, it is not the person's own chat and this cannot be done here."
+)
+
 
 def _canonical(value: str | None) -> str | None:
     try:
@@ -44,7 +50,13 @@ async def require_one_to_one(
     The model passes the origin id, but only a live origin of this person's own
     turn with this agent verifies, and its id is random per turn: mail,
     calendar and OneNote content must not reach a channel or group chat.
+
+    The id is required. A routine runs on the same credential as the person's chat
+    turns but opens no origin, so guessing "the person's one running turn" would
+    hand a routine whatever the person's live 1:1 turn may see.
     """
+    if not origin_context_id:
+        raise ToolError(f"Nothing was read or sent. {NEEDS_ORIGIN}")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     if origin.sender_foreign:
         raise ToolError(
@@ -64,11 +76,12 @@ async def origin_facts(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str
 ) -> tuple[bool, bool | None]:
     """(is it the person's 1:1 chat, is the sender from another organisation) for the
-    verified turn origin. Without one, the person's running turns say whether they are
-    from another organisation, and None means that is not known."""
+    verified turn origin. Without one, only a person known to be from another
+    organisation is told so; for anyone else the second value is None, so the caller
+    asks for the origin id and never points at a chat on a guess."""
     origin = await get_verified_origin(runtime, auth, origin_context_id)
     if origin is None:
-        return False, await caller_foreign_status(runtime, auth)
+        return False, (True if await caller_foreign_status(runtime, auth) else None)
     return origin.parent_channel_id.startswith("a:"), origin.sender_foreign
 
 
