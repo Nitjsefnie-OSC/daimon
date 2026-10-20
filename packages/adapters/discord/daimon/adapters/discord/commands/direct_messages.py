@@ -78,6 +78,13 @@ _ACCESS_DENIALS: frozenset[AdmissionDenialReason] = frozenset(
         "own_agents_only",
     }
 )
+_DM_FAILURES = (
+    DaimonError,
+    MAResolverMissError,
+    discord.HTTPException,
+    anthropic.APIError,
+    SQLAlchemyError,
+)
 _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."
 
 
@@ -533,13 +540,7 @@ class DirectMessageCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             await interaction.followup.send("Ready in your DMs.", ephemeral=True)
-        except (
-            DaimonError,
-            MAResolverMissError,
-            discord.HTTPException,
-            anthropic.APIError,
-            SQLAlchemyError,
-        ) as exc:
+        except _DM_FAILURES as exc:
             log.warning("discord.dm.move_failed", error_type=type(exc).__name__)
             message = _error_text(
                 exc,
@@ -570,13 +571,7 @@ class DirectMessageCog(commands.Cog):
                     del self._pending[key]
                 try:
                     await self._reply(message)
-                except (
-                    DaimonError,
-                    MAResolverMissError,
-                    discord.HTTPException,
-                    anthropic.APIError,
-                    SQLAlchemyError,
-                ) as exc:
+                except _DM_FAILURES as exc:
                     log.warning(
                         "discord.dm.discovery_failed",
                         error_type=type(exc).__name__,
@@ -695,13 +690,7 @@ class DirectMessageCog(commands.Cog):
                         await message.channel.send(
                             chunk, allowed_mentions=discord.AllowedMentions.none()
                         )
-        except (
-            DaimonError,
-            MAResolverMissError,
-            discord.HTTPException,
-            anthropic.APIError,
-            SQLAlchemyError,
-        ) as exc:
+        except _DM_FAILURES as exc:
             log_anthropic_overload(
                 exc,
                 tenant_id=conversation.tenant_id,
