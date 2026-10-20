@@ -1168,9 +1168,6 @@ def test_annotation_credentials_use_the_sessions_agent(
     assert lookup_builder.call_args.kwargs["server_urls"] == {"linear": _LINEAR_URL}
 
 
-# --- Review A2: confirmation gate, single attempts, worker ownership, gaps ---
-
-
 async def test_a_confirmation_is_gated_before_it_resumes_the_turn(
     factory: async_sessionmaker[AsyncSession],
 ) -> None:
