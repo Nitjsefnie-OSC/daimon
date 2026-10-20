@@ -1080,20 +1080,25 @@ built-ins and no skills). `require_allowed_capabilities` is a pure check on the
 snapshot that refuses a coordinator (`multiagent`) and disallowed skills, and
 checks every capability-bearing node (session, resources and checkouts,
 agent, model, skills, servers, tools, toolset defaults, per-tool configs,
-permission policies) against a field allowlist frozen in the module rather
+permission policies) and the telemetry (stats, usage and its cache creation,
+outcome evaluations) against a field allowlist frozen in the module rather
 than read from the SDK, before any update: an unknown field, empty or not,
-and an unknown tool, resource or policy type are refused. The snapshot's raw
+and an unknown tool, resource or policy type are refused. A private
+attribute on any model under the snapshot is refused too
+(`_no_private_attributes`); only the SDK's `_request_id` is allowed. The snapshot's raw
 form is also checked against the reviewed value shapes (`_SESSION_SHAPE`): a
 scalar leaf must be that scalar or null, objects and lists are walked to the
-bottom, and only telemetry, metadata and a custom tool's `input_schema` stay
+bottom, and only metadata and a custom tool's `input_schema` stay
 opaque, so a field cannot hide in a value that turned into an object.
 `constrain_capabilities` computes the arrays to send (built-ins always disabled
 and custom tools removed for every unattended entry point, with no opt-in,
 an optional `server/tool` allowlist, and every retained
 MCP toolset's default and per-tool configs on `always_ask`, trusted
 `daimon-mcp` and safety off included, so every MCP call reaches the
-unattended decider); `apply_capabilities` clears the thread session's cached tool hashes
-before it sends them, and `restore_capabilities` puts the session's own arrays
+unattended decider); `invalidate_cached_tools` clears and commits the thread
+session's cached tool hashes and `send_capabilities` then sends the arrays
+(`apply_capabilities` runs both; a caller that restores registers its restore
+between them), and `restore_capabilities` puts the session's own arrays
 back, finishing through repeated cancellation. `capability_posture` makes the
 decider refuse what the session no longer carries, including every built-in
 or custom call. Unattended runs cannot generate files with sandbox tools;

@@ -12,8 +12,16 @@ the capability surface of a turn nobody watches is decided in one place:
 - `constrain_capabilities` works out the tools and servers to send: built-in
   sandbox and custom tools always disabled, an optional explicit tool
   allowlist, and every MCP toolset gated for the unattended decider.
+- `invalidate_cached_tools` then `send_capabilities` put it on the session
+  (`apply_capabilities` runs both); a caller that restores the session's own
+  tools afterwards registers that restore between the two.
+  `restore_capabilities` puts them back.
 - `capability_posture` makes the decider agree: a built-in call is refused
   for every unattended turn, and a call outside the allowlist is refused.
+
+An allowlist entry is a `ServerTool` pair, never a `server/tool` string to
+split: a server named `linear/bridge` would otherwise alias a tool on
+`linear`. A server name holding `/` is refused outright.
 
 `ENTRY_POINT_POLICY` records each entry point's skills policy. Built-in
 sandbox and custom tools are off everywhere, with no opt-in.
@@ -25,7 +33,7 @@ import asyncio
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal, NoReturn, cast, get_args
+from typing import Any, Final, Literal, NamedTuple, NoReturn, cast, get_args
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
@@ -46,6 +54,7 @@ from daimon.core.session_ports_compat import update_session_record
 from daimon.core.stores.thread_sessions import invalidate_session_tools
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
+    SERVER_SEPARATOR,
     ToolCall,
     ToolSafetyPolicy,
     backend_switch_tools,
@@ -68,6 +77,13 @@ UnattendedEntryPoint = Literal[
 BUILTIN_TOOLSET: Final[str] = "agent_toolset_20260401"
 MCP_TOOLSET: Final[str] = "mcp_toolset"
 CUSTOM_TOOL: Final[str] = "custom"
+
+
+class ServerTool(NamedTuple):
+    """One MCP tool by its server and its own name, kept apart."""
+
+    server: str
+    tool: str
 
 
 @dataclass(frozen=True)
@@ -130,10 +146,11 @@ def _fields(*names: str) -> frozenset[str]:
     return frozenset(name for group in names for name in group.split())
 
 
-# The reviewed schema of every capability-bearing node, frozen here rather
-# than read from the installed SDK: a field the provider adds, or an SDK
-# upgrade starts parsing, is refused until it is reviewed. Opaque data (a
-# custom tool's `input_schema`, metadata values, usage) is not walked.
+# The reviewed schema of every node, frozen here rather than read from the
+# installed SDK: a field the provider adds, or an SDK upgrade starts parsing,
+# is refused until it is reviewed. Telemetry (stats, usage and its cache
+# creation, outcome evaluations) is frozen too. Opaque data (a custom tool's
+# `input_schema`, metadata values) is not walked.
 _SESSION = _fields(
     "id type agent archived_at created_at updated_at deployment_id environment_id",
     "metadata outcome_evaluations resources stats status title usage vault_ids",
@@ -144,6 +161,10 @@ _AGENT = _fields(
 # Inference settings only (Daimon's own driver writes `inference_geo` and
 # `effort`, which the SDK does not parse yet); none of them grants a tool.
 _MODEL = _fields("id speed inference_geo effort")
+_STATS = _fields("active_seconds duration_seconds")
+_USAGE = _fields("cache_creation cache_read_input_tokens input_tokens output_tokens")
+_CACHE_CREATION = _fields("ephemeral_1h_input_tokens ephemeral_5m_input_tokens")
+_OUTCOME = _fields("type outcome_id description result iteration explanation completed_at")
 # The two skill kinds the SDK knows, by their own `type` literals.
 _SKILL_TYPES = frozenset(
     kind
@@ -176,29 +197,63 @@ def _refuse() -> NoReturn:
     raise AdmissionDenied(reason="backend_unsupported")
 
 
+#: The one private attribute the SDK sets, on the response it returns.
+_REQUEST_ID: Final[str] = "_request_id"
+
+
 def _only(value: object, names: frozenset[str]) -> None:
     """Refuse `value` unless it is a parsed model carrying only `names`.
 
     Counts the fields the SDK declares (set or not), the response's extras
     and anything else on the instance, so neither a new provider key nor a
-    newly parsed SDK field passes unreviewed.
+    newly parsed SDK field passes unreviewed. Private attributes are checked
+    by `_no_private_attributes`, over the whole snapshot.
     """
     if not isinstance(value, BaseModel):
         _refuse()
     present = (
         set(type(value).model_fields)
         | set(value.model_extra or {})
-        | {name for name in vars(value) if not name.startswith("_")}
+        | {name for name in vars(value) if name != _REQUEST_ID}
     )
     if present - names:
         _refuse()
 
 
+def _no_private_attributes(value: object) -> None:
+    """Refuse any private or dunder attribute on any model in `value`.
+
+    Walks every parsed model, list and dict under the snapshot, opaque
+    fields included. Only the SDK's `_request_id` (a string, or None) is
+    allowed, and pydantic's own private storage must be empty.
+    """
+    if isinstance(value, BaseModel):
+        if value.__pydantic_private__:
+            _refuse()
+        attributes = vars(value)
+        request_id = attributes.get(_REQUEST_ID)
+        if request_id is not None and not isinstance(request_id, str):
+            _refuse()
+        if any(name.startswith("_") and name != _REQUEST_ID for name in attributes):
+            _refuse()
+        for name, entry in attributes.items():
+            if name != _REQUEST_ID:
+                _no_private_attributes(entry)
+        for entry in (value.model_extra or {}).values():
+            _no_private_attributes(entry)
+    elif isinstance(value, list | tuple):
+        for entry in cast("list[object] | tuple[object, ...]", value):
+            _no_private_attributes(entry)
+    elif isinstance(value, dict):
+        for entry in cast("dict[object, object]", value).values():
+            _no_private_attributes(entry)
+
+
 # Value shapes for the same nodes, checked on the snapshot's raw provider
 # form: a reviewed scalar must be that scalar (or null), so no field can hide
 # inside a value that became an object or a list. Objects and lists are
-# checked all the way down; only telemetry, metadata and a custom tool's
-# input schema are opaque data.
+# checked all the way down; only metadata and a custom tool's input schema
+# are opaque data.
 type _Shape = Callable[[object], bool]
 
 
@@ -260,6 +315,8 @@ def _tagged(**variants: _Shape) -> _Shape:
 
 _TEXT = _scalar(str)
 _FLAG = _scalar(bool)
+_COUNT = _scalar(int)
+_NUMBER = _scalar(int, float)
 _LEVELS = ("low", "medium", "high", "xhigh", "max")
 _POLICY_SHAPE = _tagged(always_allow=_object(type=_TEXT), always_ask=_object(type=_TEXT))
 _DEFAULT_SHAPE = _object(enabled=_FLAG, permission_policy=_POLICY_SHAPE)
@@ -291,9 +348,26 @@ _SESSION_SHAPE = _object(
     status=_TEXT,
     title=_TEXT,
     metadata=_opaque,
-    outcome_evaluations=_opaque,
-    stats=_opaque,
-    usage=_opaque,
+    outcome_evaluations=_list(
+        _object(
+            type=_TEXT,
+            outcome_id=_TEXT,
+            description=_TEXT,
+            result=_TEXT,
+            iteration=_scalar(int),
+            explanation=_TEXT,
+            completed_at=_TEXT,
+        )
+    ),
+    stats=_object(active_seconds=_NUMBER, duration_seconds=_NUMBER),
+    usage=_object(
+        cache_creation=_nullable(
+            _object(ephemeral_1h_input_tokens=_COUNT, ephemeral_5m_input_tokens=_COUNT)
+        ),
+        cache_read_input_tokens=_COUNT,
+        input_tokens=_COUNT,
+        output_tokens=_COUNT,
+    ),
     vault_ids=_list(_TEXT),
     resources=_list(
         _tagged(
@@ -392,7 +466,8 @@ def require_allowed_capabilities(
     """Refuse a session whose capabilities cannot be constrained, before any send.
 
     Pure: reads only `snapshot`. Raises `AdmissionDenied` for a coordinator
-    roster, for skills unless `allow_skills`, and for any field this release
+    roster, for skills unless `allow_skills`, for a server name holding `/`,
+    and for any field this release
     has not reviewed, at every capability-bearing level: the session and its
     resources, the agent, its model, skills and servers, each tool, toolset
     default and per-tool config, and their permission policies. An unknown
@@ -401,8 +476,15 @@ def require_allowed_capabilities(
     and objects and lists are checked all the way down.
     """
     _only(snapshot, _SESSION)
+    _no_private_attributes(snapshot)
     if not _SESSION_SHAPE(snapshot.model_dump(mode="json", warnings=False)):
         _refuse()
+    _only(snapshot.stats, _STATS)
+    _only(snapshot.usage, _USAGE)
+    if snapshot.usage.cache_creation is not None:
+        _only(snapshot.usage.cache_creation, _CACHE_CREATION)
+    for outcome in snapshot.outcome_evaluations:
+        _only(outcome, _OUTCOME)
     agent = snapshot.agent
     _only(agent, _AGENT)
     if agent.multiagent is not None or (agent.skills and not allow_skills):
@@ -413,7 +495,7 @@ def require_allowed_capabilities(
         if skill.type not in _SKILL_TYPES:
             _refuse()
     names = [server.name for server in agent.mcp_servers]
-    if len(set(names)) != len(names):
+    if len(set(names)) != len(names) or any(SERVER_SEPARATOR in name for name in names):
         _refuse()
     for server in agent.mcp_servers:
         _only(server, _SERVER)
@@ -426,6 +508,8 @@ def require_allowed_capabilities(
         if tool.type not in _TOOLSETS:
             _refuse()
         _only(tool, _TOOLSETS[tool.type])
+        if tool.type == MCP_TOOLSET and SERVER_SEPARATOR in tool.mcp_server_name:
+            _refuse()
         _require_toolset_configs(tool)
     for resource in snapshot.resources:
         kind = getattr(resource, "type", None)
@@ -502,11 +586,14 @@ def _asking(tool: dict[str, Any]) -> dict[str, Any]:
 def _allowlisted(
     tools: list[dict[str, Any]],
     servers: list[dict[str, Any]],
-    allowlist: frozenset[str],
+    allowlist: frozenset[ServerTool],
     *,
     public_url: str | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Only the MCP tools named `server/tool` in `allowlist`, each enabled alone.
+    """Only the MCP tools `allowlist` names, each enabled alone.
+
+    An entry whose server name holds `/` is refused rather than skipped: a
+    caller that built one has already confused a composite key for a server.
 
     Daimon's own management server is never kept, whatever the list says:
     `daimon-mcp`, a server named `sandbox`, and any server whose URL is the
@@ -519,8 +606,9 @@ def _allowlisted(
         if public_url and isinstance(s.get("url"), str) and same_mcp_endpoint(s["url"], public_url)
     }
     wanted: dict[str, list[str]] = {}
-    for key in sorted(allowlist):
-        server, _, name = key.partition("/")
+    for server, name in sorted(allowlist):
+        if SERVER_SEPARATOR in server:
+            _refuse()
         if server and name and server not in own:
             wanted.setdefault(server, []).append(name)
     kept: list[dict[str, Any]] = []
@@ -556,13 +644,13 @@ async def constrain_capabilities(
     session_factory: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID | None,
     allow_skills: bool = False,
-    tool_allowlist: frozenset[str] | None = None,
+    tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> ConstrainedSession:
     """The tools and servers `snapshot` may run with unattended. No provider call.
 
     Refuses first (`require_allowed_capabilities`). Built-in and custom tools
     are always disabled; with a `tool_allowlist` of
-    `server/tool` keys only those MCP tools stay, and every server no kept
+    `ServerTool` pairs only those MCP tools stay, and every server no kept
     toolset names is dropped. Every MCP toolset left, Daimon's own included and
     with tool safety on or off, asks on its default and on every per-tool
     config, so each call reaches the unattended decider; Daimon's
@@ -603,6 +691,43 @@ async def constrain_capabilities(
     return ConstrainedSession(send=send, original=original, changed=send != original)
 
 
+async def invalidate_cached_tools(
+    snapshot: BetaManagedAgentsSession,
+    constrained: ConstrainedSession,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+) -> None:
+    """Clear and commit the thread session's cached tool hashes, if `constrained` changes anything.
+
+    `invalidate_session_tools` keeps the session's identity, workspace and
+    credential metadata, so the next ordinary bind reapplies its own tools
+    even if this turn never gets to restore them. No provider call; without
+    a `session_factory` it does nothing.
+    """
+    if not constrained.changed or session_factory is None:
+        return
+    async with session_factory.begin() as db:
+        await invalidate_session_tools(db, ma_session_id=snapshot.id)
+
+
+async def send_capabilities(
+    client: AsyncAnthropic,
+    snapshot: BetaManagedAgentsSession,
+    constrained: ConstrainedSession,
+    *,
+    scope: Scope,
+) -> None:
+    """Send `constrained` to the session, when it changes anything. A failure raises.
+
+    Call `invalidate_cached_tools` first. A caller that restores the
+    session's own tools afterwards registers that restore between the two,
+    so a send that fails, or is cancelled, part-way is still restored.
+    """
+    if not constrained.changed:
+        return
+    await _update(client, snapshot, constrained.send, scope=scope)
+
+
 async def apply_capabilities(
     client: AsyncAnthropic,
     snapshot: BetaManagedAgentsSession,
@@ -611,19 +736,13 @@ async def apply_capabilities(
     scope: Scope,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    """Send `constrained` to the session, when it changes anything. A failure raises.
+    """`invalidate_cached_tools`, then `send_capabilities`, with nothing between.
 
-    With a `session_factory`, the thread session's cached tool hashes are
-    cleared and committed first (`invalidate_session_tools`, keeping its
-    identity, workspace and credential metadata), so the next ordinary bind
-    reapplies its own tools even if this turn never gets to restore them.
+    For a caller that never restores the session's own tools; one that does
+    calls the two itself.
     """
-    if not constrained.changed:
-        return
-    if session_factory is not None:
-        async with session_factory.begin() as db:
-            await invalidate_session_tools(db, ma_session_id=snapshot.id)
-    await _update(client, snapshot, constrained.send, scope=scope)
+    await invalidate_cached_tools(snapshot, constrained, session_factory=session_factory)
+    await send_capabilities(client, snapshot, constrained, scope=scope)
 
 
 async def restore_capabilities(
@@ -673,7 +792,7 @@ async def _update(
 def capability_posture(
     posture: PolicyApproval,
     *,
-    tool_allowlist: frozenset[str] | None = None,
+    tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> PolicyApproval:
     """`posture`, refusing what `constrain_capabilities` took out of the session.
 
@@ -692,7 +811,10 @@ def capability_posture(
                     "unattended turn. The tool call did not run."
                 ),
             )
-        if tool_allowlist is not None and call.key not in tool_allowlist:
+        if (
+            tool_allowlist is not None
+            and ServerTool(call.server_name, call.tool_name) not in tool_allowlist
+        ):
             return ToolConfirmationResult(
                 allow=False,
                 deny_message=(

@@ -799,3 +799,47 @@ def test_the_daimon_wildcard_gates_the_proxy_but_never_gets_a_config_of_its_own(
         "call_tool",
         "get_session",
     ]
+
+
+@pytest.mark.parametrize(
+    "policy",
+    [
+        ToolSafetyPolicy(enabled=True, unattended_writes=("linear/bridge",)),
+        ToolSafetyPolicy(enabled=True, unattended_writes=("linear/bridge/get_issue",)),
+        ToolSafetyPolicy(enabled=True, unattended_writes=("*",)),
+        ToolSafetyPolicy(enabled=True, effects={"linear/bridge": "read"}),
+        ToolSafetyPolicy(enabled=True, effects={"linear/bridge/get_issue": "read"}),
+        ToolSafetyPolicy(enabled=True),
+    ],
+    ids=["server_key", "tool_key", "any_key", "server_effect", "tool_effect", "read_name"],
+)
+@pytest.mark.parametrize(
+    "rule",
+    [None, ResolvedAgentToolRule(rule="allow", scope="chat_and_routines")],
+    ids=["no_rule", "allow_rule"],
+)
+def test_a_server_name_with_a_slash_is_never_allowed(
+    policy: ToolSafetyPolicy, rule: ResolvedAgentToolRule | None
+) -> None:
+    """`linear/bridge/get_issue` could be linear's `bridge/get_issue`; no key is trusted."""
+    call = _call("linear/bridge", "get_issue")
+    chat = decide_tool_call(policy, call, attended=True, agent_rule=rule)
+    unattended = decide_tool_call(policy, call, attended=False, agent_rule=rule)
+    assert (chat.outcome, chat.effect) == ("ask", "write")
+    assert (unattended.outcome, unattended.reason) == ("deny", "unattended_write")
+
+
+def test_a_server_name_with_a_slash_still_meets_the_deny_list() -> None:
+    policy = ToolSafetyPolicy(enabled=True, denied=("linear/bridge",))
+    for attended in (True, False):
+        verdict = decide_tool_call(policy, _call("linear/bridge", "get_issue"), attended=attended)
+        assert (verdict.outcome, verdict.reason) == ("deny", "denied_by_operator")
+
+
+@pytest.mark.parametrize("name", ["linear/bridge", "/", "linear/"])
+def test_server_names_with_a_slash_are_rejected(name: str) -> None:
+    from daimon.core.tool_safety import get_mcp_server_name_rejection
+
+    rejection = get_mcp_server_name_rejection(name)
+    assert rejection is not None and name in rejection
+    assert get_mcp_server_name_rejection("linear-bridge") is None

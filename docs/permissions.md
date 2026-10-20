@@ -7,7 +7,10 @@ third-party MCP tool on one agent with `daimon agents tool-rules` or the
 `set_agent_tool_rule` MCP tool. An agent-wide
 rule applies where the agent runs; a channel rule applies in its parent
 channel and threads under it. When both match, `deny` wins over `ask`, which
-wins over `allow`. The key is exactly `server/tool`. A rule is
+wins over `allow`. The key is exactly `server/tool`, and a server name
+never contains `/`: attaching one is refused, and a call on a server
+attached with one before that asks in chat and is refused unattended,
+whatever its keys or rules say. A rule is
 bound to the agent's stable id and the server URL attached under that name;
 changing either makes the rule stop matching. `chat` is the default scope.
 An `allow` rule reaches unattended routines only with `chat_and_routines`.
@@ -156,6 +159,10 @@ the turn, before anything is sent or changed, when the session:
   a capability: the session and its resources (files, repositories, memory
   stores), the agent, its model, skills and MCP servers, each tool, a
   toolset's default and per-tool settings, and their permission policies.
+  The session's telemetry (timing, token usage and its cache creation,
+  outcome evaluations) is held to a reviewed schema the same way.
+  A private attribute on any part of the session is refused too; only the
+  request ID the SDK records on the response it returns is allowed.
   An unknown field is refused even when it is empty, and so is one a newer
   SDK has started to parse. A known field must also hold its reviewed shape:
   a setting that should be a word, number or true/false is refused when it
@@ -163,6 +170,8 @@ the turn, before anything is sent or changed, when the session:
   type, resource type or permission policy type it does not know is refused
   the same way.
 - carries skills on an entry point that does not allow them.
+- has an MCP server whose name contains `/`. Tool keys join a server and a
+  tool with `/`, so such a name could stand for a tool on another server.
 - runs on a Managed Agents runtime that cannot read the live session, so the
   checks above cannot be made. Nothing is sent, not even the first message.
 
