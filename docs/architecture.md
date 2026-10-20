@@ -238,6 +238,15 @@ config). The order is load-bearing and documented as such in the module:
    for the turn is attributed to it. The window's first refusal also
    DMs the channel's admins through the adapter's `TurnDeps.budget_notifier`
    (`daimon.core.channel_budget_notice`).
+10. Conversation model — `daimon.core.thread_models.apply_thread_model` reads
+   the model the conversation's people chose (`thread_model_settings`, keyed
+   by the thread, or a DM's own channel) and puts it in `Admission.agent`,
+   with `Admission.model_override` naming it. It is read again for every
+   turn, so the choice survives restarts and no other conversation sees it.
+   A choice no longer in `ALLOWED_MODEL_IDS`, or a channel that runs another
+   backend, leaves the agent's own model and sets `Admission.model_fell_back`;
+   the turn's user message then carries a `<model_notice>` asking the agent
+   to say so in one sentence.
 
 The policy, writers, balance, cap and channel
 budget gates each raise `AdmissionDenied` with a reason literal, which
@@ -637,10 +646,19 @@ readers are limited, search reports only the hits it shows as its total,
 scoped or not, on both platforms, and Discord hints at more results only when
 a full page of visible hits came back, so neither the count nor the hint can
 reveal hidden matches. A turn inside a limited channel or thread gets
-read-only memory. An origin is any active one of the same account and
-responder, not only the current turn's: a member who copies an origin id out
-of such a turn can read that channel from elsewhere until it expires --
-someone who could read it anyway. Outside reads are refused after the
+read-only memory. An origin also requires the signed `chat_session_id` of
+its calling provider session. Each session mounts a separate identity vault,
+with a distinct `daimon_session` URL query selecting its credential slot;
+the query itself conveys no authority. Shared personal OAuth vaults remain
+mounted separately. `run_prepared_turn` binds the origin to the session's
+recorded grant before driving it and clears that binding when the attempt
+ends, including recovery. Binding a reused session also revokes any origin
+left by an earlier crashed execution of that session. Retained fleet-root origins lose their execution
+grant. Native OpenAI/Gemini credential resolution derives an origin grant
+inside the server's executing turn, retaining the source credential's registry
+owner, expiry and revocation. Legacy shared-credential Managed Agents sessions
+are replaced on their next bind.
+Empty origin IDs never discover a running turn. Outside reads are refused after the
 platform's own caller check, and search drops hidden hits.
 
 A session transcript holds everything its turns saw, so the transcript tools
@@ -793,9 +811,10 @@ no direct messages; only its setup thread may still configure C's own agent.
 Held to C, by its own agent or such an origin, a call also reads only C and
 the sessions that ran there (`own_agents_only` on `READ_CHANNEL`,
 `READ_SESSION`, `CONTINUE_SESSION`; `home_hold`); a session with no channel
-stamp counts as outside C. A chat token names no turn, so while one of its
-turns runs in C a call is held there whatever origin it names (`_held_origin`;
-turns running in two such channels refuse it). Held, `list_channels` and the
+stamp counts as outside C. A chat token's signed session grant identifies
+its live origin, so a call remains held there even if the model omits or
+names another origin (`_held_origin`). Other sessions' origins never supply
+a hold or read authority. Held, `list_channels` and the
 search tools name nothing else, so nothing read elsewhere, a prompt planted in
 C included, is reposted into C. A thread routine saved without its parent
 channel is treated as inside any such channel until delivery places it
@@ -1058,7 +1077,11 @@ unattended wakes, and future watches or completion turns), this also covers
 dead-session recovery. Platform queue dispatchers explicitly mark timers and
 worker-completion wakes unattended. User-initiated handoffs and private-input
 continuations retain their attended approval surfaces. Managed Agents runtimes refresh
-the snapshot before **every** confirmation batch. A non-Anthropic runtime, or an injected mux
+the snapshot before **every** confirmation batch. Decision-task joins and card
+retirement remain inside the driver's abort boundary:
+an outside cancellation, including one during Stop cleanup, finishes bounded,
+shielded interruption and leaves unattended calls unanswered before propagating.
+A non-Anthropic runtime, or an injected mux
 backend without a session read, refuses every unattended confirmation with
 a plain explanation that it cannot refresh the tool safety gate. This rule
 applies with safety on or off; the model receives a denial and the turn can
@@ -1161,9 +1184,12 @@ naming any other URL at `DAIMON_MCP__PUBLIC_URL`, and without a public URL the
 reserved name is gated like any other server. A pending card is owned by the
 turn: stopping the turn, a replayed pause, or the turn ceiling cancels the
 decision and retires the card, so an Approve that arrives after Stop never
-runs anything. Attended cleanup refuses pending calls. A gated unattended
+runs anything. Attended cleanup refuses pending calls. An unattended
 turn leaves them paused and interrupts instead: even a denial would resume
-execution without a successful gate. Cancellation during a confirmation
+execution. The driver tracks unattended cleanup independently of its optional
+confirmation gate, so Stop, cancellation and ceiling expiry also leave calls
+paused on runtimes without session reads. Normal decisions on those runtimes
+still refuse unattended confirmations. Cancellation during a confirmation
 gate cancels that gate before interrupting; a failed gate sends no confirmations. That cleanup is best effort within a few
 seconds per step (`CLEANUP_BUDGET_S`): a chat platform or MA that stops
 answering cannot hold a turn past its ceiling or a Stop.
@@ -1172,6 +1198,21 @@ A queued handoff inherits attendance from its trusted execution origin. Timer
 and worker-completion turns and their model-created handoffs stay unattended;
 a real human message or private-input action supplies attended provenance.
 Queue reasons alone cannot upgrade a turn to human approval surfaces.
+
+OpenAI captures MCP bearers at session creation, so its preparation host
+installs a scope-bound session grant before allocation and records it in the
+binding. The grant participates in the creation digest, refusing legacy
+ungranted bindings or receipts. The prepared driver binds it to each current
+origin, narrows attendance from dispatch provenance, and clears it on exit.
+Child preparation installs its own isolated grant, independently of inherited
+rendering or execution contexts. Source token expiry and revocation still apply.
+
+Agent-chat session creation records headless provenance. Continue, ask with a
+handle, cancel and archive require it before waiting on the mutation fence
+and again inside it. An unauthorized nested caller cannot wait on the human
+driver it is interrupting.
+A platform session cannot lend its credential or attended origin grant to a
+headless caller. Legacy sessions without this provenance refuse mutation.
 
 Agent-chat turns (`start_turn`, `continue_turn` and `ask`, per agent and on
 the hub) have nobody to press Approve, so they take the unattended rules
@@ -1465,6 +1506,18 @@ session is actually running (`packages/core/daimon/core/session_snapshot.py`),
 and that snapshot, not the current spec, is what later turns compare and bill
 against.
 
+A conversation's model choice (`/model` on Discord, or the agent's
+`set_thread_model` tool when someone asks in words) is a session override,
+never an agent edit. Admission puts it in the desired snapshot, so the next
+turn's compatibility check finds a `model` change and replaces the session,
+carrying the work over as for any model edit. The successor is created with
+`agent_with_overrides.model`. A Managed Agents override names a model and
+speed but no effort, so no effort is offered. The tool runs only for a
+verified, attended turn origin: routines, wakes and agent-chat callers can't
+change a conversation's model. `/model` runs the same `START_TURN` check that
+admission makes. Fleet roots and workers ignore the choice (see Worker fleets
+below), and `/model` says so when the thread's agent holds a fleet grant.
+
 ### Worker fleets
 
 A fleet run is an orchestrator turn's durable fan-out
@@ -1478,6 +1531,13 @@ row's version. Worker turns have a concurrency pool of their own, counted from
 these rows per tenant (`DAIMON_FLEET__MAX_CONCURRENT_WORKERS_PER_TENANT`) and
 per process, so a fan-out never takes the chat turns' slots. Fleets are off by
 default (`DAIMON_FLEET__ENABLED`).
+
+A conversation's model choice (`/model`) never reaches a fleet. When the
+answering agent holds a fleet grant, `bind_session_impl` puts the authored agent
+back (`Admission.authored`) before the root session is prepared. A worker's
+bind does the same, and its session is never created with an override. A
+frozen root therefore records the model the agent's owner approved, and the
+override is not among its retained admission facts.
 
 ### Same-thread handoff
 
@@ -1706,13 +1766,16 @@ contract and limits.
 
 ### Google tokens in ordinary chat
 
-Chat sessions attach a per-account, per-agent vault whose signed JWT carries
-`chat_agent_id`, derived from the tenant and Managed Agent ID. MCP resolves this
+Chat sessions attach an isolated identity vault whose signed JWT carries
+`chat_agent_id`, derived from the tenant and Managed Agent ID, and a unique
+`chat_session_id` grant. Personal OAuth credentials stay in a separate
+per-account, per-agent vault. MCP resolves this
 as the executing agent identity for `get_cli_token(service="gcloud")`, while
 preserving the ordinary chat tool surface and live account-role checks. The
 separate `agent_id` claim still selects the restricted external agent-chat surface.
 Neither claim is supplied through tool arguments. Chat identity is stored separately
-from `AuthIdentity.agent_id` and is consumed only by the Google broker path. GitHub chat calls use the agent’s App grants; other identity gates
+from `AuthIdentity.agent_id`; origin tools additionally require the matching
+session grant. GitHub chat calls use the agent’s App grants; other identity gates
 and the two-tool search interface remain unchanged.
 
 The operator must configure `credentials.google_sa_json`, authorize domain-wide

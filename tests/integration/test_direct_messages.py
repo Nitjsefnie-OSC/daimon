@@ -1184,8 +1184,11 @@ async def test_dm_tightening_memory_policy_replaces_the_writable_session(
 
 
 async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_mcp_callers(
-    db_session, db_session_factory
+    db_session,
+    pooled_dm_sessionmaker,
 ):
+    # Nested HTTP calls and headless drivers need independent transactions.
+    db_session_factory = pooled_dm_sessionmaker
     import re
     from dataclasses import replace
 

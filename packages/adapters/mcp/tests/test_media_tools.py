@@ -83,7 +83,11 @@ class _SeedAuthMiddleware(Middleware):
 
 def _trusted_auth() -> AuthIdentity:
     return AuthIdentity(
-        account_id=uuid.uuid4(), tenant_id=uuid.uuid4(), role=Role.ADMIN, platform_user_id=None
+        account_id=uuid.uuid4(),
+        tenant_id=uuid.uuid4(),
+        role=Role.ADMIN,
+        platform_user_id=None,
+        chat_session_id="test-session",
     )
 
 
@@ -139,6 +143,7 @@ async def test_create_file_upload_url_returns_a_put_url_and_a_handle(
                 tenant_id=tenant_id,
                 role=Role.ADMIN,
                 platform_user_id=None,
+                chat_session_id="test-session",
             )
         )
     )
@@ -367,6 +372,7 @@ async def test_a_billed_transcript_counts_toward_the_turns_channel_budget(
             role=Role.USER,
             expires_at=now + timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
     auth = AuthIdentity(
         account_id=account.id,
@@ -374,6 +380,7 @@ async def test_a_billed_transcript_counts_toward_the_turns_channel_budget(
         role=Role.USER,
         platform="discord",
         platform_user_id="u1",
+        chat_session_id="test-session",
     )
     gemini_calls: list[httpx.Request] = []
 
@@ -420,6 +427,7 @@ async def test_a_channel_bound_keys_transcript_counts_toward_its_channel_budget(
         platform_user_id="u1",
         agent_id=uuid.uuid4(),
         bound_channel_id="222",
+        chat_session_id="test-session",
     )
     gemini_calls: list[httpx.Request] = []
 

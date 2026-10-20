@@ -58,6 +58,8 @@ from daimon.core.stores.thread_sessions import (
     mark_dead,
     transfer_active_turn,
 )
+from daimon.core.stores.turn_origins import bind_origin_session
+from daimon.core.thread_models import MODEL_FALLBACK_NOTICE
 from daimon.core.tool_safety import daimon_endpoint, trusted_servers_for
 from daimon.core.turn.admission import Admission, decide_before_send, reauthorize
 from daimon.core.turn.approvals import (
@@ -105,6 +107,7 @@ from daimon.core.turn.provider_actions import (
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import protected_tools, refuse_ungated_confirmation, session_gate
+from daimon.core.turn_origin import current_origin_id, execution_origin
 from daimon.core.usage_billing import ObservationBilled, ObservationRecorder
 from daimon.core.usage_sweep import SETTLE_BUDGET_S, settle_session
 from mux.contracts.events import Event
@@ -1107,6 +1110,8 @@ async def run_prepared_turn_impl(
     # every ordinary turn, which then sends byte-identical bytes to before.
     context = context_prompt(origin, system=prepared.admission.agent.system)
     prefix = context + prepared.continuity.user_prefix
+    if prepared.admission.model_fell_back:
+        prefix += MODEL_FALLBACK_NOTICE
 
     @contextlib.asynccontextmanager
     async def persisted(
@@ -1118,85 +1123,121 @@ async def run_prepared_turn_impl(
         backend: ManagedAgents | None = None,
         scope: Scope | None = None,
     ) -> AsyncIterator[ToolConfirmation]:
-        selected_path = deps.turn_path or load_turn_settings().path
-        posture = tool_confirmation
-        with contextlib.ExitStack() as stack:
-            if unattended:
-                revision = admission.backend_revision
-                gateable = revision is None or revision.profile == MANAGED_AGENTS.profile_id
-                read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None
-                injected = (backend or deps.backend) if selected_path == "mux" else None
-                gate_scope = admitted_session_scope(
-                    admission, tenant_id=tenant_id, session_id=session_id, prepared=scope
+        origin_id = current_origin_id.get() if origin != "worker" else None
+        if origin_id is not None:
+            async with deps.sessionmaker.begin() as db:
+                mapping = (
+                    await get_thread_session_by_id(db, id=mapping_id)
+                    if mapping_id is not None
+                    else None
                 )
-                if gateable and injected is not None:
-                    # An injected mux runtime must offer the actual snapshot
-                    # read; its profile alone does not prove it can re-gate.
-                    ref = session_ref
-                    if ref is None and deps.backend_session_ref is not None:
-                        ref = deps.backend_session_ref(session_id, gate_scope)
-                    try:
-                        reads = injected.extension(
-                            SessionReads, namespace=SESSION_READS_NAMESPACE, version=1
-                        )
-                    except UnsupportedCapability:
-                        gateable = False
-                    else:
-                        if ref is None:
+                grant = (
+                    mapping.effective_config.chat_session_id
+                    if mapping is not None
+                    and mapping.ma_session_id == session_id
+                    and mapping.tenant_id == tenant_id
+                    and mapping.account_id == admission.account_id
+                    and mapping.effective_config is not None
+                    else None
+                )
+                if (
+                    mapping_id is None
+                    and session_id == prepared.ma_session_id
+                    and admission == prepared.admission
+                    and prepared.session_ref is not None
+                    and prepared.session_ref.tenant_id == str(tenant_id)
+                    and prepared.session_ref.account_id == str(admission.account_id)
+                ):
+                    grant = prepared.native_chat_session_id
+                await bind_origin_session(
+                    db, origin_id=origin_id, chat_session_id=grant, attended=not unattended
+                )
+        try:
+            selected_path = deps.turn_path or load_turn_settings().path
+            posture = tool_confirmation
+            with contextlib.ExitStack() as stack:
+                stack.enter_context(execution_origin(origin_id))
+                if unattended:
+                    revision = admission.backend_revision
+                    gateable = revision is None or revision.profile == MANAGED_AGENTS.profile_id
+                    read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None
+                    injected = (backend or deps.backend) if selected_path == "mux" else None
+                    gate_scope = admitted_session_scope(
+                        admission, tenant_id=tenant_id, session_id=session_id, prepared=scope
+                    )
+                    if gateable and injected is not None:
+                        # An injected mux runtime must offer the actual snapshot
+                        # read; its profile alone does not prove it can re-gate.
+                        ref = session_ref
+                        if ref is None and deps.backend_session_ref is not None:
+                            ref = deps.backend_session_ref(session_id, gate_scope)
+                        try:
+                            reads = injected.extension(
+                                SessionReads, namespace=SESSION_READS_NAMESPACE, version=1
+                            )
+                        except UnsupportedCapability:
                             gateable = False
                         else:
+                            if ref is None:
+                                gateable = False
+                            else:
 
-                            async def read_injected_session() -> BetaManagedAgentsSession:
-                                return BetaManagedAgentsSession.model_validate(
-                                    await legacy_call(reads.read_native(gate_scope, ref))
+                                async def read_injected_session() -> BetaManagedAgentsSession:
+                                    return BetaManagedAgentsSession.model_validate(
+                                        await legacy_call(reads.read_native(gate_scope, ref))
+                                    )
+
+                                read_session = read_injected_session
+
+                    if unattended_dm:
+                        if not gateable:
+                            raise AdmissionDenied(reason="backend_unsupported")
+                        from daimon.core.turn.unattended import dm_session_authority
+
+                        posture, dm_gate = await dm_session_authority(
+                            deps, admission, session_id, tenant_id=tenant_id, read_session=read_session
+                        )
+                        stack.enter_context(unattended_sends(dm_gate))
+                    elif gateable:
+                        stack.enter_context(
+                            unattended_sends(
+                                session_gate(
+                                    deps.anthropic,
+                                    session_id,
+                                    deps.tool_safety,
+                                    scope=gate_scope,
+                                    public_url=deps.public_url,
+                                    session_factory=deps.sessionmaker,
+                                    tenant_id=tenant_id,
+                                    read_session=read_session,
                                 )
-
-                            read_session = read_injected_session
-
-                if unattended_dm:
-                    if not gateable:
-                        raise AdmissionDenied(reason="backend_unsupported")
-                    from daimon.core.turn.unattended import dm_session_authority
-
-                    posture, dm_gate = await dm_session_authority(
-                        deps, admission, session_id, tenant_id=tenant_id, read_session=read_session
-                    )
-                    stack.enter_context(unattended_sends(dm_gate))
-                elif gateable:
-                    stack.enter_context(
-                        unattended_sends(
-                            session_gate(
-                                deps.anthropic,
-                                session_id,
-                                deps.tool_safety,
-                                scope=gate_scope,
-                                public_url=deps.public_url,
-                                session_factory=deps.sessionmaker,
-                                tenant_id=tenant_id,
-                                read_session=read_session,
                             )
                         )
-                    )
-                else:
-                    posture = PolicyApproval(decide=refuse_ungated_confirmation)
-            if selected_path == "legacy":
-                yield posture
-                return
-            persistence = await prepared_persistence(
-                deps,
-                admission,
-                tenant_id=tenant_id,
-                platform=platform,
-                thread_id=thread_id,
-                session_id=session_id,
-                mapping_id=mapping_id,
-                operation_key=operation_key,
-                session_ref=session_ref,
-                scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-                fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
-            )
-            with persistence.activate():
-                yield posture
+                    else:
+                        stack.enter_context(unattended_sends(None))
+                        posture = PolicyApproval(decide=refuse_ungated_confirmation)
+                if selected_path == "legacy":
+                    yield posture
+                    return
+                persistence = await prepared_persistence(
+                    deps,
+                    admission,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    thread_id=thread_id,
+                    session_id=session_id,
+                    mapping_id=mapping_id,
+                    operation_key=operation_key,
+                    session_ref=session_ref,
+                    scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+                    fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
+                )
+                with persistence.activate():
+                    yield posture
+        finally:
+            if origin_id is not None:
+                async with deps.sessionmaker.begin() as db:
+                    await bind_origin_session(db, origin_id=origin_id, chat_session_id=None)
 
     root_intent = turn_card_intent_id if deps.fleet_enabled and origin != "worker" else None
 

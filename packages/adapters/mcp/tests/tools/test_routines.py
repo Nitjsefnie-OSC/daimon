@@ -123,6 +123,7 @@ def _auth_identity(
             if talking_to is None
             else derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=talking_to)
         ),
+        chat_session_id="test-session",
     )
 
 
@@ -1353,6 +1354,7 @@ async def test_create_routine_without_a_destination_budgets_the_turns_channel(
         role=Role.USER,
         expires_at=now + timedelta(minutes=10),
         now=now,
+        chat_session_id="test-session",
     )
     await db_session.commit()
     runtime = _runtime(
@@ -2074,6 +2076,7 @@ async def test_mcp_dm_creation_verifies_and_retains_thread_origin(
         role=Role.USER,
         expires_at=now + timedelta(minutes=10),
         now=now,
+        chat_session_id="test-session",
     )
     if restricted:
         await set_access_policy(
@@ -2365,6 +2368,7 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
         role=Role.ADMIN,
         expires_at=now + timedelta(minutes=10),
         now=now,
+        chat_session_id="test-session",
     )
     if source == "restricted":
         await set_access_policy(
@@ -2419,6 +2423,7 @@ async def test_authenticated_routine_creation_preserves_private_or_guild_origin(
             account_id=account.id,
             agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_resolved"),
             secret=secret,
+            chat_session_id="test-session",
             now=now,
         )
     arguments = {

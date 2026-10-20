@@ -509,6 +509,73 @@ async def test_a_root_retained_before_daimon_rule_tools_existed_still_reads(root
         await ports.close()
 
 
+async def test_a_frozen_root_carries_no_conversation_model_and_reads_as_before(root_turn):
+    """Roots frozen before per-conversation models existed have exactly this shape."""
+    from decimal import Decimal
+
+    from daimon.core._models import MuxOperation
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.stores.fleet import WorkerPool
+    from sqlalchemy import select
+
+    deps, _, _, _, origin, _, _, _ = root_turn
+    parent = await retained(root_turn)
+    async with deps.sessionmaker() as db:
+        row = (
+            await db.execute(
+                select(MuxOperation).where(
+                    MuxOperation.tenant_id == origin.tenant_id,
+                    MuxOperation.key == "fleet_root:" + str(origin.id) + ":root:0",
+                )
+            )
+        ).scalar_one()
+    facts = row.record["result"]["preparation"]["admission"]
+    assert not {"model_override", "model_fell_back", "authored_agent"} & set(facts)
+    request = await read_frozen_preparation(
+        deps, parent, deadline=parent.limits.deadline, now=lambda: datetime.now(UTC)
+    )
+    assert request.admission.model_override is None
+    assert request.admission.authored_agent is None
+    ports = HostFleetPorts(
+        deps.sessionmaker,
+        prices={},
+        markup=Decimal("1"),
+        deps=deps,
+        pool=WorkerPool(max_concurrent_workers=1, max_concurrent_workers_per_tenant=1),
+    )
+    try:
+        source = await ports.capture_source(parent)
+        assert source.source.ref == parent.source_agents[0]
+    finally:
+        await ports.close()
+
+
+async def test_a_fleet_agents_conversation_reports_its_fleet(root_turn):
+    from daimon.core.thread_models import thread_runs_fleet
+
+    deps, prepared, *_ = root_turn
+    tenant_id = prepared.admission.grant.tenant_id
+    agent_id = prepared.admission.agent.id
+
+    async def runs(*, fleet_enabled=True, ma_agent_id=agent_id):
+        return await thread_runs_fleet(
+            deps.sessionmaker,
+            fleet_enabled=fleet_enabled,
+            tenant_id=tenant_id,
+            platform="discord",
+            thread_id="any-thread",
+            ma_agent_id=ma_agent_id,
+            now=datetime.now(UTC),
+        )
+
+    assert await runs(), "the agent holds a fleet grant"
+    assert not await runs(fleet_enabled=False)
+    assert not await runs(ma_agent_id="agt_without_grant")
+    assert not await runs(ma_agent_id=None), "a thread with no session names no agent"
+    await revoke(root_turn)
+    assert not await runs()
+
+
 @pytest.mark.parametrize("mode", ["unrestricted", "limited"])
 def test_environment_sdk_facade_preserves_represented_network_packages_and_dates(mode):
     from daimon.core.mux_compat import sdk_environment, source_environment_record

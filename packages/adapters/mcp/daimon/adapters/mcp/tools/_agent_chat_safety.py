@@ -32,6 +32,7 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._session_access import hub_access_mode
 from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_AGENT_CHAT,
     MA_METADATA_KEY_CHANNEL,
     MA_METADATA_KEY_PRIVATE_DM,
 )
@@ -95,12 +96,16 @@ def single_attempt(runtime: McpRuntime) -> AsyncAnthropic:
 
 
 def require_session_driver(session: BetaManagedAgentsSession, auth: AuthIdentity) -> None:
-    """Refuse anyone but the session's own account, outside a hub read.
+    """Require the headless creation surface and owning account, outside a hub read.
 
     `_verify_agent_owns_session` already holds this for a continue; it is
     checked again where pauses get answered, so a read grant (an admin's hub
     read of a channel session) can never reach that code.
     """
+    if (session.metadata or {}).get(MA_METADATA_KEY_AGENT_CHAT) != "true":
+        raise ToolError(
+            "Only sessions opened through agent chat can be driven here. Open a new conversation."
+        )
     if (session.metadata or {}).get(MA_METADATA_KEY_ACCOUNT) != str(
         auth.account_id
     ) or hub_access_mode() == "read":

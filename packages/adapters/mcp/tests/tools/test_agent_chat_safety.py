@@ -101,7 +101,7 @@ class FakeSession:
         tool: str = "create_issue",
         script: list[list[Call]] | None = None,
     ) -> None:
-        self.metadata = {MA_METADATA_KEY_ACCOUNT: str(account)}
+        self.metadata = {"daimon_agent_chat": "true", MA_METADATA_KEY_ACCOUNT: str(account)}
         self.tools = [_toolset("linear", frozen, "create_issue")]
         self.servers = [{"name": "linear", "type": "url", "url": _LINEAR_URL}]
         self.script = script or [[("linear", tool, {})]]

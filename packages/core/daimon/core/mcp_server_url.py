@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from urllib.parse import urlsplit, urlunsplit
+import uuid
+from urllib.parse import parse_qsl, urlencode, urlsplit, urlunsplit
 
 _DEFAULT_PORTS = {"http": 80, "https": 443}
 
@@ -34,3 +35,34 @@ def canonical_mcp_url(url: str) -> str:
 
 def same_mcp_url(left: str, right: str) -> bool:
     return canonical_mcp_url(left) == canonical_mcp_url(right)
+
+
+def session_mcp_url(public_url: str, session_id: str) -> str:
+    """A distinct credential slot for one server-minted provider session grant."""
+    parts = urlsplit(public_url)
+    query = [*parse_qsl(parts.query, keep_blank_values=True), ("daimon_session", session_id)]
+    return urlunsplit(parts._replace(query=urlencode(query)))
+
+
+def is_session_mcp_url(candidate: str, public_url: str) -> bool:
+    """Only the real endpoint with one well-formed session selector is trusted.
+
+    The selector conveys no authority; the mounted isolated vault supplies the
+    signed credential. Other sessions never mount that vault.
+    """
+    try:
+        parts = urlsplit(candidate)
+    except ValueError:
+        return False
+    query = parse_qsl(parts.query, keep_blank_values=True)
+    selectors = [value for key, value in query if key == "daimon_session"]
+    if len(selectors) != 1:
+        return False
+    try:
+        uuid.UUID(selectors[0])
+    except ValueError:
+        return False
+    base = urlunsplit(
+        parts._replace(query=urlencode([(k, v) for k, v in query if k != "daimon_session"]))
+    )
+    return same_mcp_url(base, public_url)

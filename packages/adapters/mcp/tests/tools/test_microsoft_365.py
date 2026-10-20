@@ -137,6 +137,7 @@ async def _person(sm: async_sessionmaker[AsyncSession]) -> tuple[TenantRow, Auth
         external_id=ENTRA,
         platform_user_id=OID,
         chat_agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="agent_x"),
+        chat_session_id="test-session",
     )
     return tenant, auth
 
@@ -158,6 +159,7 @@ async def _origin(sm: async_sessionmaker[AsyncSession], auth: AuthIdentity, pare
             role=Role.USER,
             expires_at=now + timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
     return str(origin.id)
 

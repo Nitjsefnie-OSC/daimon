@@ -343,6 +343,8 @@ def register_hub_tools(
         result to continue the same conversation. Discord replies require live membership
         and invoker-policy access at delivery. On timeout the error carries
         the handle; resume with it rather than asking again.
+        Only handles opened through agent chat can be continued here; platform
+        conversations and legacy sessions without this provenance are refused.
         """
         auth, subject, recheck = await _admitted(ctx, daimon_id, "ask")
         with hub_session_access(subject, "continue"):
@@ -385,6 +387,8 @@ def register_hub_tools(
         ``message`` is sent once the resumed turn ends, waiting up to about 90
         seconds. Only the session's own account can continue or resume it,
         and never a turn waiting on an approval card in chat.
+        Only handles opened through agent chat can be continued here; platform
+        conversations and legacy sessions without this provenance are refused.
         """
         auth, subject, recheck = await _admitted(ctx, daimon_id, "continue_turn")
         with hub_session_access(subject, "continue"):

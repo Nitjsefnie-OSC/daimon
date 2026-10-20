@@ -162,7 +162,7 @@ async def origin_budget_channel(
     bound = token_channel_id(auth)
     if bound is not None:
         return bound
-    if not origin_context_id or auth.platform not in _PLATFORMS:
+    if not origin_context_id or auth.platform not in _PLATFORMS or auth.chat_session_id is None:
         return None
     try:
         origin_id = uuid.UUID(origin_context_id)
@@ -179,10 +179,16 @@ async def origin_budget_channel(
         )
         # A chat turn's credential names its agent as chat_agent_id (`require_turn_origin`).
         executing_agent = auth.agent_id or auth.chat_agent_id
-        if origin is None or (
-            executing_agent is not None
-            and executing_agent
-            != derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
+        if (
+            origin is None
+            or origin.chat_session_id != auth.chat_session_id
+            or (
+                executing_agent is not None
+                and executing_agent
+                != derive_agent_uuid(
+                    tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
+                )
+            )
         ):
             return None
         if _is_dm_scope(origin.thread_id):

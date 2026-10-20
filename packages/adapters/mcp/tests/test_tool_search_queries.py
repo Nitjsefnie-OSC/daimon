@@ -190,6 +190,7 @@ def _make_app(
                     "tenant_id": str(tenant_id or uuid.uuid4()),
                     "role": role,
                     "client_id": "test",
+                    "chat_session_id": "test-session",
                     "platform": platform,
                     "external_id": "T_TEST" if platform == "slack" else "111",
                     "platform_user_id": "U_TEST" if platform == "slack" else "42",
@@ -378,6 +379,7 @@ async def test_member_can_request_new_key_on_managed_agent(
             role=Role.USER,
             now=now,
             expires_at=now + timedelta(minutes=10),
+            chat_session_id="test-session",
         )
     agent = ma_agent(
         id="ag_daimon",
@@ -497,6 +499,7 @@ async def test_member_cannot_attach_mcp_through_token_request_on_managed_default
             role=Role.USER,
             now=now,
             expires_at=now + timedelta(minutes=10),
+            chat_session_id="test-session",
         )
     agent = ma_agent(
         id="ag_daimon",

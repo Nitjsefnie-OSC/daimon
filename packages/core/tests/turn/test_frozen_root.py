@@ -1635,6 +1635,7 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
     funded_root,
     category_id,
     category_unresolved,
+    chosen_model=None,
 ):
     from types import SimpleNamespace
 
@@ -1697,10 +1698,13 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
     snapshot = ma_session(id=session_id, agent=native, environment_id=environment.id)
     session_readback = snapshot.model_dump(mode="json")
 
+    created_agents = []
+
     def create_session(request, _match):
         import json
 
         submitted = json.loads(request.content)
+        created_agents.append(submitted.get("agent"))
         for key in ("budget", "metadata", "resources"):
             if key in submitted:
                 session_readback[key] = submitted[key]
@@ -1761,6 +1765,16 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
         assert admission.backend_revision_origin == ("channel" if configured_channel else None)
         assert (admission.backend_revision is not None) == configured_channel
         assert admission.grant.thread_id is None
+        if chosen_model is not None:
+            # The conversation chose a model (`/model`), as admission applies it.
+            from daimon.core.thread_models import with_model_override
+
+            admission = replace(
+                admission,
+                agent=with_model_override(admission.agent, chosen_model),
+                model_override=chosen_model,
+                authored_agent=admission.agent,
+            )
 
         async def send_card(**_kwargs):
             return SimpleNamespace(id=900)
@@ -1805,6 +1819,13 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
                 turn_card_intent_id=intent.id,
             )
             assert not prepared.reused and prepared.ma_session_id == session_id
+            if chosen_model is not None:
+                # A fleet root runs the model the agent's owner approved.
+                assert prepared.admission.model_override is None
+                assert prepared.admission.agent.model == native.model
+                assert created_agents and all(
+                    not isinstance(agent, dict) or "model" not in agent for agent in created_agents
+                ), "the root session is never created with the conversation's model"
             lifecycle = RecordingLifecycle()
 
             async def reseed():
@@ -1831,6 +1852,10 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
             )
             async with deps.sessionmaker() as db:
                 record = await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id)
+            retained_admission = record.result["preparation"]["admission"]
+            assert not {"model_override", "model_fell_back", "authored_agent"} & set(
+                retained_admission
+            ), "a conversation's model choice is never frozen into a root"
             if configured_channel:
                 assert "default_backend_revision" not in record.result
                 assert record.result["preparation"]["admission"][
@@ -1909,8 +1934,26 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
                     assert resolved.permissions.fleet.origin_id == origin.id
                     assert resolved.permissions.fleet.account_id == admission.account_id
                     assert resolved.spec.extensions == parent.spec.extensions
+                    assert selected.admission.model_override is None
+                    assert parent.spec.model.id == native.model.id, (
+                        "the frozen root spec runs the authored model"
+                    )
             finally:
                 await ports.close()
+
+
+async def test_a_conversations_model_choice_never_reaches_a_fleet_root_or_its_workers(
+    recorded_fresh_root,
+):
+    """`/model` on a fleet-root thread: the root and its workers keep the approved model."""
+    await test_real_fresh_mention_default_freezes_from_admission_to_checked_send(
+        recorded_fresh_root,
+        configured_channel=False,
+        funded_root=True,
+        category_id=None,
+        category_unresolved=False,
+        chosen_model="claude-opus-5-5",
+    )
 
 
 @pytest.mark.parametrize("fault", ["missing", "digest", "origin"])

@@ -1245,6 +1245,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.help import HelpCog
         from daimon.adapters.discord.commands.here import HereCog
         from daimon.adapters.discord.commands.memory import MemoryCog
+        from daimon.adapters.discord.commands.model import ModelCog
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
@@ -1258,6 +1259,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(BillingCog(self))
         await self.add_cog(PrivacyCog(self))
         await self.add_cog(MemoryCog(self))
+        await self.add_cog(ModelCog(self))
         await self.add_cog(FeedbackReactionCog(self))
 
         # One-time CLASS registration (not per-button) for the chat-initiated

@@ -223,6 +223,7 @@ class Case:
             responder_name="helper",
             role=self.auth.role,
             message_text=message,
+            chat_session_id="test-session",
         ) as origin:
             yield str(origin.id)
 
@@ -269,7 +270,13 @@ async def test_capability_for_another_channel_adds_no_configuration_read() -> No
     from daimon.core.stores.domain import TurnOriginRow
 
     tenant, account = uuid.uuid4(), uuid.uuid4()
-    auth = AuthIdentity(tenant_id=tenant, account_id=account, role=Role.USER, platform="discord")
+    auth = AuthIdentity(
+        tenant_id=tenant,
+        account_id=account,
+        role=Role.USER,
+        platform="discord",
+        chat_session_id="test-session",
+    )
     origin = cast(
         TurnOriginRow,
         SimpleNamespace(
@@ -300,6 +307,7 @@ async def case(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIte
         platform="discord",
         platform_user_id=USER,
         is_admin=False,
+        chat_session_id="test-session",
     )
     wire = NativeWire()
     client = build_gemini_client(transport=httpx.MockTransport(wire.handle))
@@ -366,6 +374,7 @@ async def case(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIte
                 role=auth.role,
                 now=datetime.now(UTC),
                 expires_at=datetime.now(UTC) + timedelta(minutes=10),
+                chat_session_id="test-session",
             )
             origin = str(native_origin.id)
             revision = await set_channel_backend(

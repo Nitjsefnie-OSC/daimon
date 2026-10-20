@@ -97,6 +97,7 @@ class _World:
             role=Role.USER,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
+            chat_session_id="test-session",
         )
         await self.db.commit()
         return str(origin.id)
@@ -119,6 +120,7 @@ class _World:
             platform=self.platform,
             chat_agent_id=agent_uuid,
             **extra,
+            chat_session_id="test-session",
         )
 
     def agent_key_auth(self, bound_channel_id: str | None = None) -> AuthIdentity:
@@ -131,6 +133,7 @@ class _World:
             platform=self.platform,
             agent_id=agent_uuid,
             bound_channel_id=bound_channel_id,
+            chat_session_id="test-session",
         )
 
     def runtime(self) -> McpRuntime:
@@ -248,7 +251,7 @@ async def test_list_sessions_hides_sealed_conversations_outside_their_channel(
     await world.seal(_SEALED)
     world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
     world.add_session("ses_b", daimon_channel=_OPEN, daimon_thread="thr-b")
-    world.add_session("ses_headless")
+    world.add_session("ses_headless", daimon_agent_chat="true")
     outside = await world.origin(_OPEN, "thr-b")
     inside = await world.origin(_SEALED, "thr-9")
 
@@ -395,7 +398,7 @@ async def test_a_session_from_before_the_stamp_fails_closed_in_a_sealed_tenant(
     """Unstamped sessions a thread ran on: the parent channel is unknown."""
     await world.seal(_SEALED)
     world.add_session("ses_legacy")
-    world.add_session("ses_headless")
+    world.add_session("ses_headless", daimon_agent_chat="true")
     await create_thread_session(
         world.db,
         tenant_id=world.tenant_id,
@@ -455,7 +458,11 @@ async def test_an_agent_key_minted_in_a_sealed_channel_reads_and_continues_it(
 ) -> None:
     await world.seal(_SEALED)
     world.add_session(
-        "ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1", daimon_sealed=_SEALED
+        "ses_acme",
+        daimon_agent_chat="true",
+        daimon_channel=_SEALED,
+        daimon_thread="thr-1",
+        daimon_sealed=_SEALED,
     )
     world.add_session("ses_mine")
     runtime = world.runtime()
@@ -476,7 +483,9 @@ async def test_a_bound_key_cannot_continue_a_conversation_opened_before_the_seal
     """Its memory is writable and its stamp lacks the seal, so a follow-up
     under the seal would outlive an unseal: the key may read it, not add to it."""
     await world.seal(_SEALED)
-    world.add_session("ses_acme", daimon_channel=_SEALED, daimon_thread="thr-1")
+    world.add_session(
+        "ses_acme", daimon_agent_chat="true", daimon_channel=_SEALED, daimon_thread="thr-1"
+    )
     runtime = world.runtime()
     auth = world.agent_key_auth(bound_channel_id=_SEALED)
 
@@ -780,7 +789,7 @@ async def _bearer(world: _World, role: Role) -> str:
     account = await make_account(world.db, tenant=tenant)
     await set_role(world.db, account.id, role)
     await world.db.commit()
-    world.add_session("ses_headless")
+    world.add_session("ses_headless", daimon_agent_chat="true")
     world.sessions["ses_headless"]["metadata"]["daimon_account"] = str(account.id)
     async with world.sessionmaker.begin() as session:
         return await mint_agent_mcp_token(

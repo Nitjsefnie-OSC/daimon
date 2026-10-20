@@ -609,6 +609,7 @@ class SlackDriver:
             fernet=build_multifernet((self._fernet_key,)),
         )
         auth = AuthIdentity(
+            chat_session_id="parity-card-session",
             account_id=parity_account_id(tenant_id, user_id),
             tenant_id=tenant_id,
             role=Role.ADMIN,
@@ -637,6 +638,7 @@ class SlackDriver:
                 role=Role.ADMIN,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
+                chat_session_id="parity-card-session",
             )
 
         with AioResponsesMock() as mock:

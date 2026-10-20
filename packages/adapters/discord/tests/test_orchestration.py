@@ -1505,7 +1505,7 @@ class TestSetupHook:
         ):
             await bot.setup_hook()
 
-        assert len(add_cog_calls) == 10, "setup_hook should add exactly 10 Cogs"
+        assert len(add_cog_calls) == 11, "setup_hook should add exactly 11 Cogs"
         assert sum(isinstance(cog, DirectMessageCog) for cog in add_cog_calls) == 1
         mock_github_cog.assert_called_once_with(bot)
         mock_help_cog.assert_called_once_with(bot)

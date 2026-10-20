@@ -106,6 +106,17 @@ rules on two channels, a thread, a category and two agents with rules.
 
 ## Agent-chat turns
 
+Native OpenAI session credentials carry an isolated session grant installed
+during preparation. Preparation alone grants no origin authority: the driver
+binds the grant to the current execution and its attendance, and revokes that
+binding when the turn ends. Reuse binds a new origin; child sessions receive
+a separate grant and cannot borrow a parent execution.
+
+Agent chat and the hub can drive only sessions created through agent chat.
+They cannot continue, cancel or archive a platform conversation, even for the
+same account and agent. Older sessions without this creation provenance must
+be replaced with a new agent-chat conversation. Transcript read access is unchanged.
+
 A turn started through agent chat (`start_turn`, `continue_turn` and `ask`,
 with an agent key or on the hub) has nobody to press Approve, so it runs
 under the same tool-safety rules as a routine: reads run, a third-party write
@@ -131,7 +142,10 @@ with it on.
 
 In-process unattended runs leave pending calls paused and interrupt the session
 when a decision is cancelled, its turn ceiling expires, or its confirmation
-gate fails. Cleanup sends no denial confirmations past an unsuccessful gate.
+gate fails. Stop, cancellation and ceiling cleanup send no confirmations, including
+on runtimes without a confirmation gate. Those runtimes still refuse unattended
+confirmations during a normal, uninterrupted decision. Cancellation during decision-task
+or card cleanup also finishes bounded interrupt cleanup before propagating.
 
 Reading a session never answers a tool call. If the service restarts while an
 agent-chat turn waits on one, the turn stays paused, and `get_session` and
@@ -351,6 +365,15 @@ in the new shape on its next change, so no migration runs.
 The invoker allowlist, read-only DM
 memory, environments, budgets and operator tokens are not
 channel or agent rules. They say who may act and who may change the rules.
+
+Origin-based MCP actions, including task handoffs, require the explicit
+`origin_context_id` and the calling session's server-issued grant. Knowing a
+live origin UUID, even for the same account and agent, grants no authority.
+Empty IDs never discover a concurrent human turn. A handoff retains attendance
+only after that session check and only when its stored origin is attended;
+routines and timer turns cannot acquire human approval surfaces this way.
+Legacy sessions using a shared caller credential are replaced at their next
+bind. Personal OAuth connections remain in the caller's shared vault.
 
 ## Discord invoker roles
 
