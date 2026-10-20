@@ -1065,6 +1065,9 @@ class DaimonBot(commands.Bot):
         once and never stranded, which a per-turn cutoff could not promise.
         Sweeps stay serialized per session.
         """
+        if lifecycle is not None and lifecycle.output_authorization is not None:
+            # A watch's execution grant ends with the turn, before detached sweeps.
+            return
         if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
             return
         session_id = outcome.ma_session_id
@@ -3852,7 +3855,34 @@ class DaimonBot(commands.Bot):
         # The follow-up runs as the requester, so it carries their role as it
         # stands NOW -- re-read from the guild, never from anything the form
         # or the row recorded. A lookup that fails runs the turn as USER.
-        role, _role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
+        if row.reason == "watch_fired":
+            from daimon.core.stores.tenants import get_tenant
+
+            async with self.runtime.sessionmaker() as db:
+                tenant = await get_tenant(db, tenant_id)
+            if (
+                tenant is None
+                or tenant.archived_at is not None
+                or tenant.external_id != str(thread.guild.id)
+                or row.thread_id != str(thread.id)
+                or row.parent_channel_id != str(thread.parent_id)
+            ):
+                raise AdmissionDenied(reason="invoker_not_allowed")
+            try:
+                member = await thread.guild.fetch_member(int(row.requester_external_user_id))
+            except (discord.HTTPException, ValueError) as exc:
+                raise AdmissionDenied(reason="invoker_not_allowed") from exc
+            permissions = thread.permissions_for(member)
+            if not permissions.view_channel or not permissions.send_messages_in_threads:
+                raise AdmissionDenied(reason="writers_none")
+            role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
+                else Role.USER
+            )
+            _role_ids = member_role_ids(member)
+        else:
+            role, _role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
         # A continuation posts into the thread too: a protected one is skipped
         # (the dispatcher logs it) before admission, which then reads the
         # parent the check cached.
@@ -3870,10 +3900,14 @@ class DaimonBot(commands.Bot):
             channel_id=row.parent_channel_id,
             thread_id=row.thread_id,
             role=role,
+            role_ids=tuple(_role_ids),
+            verified_membership=True if row.reason == "watch_fired" else None,
             now=datetime.now(UTC),
             category_id=category_id,
             category_unresolved=category_unresolved,
         )
+        if row.reason == "watch_fired" and admission.account_id != row.requester_account_id:
+            raise AdmissionDenied(reason="invoker_not_allowed")
         # A wake runs only as the agent it was queued for; a thread rerouted in
         # the meantime refuses it here, before any card, bind or billed turn.
         check_wake_responder(
@@ -4022,6 +4056,28 @@ class DaimonBot(commands.Bot):
             reuse_existing=True,
             deadline=turn_deadline_at,
         )
+
+        async def watch_binding() -> None:
+            from daimon.core.stores.watches import watch_seed
+
+            async with self.runtime.sessionmaker() as db:
+                seed = await watch_seed(db, row, now=datetime.now(UTC))
+            if seed is None:
+                raise AdmissionDenied(reason="runs_elsewhere")
+            try:
+                member = await thread.guild.fetch_member(int(row.requester_external_user_id))
+            except (discord.HTTPException, ValueError) as exc:
+                raise AdmissionDenied(reason="invoker_not_allowed") from exc
+            live_role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
+                else Role.USER
+            )
+            if live_role is not role or set(member_role_ids(member)) != set(_role_ids):
+                raise AdmissionDenied(reason="invoker_not_allowed")
+            permissions = thread.permissions_for(member)
+            if not permissions.view_channel or not permissions.send_messages_in_threads:
+                raise AdmissionDenied(reason="writers_none")
 
         async def completion_root() -> None:
             if prepared.session_account_id != prepared.admission.account_id:
@@ -4176,8 +4232,9 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     thread_id=row.thread_id,
                     external_user_id=row.requester_external_user_id,
+                    watch_row=row if row.reason == "watch_fired" else None,
                     origin="handoff" if handoff_notice is not None else "chat",
-                    attended=continuation_attended(row),
+                    attended=False if row.reason == "watch_fired" else continuation_attended(row),
                     user_message=(
                         render_turn_origin(
                             origin,
@@ -4203,7 +4260,13 @@ class DaimonBot(commands.Bot):
                         admission=admission,
                     ),
                     active_turn_message_id=marked_message_id,
-                    before_send=completion_root if completion_batch is not None else None,
+                    before_send=(
+                        watch_binding
+                        if row.reason == "watch_fired"
+                        else completion_root
+                        if completion_batch is not None
+                        else None
+                    ),
                     worker_finished=row if completion_batch is not None else None,
                     **provider_action_options(
                         prepared,

@@ -47,6 +47,7 @@ from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
+from daimon.core.stores import watches as watches_store
 from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
 from pydantic import BaseModel, ConfigDict
@@ -76,6 +77,7 @@ class PurgePreview(BaseModel):
     model_config = ConfigDict(frozen=True)
     linked_principals: PurgePreviewRow  # combined CLI + platform
     principal_links: PurgePreviewRow
+    watches: PurgePreviewRow = PurgePreviewRow(count=0, example=None)
     routines: PurgePreviewRow
     user_configs: PurgePreviewRow
     account: PurgePreviewRow  # singular: 1 if row exists else 0
@@ -105,6 +107,7 @@ def summary_line(preview: PurgePreview) -> str:
     categories = (
         (preview.linked_principals, "linked account"),
         (preview.routines, "routine"),
+        (preview.watches, "page watch"),
         (preview.lead_intakes, "lead intake"),
         (preview.user_configs, "saved settings"),
         (preview.user_skills, "skill you synced"),
@@ -133,6 +136,8 @@ def summary_line(preview: PurgePreview) -> str:
 
 
 def _plural(label: str) -> str:
+    if label == "page watch":
+        return "page watches"
     if label == "skill you synced":
         return "skills you synced"
     if label == "link from an agent to your GitHub keys":
@@ -454,6 +459,7 @@ async def collect_purge_preview(
                         session, tenant_id=pp.tenant_id, user_id=pp.external_id
                     )
                 )
+        watches_count = await watches_store.count_for_account(session, account_id=account_id)
         direct_message_count = await direct_messages_store.count_conversations_for_account(
             session, account_id=account_id
         )
@@ -469,6 +475,7 @@ async def collect_purge_preview(
     return PurgePreview(
         linked_principals=linked_principals,
         principal_links=principal_links,
+        watches=PurgePreviewRow(count=watches_count, example=None),
         lead_intakes=PurgePreviewRow(count=lead_intakes_total, example=None),
         routines=routines,
         user_configs=user_configs,

@@ -42,6 +42,11 @@ argument names another member. See
 
 ### Session output files
 
+Page-watch reports require live authorization at each post, edit and file-upload
+step. A refused check stops subsequent delivery, including terminal cleanup.
+Watch turns do not schedule detached session-output sweeps after their execution
+grant ends.
+
 Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack
 thread after an interactive turn completes (scheduled routines deliver
 nothing). Delivery runs in the background after the reply is posted — the

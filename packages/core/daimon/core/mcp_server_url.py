@@ -81,10 +81,11 @@ def same_mcp_endpoint(candidate: str, public_url: str) -> bool:
         path = parts.path
         for _ in range(3):
             path = unquote(path)
-        path = posixpath.normpath("/" + path.replace("\\", "/").lstrip("/"))
+        path = "/".join(part.split(";", 1)[0] for part in path.replace("\\", "/").split("/"))
+        path = posixpath.normpath("/" + path.lstrip("/")).casefold()
         return (
             parts.scheme.lower(),
-            (parts.hostname or "").lower(),
+            (parts.hostname or "").lower().rstrip("."),
             parts.port or _DEFAULT_PORTS.get(parts.scheme.lower()),
             path,
         )

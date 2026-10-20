@@ -1341,6 +1341,68 @@ membership lookup cannot authorize private delivery. Inspect routine
 `delivery_status` and `delivery_note` when a DM fails; do not manually reset an
 uncertain or partially sent claim to pending, because delivery is at most once.
 
+
+### Signed page-event watch sidecar
+
+The optional `preview-sidecar` Compose profile runs the commit-pinned application
+and digest-pinned TLS proxy after migrations. Set `DAIMON_SIDECAR_PUBLIC_HOST`
+(default `localhost` for local use) and optionally `DAIMON_SIDECAR_TLS_PORT`.
+Only callback paths are public; database, `/healthz` and other paths remain private.
+The application uses the lane's `DAIMON_LANE_IMAGE` and `DAIMON_LANE_SHA`.
+
+Migration `0119_watches` follows `0118_lead_intake` and has no downgrade;
+retain compatible readers for rollback. `DAIMON_WATCHES__ENABLED` and the core-owned
+database `global` gate default false. Enable both only after release review.
+Disabling either blocks new events and future sends; disabling the durable gate
+also cancels queued wakes. Stop controls remain available with producers off.
+
+The migration creates NOLOGIN roles `daimon_sidecar` and
+`daimon_watch_ingress_owner`, rejects unsafe role attributes/memberships, pins
+privileged functions to `pg_catalog,pg_temp`, qualifies permanent objects and
+revokes PUBLIC execute/schema creation. Provision a distinct login granted only
+`daimon_sidecar`, without ownership, schema CREATE, policy or credential-table
+rights. Set `DAIMON_SIDECAR__DATABASE_URL`; require TLS across hosts. Startup checks
+the actual login's inherited/PUBLIC table and column access across accessible
+application schemas, resolves installed ingress functions independently of search
+path order, and validates signatures, owner and security settings. Missing/shadowed
+identities, schema CREATE and unexpected privileged executable functions refuse
+startup. The service receives an explicitly allowlisted environment.
+
+`DAIMON_SIDECAR__SIGNING_KEYS` is a secret JSON map of key IDs to random OS-host
+HMAC keys (32–256 bytes, at most 16 keys). Supply matching keys only to authorized
+OS page hosts and the sidecar, never browser HTML or model context. Registrations
+store hashes, not recoverable keys. Initial enrollment binds an existing Discord
+thread, page and key. Hosts check page ACLs and CSRF before using `sign_page_event`;
+there is no public signing route, outside sender mode or live internal migration.
+
+POST signed UTF-8 evidence to `/callbacks/watches/{watch_id}` with `X-Page-ID`,
+`X-Watch-Key-ID`, `X-Timestamp`, `X-Event-ID` and `X-Signature`. The signature binds
+watch/page/key identity, Unix timestamp, server-minted event UUID and raw body digest.
+Duplicate/missing headers, altered bytes, wrong bindings, expired/revoked keys,
+compressed bodies and timestamps outside five minutes are refused. A 202 means
+committed acceptance; 409 means replay. Retry with the same event UUID and a fresh
+signature. The 4 KiB body cannot choose instructions, owner, agent or destination.
+Access logging is disabled; do not enable proxy/body/header debug logging.
+
+Defaults allow eight active requests, a ten-second deadline and 1,200 requests per
+minute per process, including invalid callbacks. Excess work and quota failures
+receive 429; temporary database/timeouts receive 503. Database limits span replicas:
+60 accepted events/watch, 120/owner, 300/tenant and 600 globally per minute;
+24 queued turns/watch and 100/owner per rolling day. Owners may register 25 live
+watches, each lasting at most thirty days. A pending batch retains twenty latest
+events plus an omitted count. Inbox quotas are 128 KiB/watch, 1 MiB/owner, 4 MiB/tenant
+and 16 MiB globally; replay quotas are 1,000 rows/watch and 100,000 globally.
+Inbox and batch content expire after seven days. Bounded hourly cleanup runs even
+with producers off; freshness checks prevent replay after ledger pruning.
+
+Stop/key rotation cancels queued wakes and fences later sends; accepted provider
+requests cannot be undone. Re-enabling requires fresh events. Turns only read and
+report under current access, spend and execution-origin checks; shell, built-ins,
+skills and management tools are unavailable. There are no polling or MCP management
+tools. See [architecture](architecture.md#signed-page-event-watch-entry-point) for
+per-write output checks, tool restoration and cancellation behavior.
+
+
 Native [lead intake](lead-intake.md) uses the existing `DAIMON_CRYPTO__KEYS`
 MultiFernet ring for tenant evidence and service-owned integration credentials.
 Provision private operator files with `daimon leads configure`; do not put

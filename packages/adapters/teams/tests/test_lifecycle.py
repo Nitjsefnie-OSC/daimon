@@ -956,3 +956,88 @@ async def test_unchanged_running_state_rerendered_moves_the_elapsed_time() -> No
     assert len(sender.activities) == 3
     assert all(activity.id == "m-1" for activity in sender.activities[1:])
     assert [_card_body(sender, i)[-2]["text"] for i in (1, 2)] == ["12s", "24s"]
+
+
+@pytest.mark.parametrize("ending", ["success", "interrupted", "error", "chunks", "attachment"])
+async def test_watch_output_revocation_latches_all_teams_writes(ending):
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+    await lifecycle.on_terminal_success(_answer("first answer"))
+    allowed = True
+
+    async def authorize():
+        if not allowed:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    allowed = False
+    with pytest.raises(AdmissionDenied):
+        await lifecycle.append_to_answer("retained answer")
+    allowed = True
+    before = len(sender.activities)
+    state = _answer("retained answer " * 1000)
+    with contextlib.suppress(AdmissionDenied):
+        if ending == "error":
+            await lifecycle.on_terminal_failure(state, RuntimeError("private failure"))
+        elif ending == "attachment":
+            await lifecycle.append_to_answer(
+                attachments=[Attachment(content_type="text/plain", content="private")]
+            )
+        else:
+            if ending == "interrupted":
+                state = dataclasses.replace(state, termination=TerminationReason.INTERRUPTED)
+            await lifecycle.on_terminal_success(state)
+    assert len(sender.activities) == before
+    assert guard.failed
+
+
+async def test_watch_revocation_between_chunks_rechecks_each_teams_write():
+    import contextlib
+
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender)
+
+    def count():
+        return len(sender.activities)
+
+    checks = 0
+
+    async def authorize():
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    before = count()
+    with contextlib.suppress(AdmissionDenied):
+        await lifecycle.on_terminal_success(_answer("secret " * 4000))
+    assert count() - before == 1
+    assert guard.failed
+
+
+async def test_watch_posts_controls_before_its_output_grant_closes():
+    from daimon.core.turn.output import OutputAuthorization
+
+    sender = FakeSender()
+    lifecycle = await _posted(sender, hold_controls=True)
+
+    async def authorize():
+        pass
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    await lifecycle.on_terminal_success(_wrote("python plot.py > /mnt/session/outputs/a.png"))
+    assert _rated(sender.activities[-1])
+    count = len(sender.activities)
+    guard.close()
+    await lifecycle.release_controls()
+    assert len(sender.activities) == count

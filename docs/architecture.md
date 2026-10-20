@@ -120,6 +120,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
+| `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Capability callback HTTP ingress; no turns or provider credentials. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
@@ -2395,6 +2396,47 @@ Fallback-DM files recheck current DM controls, isolation (including a resolved
 Discord parent) and recipient eligibility before each file and after download.
 Delivery error logs record the error type without arbitrary exception text,
 which may contain signed upload URLs.
+
+
+### Signed page-event watch entry point
+
+OS page hosts sign events after their own ACL/CSRF checks. The sidecar verifies
+HMAC, binding, freshness and replay before acknowledging a transaction that stores
+evidence and enqueues a `watch_fired` wake. It has no direct table access or turn
+runner; core's durable queue handles dispatch. Discord, Slack and Teams share
+compatible readers; CLI and scheduler do not dispatch continuations. Old readers
+ignore the new reason before batching, preserving unrelated work on rollback.
+
+Migration `0119_watches` follows `0118_lead_intake`. The producer setting
+and durable global gate default off. Watch turns explicitly use `attended=False`
+and require the current origin's exact session grant. Registration, key generation,
+owner access, destination, balance, member caps and channel budget are rechecked
+before model/confirmation sends and report writes. Deleted threads have no fallback;
+unsupported backends and implicit session replacement are refused.
+
+`core.turn.unattended_capabilities` supplies the `watch` policy and shared
+validation (including telemetry and private fields), tool projection, cache
+invalidation, send and restore. The thin watch wrapper refuses duplicate server
+toolsets and retains only enabled, exact-name third-party read configs. Skills, multiagent coordinators and
+unknown fields (including newly parsed SDK fields) refuse before mutation. Built-ins,
+custom tools, management endpoints and writes are unavailable; defaults are disabled
+and every retained tool asks the live read/report decider. Default-only toolsets
+provide no tools. Mounted data/vaults grant no native or delegated execution.
+
+Cache invalidation commits before provider mutation. Original tool/server arrays
+restore before release, including repeated cancellation; origin authority is revoked
+after cleanup. The next bind reconciles tools after interruption. Each platform
+send/edit/upload, chunk and terminal success/error uses a latched output check:
+once refused, cleanup and late tasks cannot publish retained content. Watch turns
+start no detached output-file sweeps after their grant ends.
+
+Stop, key rotation and gate revocation cancel queued wakes; re-enabling requires
+fresh events. Evidence is escaped as untrusted text and expires after seven days.
+Account erasure removes registrations, evidence, pending wakes and owner controls;
+the privacy preview includes them. There are no enrollment tools, polls or internal
+watch migration. See [self-hosting](self-hosting.md#signed-page-event-watch-sidecar)
+for source, storage and request limits.
+
 
 ## Lead intake
 

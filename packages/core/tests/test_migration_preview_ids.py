@@ -32,7 +32,8 @@ SCRIPTS = ROOT / "packages/core/alembic"
 FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
 PREVIOUS_HEAD = "0117_clear_legacy_routine_output"
-HEAD = "0118_lead_intake"
+LEAD_HEAD = "0118_lead_intake"
+HEAD = "0119_watches"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
@@ -42,6 +43,7 @@ CHAIN = [
     "0115_origin_session_grants",
     "0116_thread_model_settings",
     PREVIOUS_HEAD,
+    LEAD_HEAD,
     HEAD,
 ]
 TABLES = {
@@ -89,7 +91,9 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     assert connection.scalar(text("SELECT version_num FROM alembic_version")) == expected
 
     compared_tables = (
-        TABLES if expected == HEAD else {name for name in TABLES if not name.startswith("lead_")}
+        TABLES
+        if expected in (LEAD_HEAD, HEAD)
+        else {name for name in TABLES if not name.startswith("lead_")}
     )
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
@@ -255,7 +259,7 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 sync.execute(text("DELETE FROM routines"))
                 sync.commit()
             # Each new revision reverses, including Microsoft's tables.
-            for target in reversed([FORK, *CHAIN[:-1]]):
+            for target in reversed([FORK, *CHAIN[:-2]]):
                 command.downgrade(config, target)
                 assert sync.scalar(text("SELECT version_num FROM alembic_version")) == target
                 inspector = inspect(sync)
@@ -276,10 +280,20 @@ async def test_deployed_upgrade_and_downgrade_paths(
                     assert not inspector.has_table("microsoft_user_tokens")
                     assert not inspector.has_table("microsoft_sign_ins")
                 sync.commit()
-            command.upgrade(config, "head")
-            _assert_head(sync)
+            command.upgrade(config, LEAD_HEAD)
+            _assert_head(sync, LEAD_HEAD)
             with pytest.raises(NotImplementedError, match="retention/export"):
                 command.downgrade(config, PREVIOUS_HEAD)
+            _assert_head(sync, LEAD_HEAD)
+            command.upgrade(config, "head")
+            _assert_head(sync)
+            assert (
+                sync.scalar(text("SELECT enabled FROM watch_controls WHERE scope = 'global'"))
+                is False
+            )
+            sync.commit()
+            with pytest.raises(NotImplementedError, match="Watch evidence"):
+                command.downgrade(config, LEAD_HEAD)
             _assert_head(sync)
 
         await connection.run_sync(exercise)

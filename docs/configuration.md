@@ -47,10 +47,12 @@ typo is silent — check the spelling here.
 - [Thread Naming](#thread-naming)
 - [Turn Queue](#turn-queue)
 - [Fleet](#fleet)
+- [Watches](#watches)
 - [Private Channel Messages](#private-channel-messages)
 - [Tool Safety](#tool-safety)
 - [Artifacts](#artifacts)
 - [Scheduler](#scheduler)
+- [Sidecar](#sidecar)
 - [Notebook host (standalone service)](#notebook-host-standalone-service)
 - [Report host (standalone service)](#report-host-standalone-service)
 - [Billing (Stripe)](#billing-stripe)
@@ -1358,6 +1360,18 @@ Most worker turns one process runs at once, across all tenants.
 Most times in total a worker is started when it keeps being lost before its turn is
 sent. A worker whose turn was sent is reconciled, never resent.
 
+## Watches
+
+Read from `daimon.core.config.WatchesSettings`. Prefix `DAIMON_WATCHES__`.
+
+### `DAIMON_WATCHES__ENABLED`
+
+`bool` · optional · default `False`
+
+Enable OS-signed page-event watch producers and dispatch. Keep disabled until the
+execution-bound unattended origin grants, non-gateable cleanup and watch release are
+reviewed. The database global gate must also be explicitly enabled by an operator.
+
 ## Private Channel Messages
 
 Read from `daimon.core.config.PrivateChannelMessagesSettings`. Prefix
@@ -1577,6 +1591,49 @@ exits non-zero.
 
 Port for the stdlib liveness responder (used by the platform health check). Must not
 collide with mcp's 8080 or discord's 8081 on the shared host.
+
+## Sidecar
+
+Read from `daimon.adapters.sidecar.settings.SidecarSettings`. Prefix `DAIMON_SIDECAR__`.
+
+### `DAIMON_SIDECAR__DATABASE_URL`
+
+`SecretStr` · **required** · secret
+
+Lane database URL for a dedicated login granted only daimon_sidecar. Require TLS for
+remote databases.
+
+### `DAIMON_SIDECAR__SIGNING_KEYS`
+
+`dict[str, SecretStr]` · optional · default unset · secret
+
+OS-host page-event HMAC keys by key ID, each at least 32 random bytes. Supply from lane
+secret management; keys never enter browser HTML or watch rows. Only configured OS page
+hosts may sign events; outside senders are unsupported.
+
+### `DAIMON_SIDECAR__HOST`
+
+`str` · optional · default `0.0.0.0`
+
+Private listen address behind the callback-only TLS proxy.
+
+### `DAIMON_SIDECAR__PORT`
+
+`int` · optional · default `8780`
+
+Private callback and health HTTP port.
+
+### `DAIMON_SIDECAR__MAX_CONCURRENT`
+
+`int` · optional · default `8`
+
+Maximum concurrent callback transactions; excess requests receive 429.
+
+### `DAIMON_SIDECAR__REQUEST_TIMEOUT_S`
+
+`float` · optional · default `10`
+
+Total callback body and database deadline in seconds.
 
 ## Notebook host (standalone service)
 

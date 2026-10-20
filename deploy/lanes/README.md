@@ -89,7 +89,7 @@ Five-step parity procedure (run only after King's merge, setup and redeploy):
    the fixture is callable after approval.
 3. **Row 34, unlisted:** with safety enabled, trusted annotations configured,
    and `UNATTENDED_WRITES=[]`, create/run an owned disposable routine requesting
-   exactly one submission plus a read control. Verify S1's refusal in decision
+   exactly one submission plus a read control. Verify the approval refusal in decision
    logs and routine result, no human approval wait, no write received/executed,
    and the read executed. Repeat in a fresh MCP-origin agent turn (`ask` or the
    runner's supported MCP entrypoint), preserving origin evidence; it too must
@@ -100,7 +100,7 @@ Five-step parity procedure (run only after King's merge, setup and redeploy):
    preview services. Use fresh sessions/routines and new markers. Repeat the
    routine and MCP-origin cases: each must execute exactly once without an
    approval wait; confirm marker-specific executed events and write-count
-   deltas, along with S1/allow-list decisions and terminal results.
+   deltas, along with approval/allow-list decisions and terminal results.
 5. Save redacted catalogue, approval and decision evidence, routine/MCP results,
    and journal snapshots. Pause/delete fixture routines, cancel pending turns,
    detach the fixture, and have King restore the previous preview safety/profile
@@ -136,3 +136,29 @@ The serializing deployment callers are:
 
 Any deployer or manual operator outside those workflow groups must preserve this
 single-migrator invariant, including when starting or retrying Cloud Run jobs.
+
+### Signed page-event watch sidecar
+
+The optional `preview-sidecar` profile runs `daimon-sidecar` and a digest-pinned
+TLS proxy. The application uses `DAIMON_LANE_IMAGE` / `DAIMON_LANE_SHA` and waits
+for migrations. Only callback paths are public; `/healthz` and the database stay
+private. Set `DAIMON_SIDECAR_PUBLIC_HOST` (default `localhost` for local use) and,
+optionally, `DAIMON_SIDECAR_TLS_PORT`.
+
+Migration `0119_watches` follows `0118_lead_intake`. Keep both
+`DAIMON_WATCHES__ENABLED` and the core-owned database `global` gate off until
+release review. The sidecar cannot change either gate. Disabling the durable gate
+also cancels queued wakes; stop controls remain available with producers off.
+
+Provision a distinct login granted only `daimon_sidecar`, with no ownership,
+schema CREATE, policy or credential-table rights. Set its local DSN in
+`DAIMON_SIDECAR__DATABASE_URL`; require TLS across hosts. Startup audits the actual
+login's inherited/PUBLIC privileges and installed ingress functions. Supply
+`DAIMON_SIDECAR__SIGNING_KEYS` through secret management to the sidecar and authorized
+OS page hosts, never browsers. The Compose environment is explicitly allowlisted.
+
+See [self-hosting](../../docs/self-hosting.md#signed-page-event-watch-sidecar) for
+signing, callback headers, limits, role checks and stop/retention behavior, and
+[architecture](../../docs/architecture.md#signed-page-event-watch-entry-point) for
+read/report authorization and restoration. The migration has no downgrade: retain
+the compatible-reader rollback floor. Do not enable request/header/body logs.
