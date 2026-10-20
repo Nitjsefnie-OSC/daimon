@@ -422,9 +422,9 @@
 .gh-flow--saved .gh-status-icon { order: -1; margin-bottom: 12px; color: var(--success); }
 .gh-flow--saved .gh-status-icon .web-icon { width: 32px; height: 32px; }
 .gh-saved-groups { width: 100%; margin-top: 24px; overflow: hidden; border: 1px solid var(--border); border-radius: 12px; background: var(--card); }
-.gh-saved-row { display: flex; align-items: center; min-height: 56px; padding: 16px; border-top: 1px solid var(--border); font-size: 16px; line-height: 24px; }
+.gh-saved-row { display: flex; align-items: center; flex-wrap: wrap; gap: 4px 0; min-height: 56px; padding: 16px; border-top: 1px solid var(--border); font-size: 16px; line-height: 24px; }
 .gh-saved-row .gh-row-icon { margin-right: 12px; }
-.gh-saved-name { flex: 1; min-width: 0; overflow-wrap: anywhere; font-weight: 400; }
+.gh-saved-name { min-width: 0; overflow-wrap: anywhere; font-weight: 400; }
 .gh-saved-row .gh-working-badge { margin-left: 8px; }
 .gh-back-discord { margin-top: 24px; }
 
