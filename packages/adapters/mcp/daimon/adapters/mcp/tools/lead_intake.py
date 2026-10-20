@@ -490,7 +490,15 @@ def register_lead_intake_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             if intake_id:
                 record = await intake.service.resume(intake_id)
                 return {"intake": record.model_dump(mode="json")}
-            pending = await intake.service.store.list(limit=26, pending_only=True)
+            config, _ = await intake.service.store.configuration()
+            async with intake.reads() as check:
+                pending = await intake.service.store.list(
+                    limit=26,
+                    pending_only=True,
+                    destination_channel_id=config.channel_id,
+                    config_revision=config.revision,
+                    authorize_read=check,
+                )
             results = [await intake.service.advance(r.id) for r in pending[:25]]
             return {
                 "intakes": [r.model_dump(mode="json") for r in await intake.visible(results)],

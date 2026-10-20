@@ -2404,7 +2404,9 @@ that thread’s current policy and native visibility before returning its data.
 Approval cards cache no lead evidence: each Details click authorizes and renders
 from the live record, and removed records are unavailable. Store list traversal
 applies the same live read predicate before counting the visible page limit.
-Mailbox scan readback independently authorizes the current discovery destination,
+Automatic resume batches use the current destination and revision and apply live
+read authorization before filling their processing window; deferred captures
+remain available for authorized manual review. Mailbox scan readback independently authorizes the current discovery destination,
 including when a resume batch contains no records.
 
 Routine intake provenance is signed only into the isolated provider-session

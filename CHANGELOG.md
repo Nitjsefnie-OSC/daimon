@@ -12,7 +12,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Lead approval Details loads authorized live evidence on each click and shows
   removed records as no longer available. Cards retain no cached evidence.
   Batch mailbox readback requires the common lead read check, and hidden leads
-  no longer consume list pages.
+  no longer consume list pages. Automatic resume batches skip old configuration
+  revisions, old destinations and unreadable records before filling their window.
 
 ### Added
 

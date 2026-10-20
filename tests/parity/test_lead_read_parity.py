@@ -44,6 +44,7 @@ from daimon.core.discord_membership import DiscordRestMembershipResolver
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.lead_intake import (
     IntakeConfig,
+    IntakeRecord,
     LeadEvidence,
     LeadSource,
     LeadSubmission,
@@ -472,9 +473,8 @@ async def test_list_and_resume_omit_or_refuse_what_the_member_cannot_read(
         for kind in KINDS:
             allowed = member in READERS[kind]
             assert (_sentinel(kind) in listed) is allowed, (member, kind, listed)
-            # The batch acts on the current destination B, then returns only what
-            # the member may read: only BOTH can both act there and read A.
-            assert (_sentinel(kind) in batch) is (allowed and member == BOTH), (member, kind)
+            # Automatic batches skip captures fenced by old destination/revision.
+            assert _sentinel(kind) not in batch, (member, kind)
             refused, single = await world.mcp(
                 member, "lead_intake_resume", intake_id=str(world.records[kind])
             )
@@ -612,3 +612,61 @@ async def test_list_pages_past_a_hundred_hidden_records(
     refused, second = await world.mcp(member, "lead_intake_list", after_id=expected[0])
     assert not refused and expected[0] not in second
     assert all(identity in second for identity in expected[1:])
+
+
+@pytest.mark.parametrize("fence", ["destination", "revision", "private_thread"])
+async def test_resume_batch_skips_old_or_unreadable_captures_before_its_window(
+    sessions: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch, fence: str
+) -> None:
+    from daimon.core.lead_intake_service import IntakeService
+
+    world = await _world(sessions, reconfigure=False)
+    config, credentials = await world.store.configuration()
+    template = (await world.store.get(world.records["capture"])).submission
+    assert template is not None
+    # More than a raw store page: skipping must precede both page and batch limits.
+    for index in range(101):
+        draft = template.model_copy(
+            update={
+                "source": template.source.model_copy(update={"message_id": f"deferred-{index}"})
+            }
+        )
+        record = await world.store.accept(config, draft, A_ONLY)
+        if fence == "private_thread":
+            record.progress.discord_thread_id = PRIVATE
+            await world.store.save(record)
+    member = OUTSIDE_PRIVATE
+    if fence != "private_thread":
+        config = config.model_copy(
+            update={"revision": 2, "channel_id": B if fence == "destination" else A}
+        )
+        await world.store.configure(config, credentials)
+        member = B_ONLY if fence == "destination" else A_ONLY
+    draft = template.model_copy(
+        update={
+            "source": template.source.model_copy(update={"message_id": "eligible-new"}),
+            "thread_title": "NEW ELIGIBLE LEAD",
+        }
+    )
+    eligible = await world.store.accept(config, draft, member)
+    # Mode cutover keeps the capture revision; no live provider effects are needed.
+    await world.store.configure(config.model_copy(update={"mode": "active"}), credentials)
+    attempted: list[uuid.UUID] = []
+
+    async def advance(service: IntakeService, intake_id: uuid.UUID) -> IntakeRecord:
+        attempted.append(intake_id)
+        return await service.store.get(intake_id)
+
+    monkeypatch.setattr(IntakeService, "advance", advance)
+    for _ in range(2):
+        attempted.clear()
+        refused, text = await world.mcp(member, "lead_intake_resume")
+        assert not refused and "NEW ELIGIBLE LEAD" in text, text
+        assert eligible.id in attempted and len(attempted) <= 25
+        if fence == "private_thread":
+            assert all(identity != world.records["private"] for identity in attempted)
+        else:
+            assert attempted == [eligible.id]
+            assert "SENTINEL" not in text
+            for index in range(101):
+                assert f"deferred-{index}" not in text

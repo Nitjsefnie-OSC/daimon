@@ -231,3 +231,10 @@ Lead lists apply live read authorization while traversing the store query, befor
 counting the visible page limit. Hidden records do not consume a page or become
 pagination cursors. Batch resume also authorizes mailbox discovery readback under
 the current sales channel, including when no pending leads exist.
+
+Automatic resume batches select up to 25 readable records from the current
+destination and configuration revision. The store traverses that destination in
+one ordered pass, fetching at most 100 rows at a time and stopping after 26
+eligible records (including the lookahead). Old revisions and unreadable
+records do not fill the processing window; deferred records remain available
+for authorized review and explicit single-ID resume.

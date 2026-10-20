@@ -297,6 +297,7 @@ class IntakeStore:
         after_id: UUID | None = None,
         destination_channel_id: str | None = None,
         authorize_read: Callable[[LeadReadTarget], Awaitable[None]] | None = None,
+        config_revision: int | None = None,
     ) -> list[IntakeRecord]:
         async with self.sessions() as session:
             query = select(LeadIntakeRecord).where(LeadIntakeRecord.tenant_id == self.tenant_id)
@@ -327,6 +328,8 @@ class IntakeStore:
             try:
                 async for row in rows:
                     record = await self.get(row.id)
+                    if config_revision is not None and record.config_revision != config_revision:
+                        continue
                     if authorize_read is not None:
                         try:
                             await authorize_read(read_target(record))
