@@ -2371,6 +2371,11 @@ expire with the retention policy.
 Intake authorization carries the actual destination thread through recovery and
 write intents. Both MCP record readback and the private Discord queue evaluate
 that thread’s current policy and native visibility before returning its data.
+Approval cards cache no lead evidence: each Details click authorizes and renders
+from the live record, and removed records are unavailable. Store list traversal
+applies the same live read predicate before counting the visible page limit.
+Mailbox scan readback independently authorizes the current discovery destination,
+including when a resume batch contains no records.
 
 Routine intake provenance is signed only into the isolated provider-session
 credential. Refresh preserves its routine/execution discriminator and session
