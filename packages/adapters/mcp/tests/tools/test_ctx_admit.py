@@ -94,16 +94,11 @@ async def test_admit_passes_whoever_the_invoker_policy_allows(
 ) -> None:
     auth = await _member(db_session, policy=policy, role=role)
     auth = dataclasses.replace(auth, platform="discord")
-    from daimon.core.membership import CachedMembershipResolver, Membership
-
-    async def fetch(tenant, guild, user):  # type: ignore[no-untyped-def]
-        return Membership(is_member=True, is_admin=role is Role.ADMIN)
-
     with _BALANCE_OK:
         result = await _admit(
             auth,
             sessionmaker=db_session_factory,
-            membership_resolver=CachedMembershipResolver(fetch),
+            membership_resolver=_current_member(is_admin=role is Role.ADMIN),
             billing_config=None,
             tool_name="ask",
         )
