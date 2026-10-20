@@ -95,7 +95,7 @@ from daimon.core.routine_delivery import (
     agent_posted_to,
     delivery_target,
     placement_unknown_is_unsafe,
-    record_failure,
+    record_routine_failure,
     render_routine_controls,
 )
 from daimon.core.routine_files import collect_routine_files
@@ -280,25 +280,17 @@ async def _build_fire(
             )
         return turn_deps[0]
 
-    async def _record_admission_failure(
-        s: AsyncSession,
-        routine_id: uuid.UUID,
-        *,
-        error: str,
-        reason: TerminationReason,
-        row: RoutineRow,
-    ) -> None:
-        if row.destination_kind == "dm":
-            await record_result(
-                s,
-                routine_id,
-                tail=None,
-                error=error,
-                expected_destination=("dm", row.destination_id),
-                expected_private=row,
-            )
-        else:
-            await record_failure(s, routine_id, error=error, reason=reason, expected_row=row)
+    async def _refuse(s: AsyncSession, row: RoutineRow, error: str) -> None:
+        """Record a refused fire, fenced on the destination and revision it was claimed with."""
+        await record_result(
+            s,
+            row.id,
+            tail=None,
+            error=error,
+            expected_destination=(row.destination_kind, row.destination_id),
+            expected_private=row if row.destination_kind == "dm" else None,
+            expected_row=row,
+        )
 
     async def _refused_over_channel_budget(row: RoutineRow, *, platform: str) -> bool:
         """Record and refuse a fire over its channel budget. Keyed on `row.channel_id`,
@@ -321,12 +313,11 @@ async def _build_fire(
             channel_id=row.channel_id,
         )
         async with sm() as s, s.begin():
-            await _record_admission_failure(
+            await record_routine_failure(
                 s,
-                row.id,
+                row,
                 error="channel_budget_exceeded",
                 reason=TerminationReason.ADMISSION_CHANNEL_BUDGET_EXCEEDED,
-                row=row,
             )
         return True
 
@@ -399,47 +390,23 @@ async def _build_fire(
                 delivery="pending",
                 producing_agent_id=reply.producing_agent_id,
                 expected_destination=(row.destination_kind, row.destination_id),
-                expected_private=row if row.destination_kind == "dm" else None,
+                expected_private=row,
                 expected_row=row,
             )
 
     async def _fire(row: RoutineRow) -> None:
         if row.created_by_user_id is None:
             async with sm() as s, s.begin():
-                await record_result(
-                    s,
-                    row.id,
-                    tail=None,
-                    error="routine has no created_by_user_id",
-                    expected_destination=(row.destination_kind, row.destination_id),
-                    expected_private=row if row.destination_kind == "dm" else None,
-                    expected_row=row,
-                )
+                await _refuse(s, row, "routine has no created_by_user_id")
             return
 
         async with sm() as s, s.begin():
             tenant = await get_tenant(s, row.tenant_id)
             if tenant is None:
-                await record_result(
-                    s,
-                    row.id,
-                    tail=None,
-                    error="routine tenant not found",
-                    expected_destination=(row.destination_kind, row.destination_id),
-                    expected_private=row if row.destination_kind == "dm" else None,
-                    expected_row=row,
-                )
+                await _refuse(s, row, "routine tenant not found")
                 return
             if tenant.archived_at is not None:
-                await record_result(
-                    s,
-                    row.id,
-                    tail=None,
-                    error="routine tenant archived",
-                    expected_destination=(row.destination_kind, row.destination_id),
-                    expected_private=row if row.destination_kind == "dm" else None,
-                    expected_row=row,
-                )
+                await _refuse(s, row, "routine tenant archived")
                 return
             platform = tenant.platform
             if row.destination_kind == "dm" and (
@@ -449,15 +416,7 @@ async def _build_fire(
                     row.tenant_id, DirectMessagePolicy()
                 ).allows(row.created_by_user_id)
             ):
-                await record_result(
-                    s,
-                    row.id,
-                    tail=None,
-                    error="routine DMs are disabled or the owner is not allowed",
-                    expected_destination=(row.destination_kind, row.destination_id),
-                    expected_private=row if row.destination_kind == "dm" else None,
-                    expected_row=row,
-                )
+                await _refuse(s, row, "routine DMs are disabled or the owner is not allowed")
                 return
             principal = await get_or_create_platform_principal(
                 s,
@@ -564,15 +523,7 @@ async def _build_fire(
                     tenant_id=str(row.tenant_id),
                     reason=policy_error,
                 )
-                await record_result(
-                    s,
-                    row.id,
-                    tail=None,
-                    error=policy_error,
-                    expected_destination=(row.destination_kind, row.destination_id),
-                    expected_private=row if row.destination_kind == "dm" else None,
-                    expected_row=row,
-                )
+                await _refuse(s, row, policy_error)
                 return
 
         # Admission gate: per-tenant balance — independent of Stripe config.
@@ -586,12 +537,11 @@ async def _build_fire(
                 tenant_id=str(row.tenant_id),
             )
             async with sm() as s, s.begin():
-                await _record_admission_failure(
+                await record_routine_failure(
                     s,
-                    row.id,
+                    row,
                     error="balance_depleted",
                     reason=TerminationReason.ADMISSION_BALANCE_DEPLETED,
-                    row=row,
                 )
             return
 
