@@ -483,8 +483,15 @@ class TeamsOutputDelivery:
             log.info("teams.output_thumbnail.skipped", reason="timed_out")
         for task in pending:
             task.cancel()
-        found = [task.result() for task in lookups if task in done and task.exception() is None]
-        return [thumbnail for thumbnail in found if thumbnail is not None]
+        thumbnails: list[Attachment] = []
+        for task in lookups:
+            if task not in done or task.cancelled():
+                continue
+            if (err := task.exception()) is not None:  # Dropped, but never without a trace.
+                log.warning("teams.output_thumbnail.failed", exc_info=err)
+            elif (thumbnail := task.result()) is not None:
+                thumbnails.append(thumbnail)
+        return thumbnails
 
     async def _thumbnail(self, files: ChannelFiles, item: DriveItem) -> Attachment | None:
         """Graph's first-page thumbnail of an uploaded document, re-encoded as a preview.

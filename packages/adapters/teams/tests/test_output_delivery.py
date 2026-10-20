@@ -1147,6 +1147,37 @@ async def test_a_thumbnail_redirected_off_the_allowed_hosts_is_refused(
     assert skips == ["FetchRefused"], "refused, and logged once"
 
 
+async def test_a_thumbnail_lookup_that_raises_is_logged_and_the_others_still_show(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """An error the lookup does not catch drops only that document's page, with a log line."""
+    listing, contents = _deck_listing()
+    report = _csv("file_report", filename="report.pdf").model_copy(
+        update={"mime_type": "application/pdf"}
+    )
+    _, page = _png("page")
+    found = _thumbnail_sets(THUMBNAIL_URL)
+
+    def thumbnails(request: httpx.Request) -> httpx.Response:
+        if "item-deck.pptx" in request.url.path:
+            raise RuntimeError("unexpected reply")
+        return found(request)
+
+    files = _channel_files(_uploaded, thumbnails)
+    harness = _harness(
+        db_session_factory, [*listing, report], files, contents, served={THUMBNAIL_URL: page}
+    )
+    answer = _Answer()
+
+    with structlog.testing.capture_logs() as logs:
+        await harness.delivery.sweep(_in_channel(), "sesn_1", append=answer)
+
+    assert answer.previews == [["chart.png"], ["report.pdf"]], "the report's page still shows"
+    [failed] = [e for e in logs if e["event"] == "teams.output_thumbnail.failed"]
+    assert failed["log_level"] == "warning", "an uncaught lookup error is a warning"
+    assert isinstance(failed["exc_info"], RuntimeError), "the error rides the log line"
+
+
 async def test_thumbnails_wait_no_longer_than_their_budget(
     db_session_factory: async_sessionmaker[AsyncSession], monkeypatch: pytest.MonkeyPatch
 ) -> None:
