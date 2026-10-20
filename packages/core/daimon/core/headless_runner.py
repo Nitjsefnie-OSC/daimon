@@ -186,6 +186,7 @@ async def run_turn(
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
     personal_memory: bool = False,
+    sandbox_tools: bool = False,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -217,6 +218,7 @@ async def run_turn(
             origin_place=origin_place,
             model_override=model_override,
             personal_memory=personal_memory,
+            sandbox_tools=sandbox_tools,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -248,6 +250,7 @@ async def run_turn(
                 origin_place=origin_place,
                 model_override=model_override,
                 personal_memory=personal_memory,
+                sandbox_tools=sandbox_tools,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -283,6 +286,7 @@ async def run_turn_impl(
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
     personal_memory: bool = False,
+    sandbox_tools: bool = False,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -363,6 +367,10 @@ async def run_turn_impl(
     same (read-only, for a routine) access as the shared one. The scheduler
     sets it only for a legacy routine with no destination or channel; explicit
     DM destinations never enable it (`rule_views.routine_mounts_personal_memory`).
+
+    ``sandbox_tools`` is the routine's admin opt-in to built-in sandbox tools
+    (`Routine.sandbox_tools_enabled`); without it they are off, as for every
+    other unattended run (`unattended_capabilities.capability_policy`).
     """
     turn_scope: Scope | None = None
     if load_turn_settings().path == "mux":
@@ -514,6 +522,7 @@ async def run_turn_impl(
                 session_factory=session_factory,
                 tenant_id=tenant_id,
                 entry_point="routine",
+                routine_sandbox_tools=sandbox_tools,
             )
         ):
             state: TurnState = await drive_turn(
@@ -537,6 +546,7 @@ async def run_turn_impl(
                     tenant_id=tenant_id,
                     channel_id=origin_place.channel_id if origin_place is not None else None,
                     entry_point="routine",
+                    routine_sandbox_tools=sandbox_tools,
                 ),
                 deadline=effective_deadline,
             )

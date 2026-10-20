@@ -521,12 +521,45 @@ class Routine(Base):
     )
     source_channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
     source_thread_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # An admin's opt-in to built-in sandbox tools for this routine's own runs;
+    # every other unattended run keeps them off. Changed only through
+    # `stores.routines.set_sandbox_tools`, which logs each change.
+    sandbox_tools_enabled: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+    sandbox_tools_set_by: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sandbox_tools_set_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     updated_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+
+
+class RoutineSandboxHistoryRecord(Base):
+    """One change to a routine's sandbox opt-in: who, when, through what.
+
+    Kept after the routine is deleted, so `routine_id` has no foreign key.
+    """
+
+    __tablename__ = "routine_sandbox_history"
+    __table_args__ = (
+        ForeignKeyConstraint(["tenant_id"], ["tenants.id"], ondelete="CASCADE"),
+        CheckConstraint("via IN ('mcp', 'cli')", name="ck_routine_sandbox_history_via"),
+        Index("ix_routine_sandbox_history_routine", "tenant_id", "routine_id", "set_at"),
+    )
+
+    id: Mapped[int] = mapped_column(BigInteger, Identity(), primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    routine_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True))
+    before_enabled: Mapped[bool] = mapped_column(Boolean)
+    after_enabled: Mapped[bool] = mapped_column(Boolean)
+    set_by: Mapped[str] = mapped_column(Text)
+    set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
+    via: Mapped[str] = mapped_column(Text)
 
 
 class ThreadSession(Base):

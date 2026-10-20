@@ -258,6 +258,10 @@ class RoutineRow(BaseModel):
     source_provenance_known: bool = False
     source_channel_id: str | None = None
     source_thread_id: str | None = None
+    #: An admin opted this routine's own runs in to built-in sandbox tools.
+    sandbox_tools_enabled: bool = False
+    sandbox_tools_set_by: str | None = None
+    sandbox_tools_set_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 

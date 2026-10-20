@@ -15,11 +15,19 @@ from __future__ import annotations
 
 import uuid as _uuid
 from collections.abc import Collection, Mapping
-from datetime import datetime, timedelta
+from datetime import UTC, datetime, timedelta
 from typing import Any, Literal, cast
 
 import structlog
-from daimon.core._models import Account, PlatformPrincipal, Routine, Tenant
+from daimon.core._models import (
+    Account,
+    PlatformPrincipal,
+    Routine,
+    RoutineSandboxHistoryRecord,
+    Tenant,
+)
+from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.authz import Action, Subject, authorize
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import StoreError
 from daimon.core.permissions import limiting_ids_at
@@ -429,6 +437,85 @@ async def get_first_routine_for_principal(
     )
     orm = (await session.execute(stmt)).scalar_one_or_none()
     return None if orm is None else RoutineRow.model_validate(orm)
+
+
+type SandboxVia = Literal["mcp", "cli"]
+
+
+async def set_sandbox_tools(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    enabled: bool,
+    set_by: str,
+    actor: Subject,
+    via: SandboxVia,
+) -> tuple[RoutineRow, bool] | None:
+    """Opt one routine's own runs in to (or out of) built-in sandbox tools.
+
+    Only a current human admin may (`Action.SET_ROUTINE_SANDBOX_TOOLS`); owning
+    the routine is not enough. Returns the row and whether it changed, or None
+    for an unknown id. Setting the value it already has writes nothing, so a
+    repeated opt-in is a no-op; a change records `set_by`/`set_at` on the row
+    and appends a `routine_sandbox_history` row.
+    """
+    if not authorize(TenantAccessPolicy(), subject=actor, action=Action.SET_ROUTINE_SANDBOX_TOOLS):
+        raise PermissionError("only a workspace admin may change a routine's sandbox tools")
+    orm = await session.scalar(
+        select(Routine)
+        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
+        .with_for_update()
+    )
+    if orm is None:
+        return None
+    before = orm.sandbox_tools_enabled
+    if before == enabled:
+        return RoutineRow.model_validate(orm), False
+    now = datetime.now(UTC)
+    orm.sandbox_tools_enabled = enabled
+    orm.sandbox_tools_set_by = set_by
+    orm.sandbox_tools_set_at = now
+    orm.updated_at = now
+    session.add(
+        RoutineSandboxHistoryRecord(
+            tenant_id=tenant_id,
+            routine_id=routine_id,
+            before_enabled=before,
+            after_enabled=enabled,
+            set_by=set_by,
+            set_at=now,
+            via=via,
+        )
+    )
+    await session.flush()
+    log.info(
+        "routine.sandbox_tools_set",
+        tenant_id=str(tenant_id),
+        routine_id=str(routine_id),
+        enabled=enabled,
+        set_by=set_by,
+        via=via,
+    )
+    return RoutineRow.model_validate(orm), True
+
+
+async def sandbox_tools_history(
+    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+) -> list[RoutineSandboxHistoryRecord]:
+    """Every recorded sandbox opt-in change for one routine, oldest first."""
+    return list(
+        (
+            await session.scalars(
+                select(RoutineSandboxHistoryRecord)
+                .where(
+                    RoutineSandboxHistoryRecord.tenant_id == tenant_id,
+                    RoutineSandboxHistoryRecord.routine_id == routine_id,
+                )
+                .order_by(RoutineSandboxHistoryRecord.set_at, RoutineSandboxHistoryRecord.id)
+            )
+        ).all()
+    )
 
 
 async def pause_routine(

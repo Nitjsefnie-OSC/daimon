@@ -591,6 +591,8 @@ async def _build_fire(
             # Explicit DM delivery retains ordinary tool authority and must not
             # load personal memory. Preserve the legacy owner-only behavior.
             personal_memory=routine_mounts_personal_memory(row),
+            # Built-in sandbox tools only for a routine an admin opted in.
+            sandbox_tools=row.sandbox_tools_enabled,
         )
 
         if row.destination_kind is None:
