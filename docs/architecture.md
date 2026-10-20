@@ -2349,26 +2349,14 @@ destination-free routines are owner-only on every reading surface, including
 administrator panels. The rollout migration clears legacy retained output.
 
 DM routines are scheduled owner messages through core's normal live-DM admission,
-binding and runner, with ordinary owner credentials, tools and personal/shared
-memory policy. Each run gets a fresh private scope and empty history. A shared
+binding and runner; [routines](routines.md) has the rules a user sees. A shared
 PostgreSQL advisory owner guard skips a scheduled slot when a live DM turn is
-running. It does not change C8 selection or conversation history. Unattended
-execution uses S1 (`attended=False`) and only gateable Managed Agents runtimes;
-actual-session agent identity, endpoint rules and trusted annotations are checked
-on every send batch and rebuilt on replacement. Budget channels are accounting
-only and confer no tool-rule scope. Nobody watches intermediate actions; permitted
-tools retain normal DM side-effect risk. Crash and stop guarantees match live DMs,
-with no separate turn lifecycle ledger or durable stop-recovery notice. Source channels and threads
-are verified against the tenant's guild through core Discord REST transport.
-Source channel/thread provenance and its known/unknown marker are written once
-at creation and are immutable through every edit. Delivery and budget targets
-may change independently. Legacy routines with unknown provenance retain ordinary
-channel/thread edits, clearing and firing on all platforms, but cannot select DM;
-they must be recreated from the source to get DM delivery. DM conversion, fire
-and every delivery chunk check the immutable creation-time source pair. Unknown
-provenance never becomes known during an edit. Private-scope origins resolve
-only the caller's current tenant-bound conversation and verify its saved guild
-source; source-free cold conversations require no guild-channel lookup.
+running, without changing the selected cold-DM conversation or its history.
+Execution is unattended (`attended=False`) on gateable Managed Agents runtimes
+only, through the unattended session gate on every send batch. Source channels
+and threads are verified against the tenant's guild through core Discord REST
+transport. The creation-time source pair and its known/unknown marker are
+written once and checked at DM conversion, fire and every delivery chunk.
 
 For an explicit owner DM, the scheduler submits the scheduled message through
 `direct_messages.run_dm_routine`; live and scheduled DMs share
