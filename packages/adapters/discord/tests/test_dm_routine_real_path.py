@@ -507,7 +507,7 @@ class Harness:
             grants = [
                 credential
                 for credential in self.upstream.credentials[vid].values()
-                if credential["metadata"].get("daimon_chat_jti")
+                if credential["metadata"].get("daimon_chat_session")
             ]
             if grants:
                 assert len(grants) == 1
@@ -846,7 +846,7 @@ async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checke
             credential
             for vault in sessions[sid].vault_ids
             for credential in upstream.credentials[vault].values()
-            if credential["metadata"].get("daimon_chat_jti")
+            if credential["metadata"].get("daimon_chat_session")
         )
         assert (
             chat["metadata"]["daimon_chat_session"]
