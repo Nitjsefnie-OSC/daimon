@@ -264,7 +264,8 @@ def extract_sealed_responses(
     for index, blocks in runs:
         if index + len(blocks) > last_tool_idx:
             break
-        text = join_messages([block.text for block in blocks])
-        if len(text) >= min_chars:
-            sealed.append((index, text))
+        # The floor measures the raw messages, as the old glued block did, so
+        # whitespace the join trims can't push a run below it.
+        if sum(len(block.text) for block in blocks) >= min_chars:
+            sealed.append((index, join_messages([block.text for block in blocks])))
     return sealed

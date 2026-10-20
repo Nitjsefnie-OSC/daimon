@@ -252,6 +252,20 @@ class TestAnswersWithTheStatusLogOn:
             (0, f"🔍 Looking up: priors\n\n{answer}")
         ]
 
+    def test_the_seal_floor_counts_whitespace_the_join_trims(self) -> None:
+        first = "a" * 248 + "\n\n"
+        second = "\n\n" + "b" * 248
+        content: list[ContentBlock] = [
+            TextBlock(kind="text", text=first),
+            TextBlock(kind="text", text=second),
+            _tool("tu_1"),
+            TextBlock(kind="text", text="Saved."),
+        ]
+        sealed = extract_sealed_responses(content, min_chars=500)
+        assert [index for index, _ in sealed] == [0], (
+            "500 raw characters seal as the old glued block did, even if the join trims some"
+        )
+
     def test_short_messages_alone_are_not_sealed(self) -> None:
         content: list[ContentBlock] = [
             TextBlock(kind="text", text="🔍 one"),
