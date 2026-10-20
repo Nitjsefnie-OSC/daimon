@@ -19,6 +19,7 @@ from daimon.core.lead_intake import (
     LeadSource,
     LeadSourceKind,
     LeadSubmission,
+    captured_here,
     split_dossier,
     verify_lead_evidence,
 )
@@ -180,7 +181,7 @@ class IntakeService:
         current, _ = await self.store.configuration()
         if current != config:
             raise ValueError("configuration_changed")
-        if not _same_destination(record, config):
+        if not captured_here(record, config):
             raise ValueError("destination_changed")
         key = hashlib.sha256(
             (
@@ -260,7 +261,7 @@ class IntakeService:
             config, _ = await self.store.configuration()
             if record.status in {"completed", "rejected", "expired"} or config.mode == "capture":
                 return record
-            if record.config_revision != config.revision or not _same_destination(record, config):
+            if record.config_revision != config.revision or not captured_here(record, config):
                 # Target/connection changes cannot silently redirect accepted evidence.
                 record.error_code = "config_revision_review"
                 await self.store.save(record)
@@ -404,7 +405,7 @@ class IntakeService:
             if record.status not in {"pending", "review"}:
                 raise ValueError("intake_not_resolvable")
             current_config, _ = await self.store.configuration()
-            if record.config_revision != current_config.revision or not _same_destination(
+            if record.config_revision != current_config.revision or not captured_here(
                 record, current_config
             ):
                 raise ValueError("config_revision_review")
@@ -509,11 +510,3 @@ class IntakeService:
                 caught_up=state.error_code is None and end == now,
                 error_code=state.error_code,
             )
-
-
-def _same_destination(record: IntakeRecord, config: IntakeConfig) -> bool:
-    """Effects land only where the record's readers were fixed at capture."""
-    return record.destination is not None and (
-        record.destination.guild_id,
-        record.destination.channel_id,
-    ) == (config.guild_id, config.channel_id)

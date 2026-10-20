@@ -29,6 +29,7 @@ from daimon.core.lead_intake import (
     LeadDestination,
     LeadEffectState,
     LeadSubmission,
+    captured_here,
     normalize_project,
 )
 from daimon.core.lead_intake_access import LeadReadDenied, LeadReadTarget, read_target
@@ -395,10 +396,7 @@ class IntakeStore:
             record = await self.get(intake_id)
             if revision != config.revision or record.status not in {"pending", "review"}:
                 raise ValueError("configuration_or_intake_not_eligible")
-            if record.destination is None or (
-                record.destination.guild_id,
-                record.destination.channel_id,
-            ) != (config.guild_id, config.channel_id):
+            if not captured_here(record, config):
                 raise ValueError("destination_change_not_adoptable")
             for step in ("starter", "company", "contact", "deal"):
                 if await self.effect(intake_id, step) is not None:

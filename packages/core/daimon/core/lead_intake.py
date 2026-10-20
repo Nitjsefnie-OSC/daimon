@@ -346,6 +346,14 @@ class IntakeRecord(BaseModel):
     raw_expires_at: datetime
 
 
+def captured_here(record: IntakeRecord, config: IntakeConfig) -> bool:
+    """Effects land only where the record's readers were fixed at capture."""
+    return record.destination is not None and (
+        record.destination.guild_id,
+        record.destination.channel_id,
+    ) == (config.guild_id, config.channel_id)
+
+
 class IntakeResolution(BaseModel):
     model_config = ConfigDict(extra="forbid")
     company_id: str | None = Field(default=None, pattern=r"^\d+$", max_length=20)
