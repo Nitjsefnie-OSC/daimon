@@ -137,6 +137,20 @@ async def lock_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     ).scalar_one()
 
 
+async def _roles_supported(
+    session: AsyncSession, tenant_id: uuid.UUID, policy: TenantAccessPolicy
+) -> bool:
+    """Role access needs a Discord tenant and never names @everyone (the guild id)."""
+    if not policy.invoker_role_ids:
+        return True
+    tenant = await session.get(Tenant, tenant_id)
+    return (
+        tenant is not None
+        and tenant.platform == "discord"
+        and tenant.external_id not in policy.invoker_role_ids
+    )
+
+
 async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> TenantAccessPolicy:
     # Select the row, not just its payload: a JSON `null` payload would
     # otherwise read as "no row" and fall open.
@@ -155,20 +169,14 @@ async def load_access_policy(session: AsyncSession, *, tenant_id: uuid.UUID) -> 
     try:
         # JSON null, an array or a string fail validation like a bad field does.
         policy = TenantAccessPolicy.model_validate(payload)
-        if policy.invoker_role_ids:
-            tenant = await session.get(Tenant, tenant_id)
-            if (
-                tenant is None
-                or tenant.platform != "discord"
-                or tenant.external_id in policy.invoker_role_ids
-            ):
-                raise AccessPolicyUnreadable(
-                    tenant_id=tenant_id,
-                    detail=(
-                        "this workspace has unsupported Discord role access settings; "
-                        "ask an admin to fix them"
-                    ),
-                )
+        if not await _roles_supported(session, tenant_id, policy):
+            raise AccessPolicyUnreadable(
+                tenant_id=tenant_id,
+                detail=(
+                    "this workspace has unsupported Discord role access settings; "
+                    "ask an admin to fix them"
+                ),
+            )
         return policy
     except ValidationError as exc:
         raise AccessPolicyUnreadable(tenant_id=tenant_id) from exc
@@ -179,16 +187,10 @@ async def set_access_policy(
 ) -> None:
     await lock_policy_writes_exclusive(session, tenant_id=tenant_id)
     await lock_access_policy(session, tenant_id=tenant_id)
-    if policy.invoker_role_ids:
-        tenant = await session.get(Tenant, tenant_id)
-        if (
-            tenant is None
-            or tenant.platform != "discord"
-            or tenant.external_id in policy.invoker_role_ids
-        ):
-            raise ValueError(
-                "Discord roles require a Discord tenant and cannot include @everyone (guild id)"
-            )
+    if not await _roles_supported(session, tenant_id, policy):
+        raise ValueError(
+            "Discord roles require a Discord tenant and cannot include @everyone (guild id)"
+        )
     payload = policy.model_dump(mode="json")
     backends = payload.pop("enabled_backends")
     # Older readers already imply the default admin bypass and forbid unknown keys.

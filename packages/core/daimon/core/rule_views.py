@@ -126,22 +126,6 @@ def routine_destination_channel(row: RoutineRow) -> str | None:
     return _channel_in_thread_id(row.destination_id) or row.destination_id
 
 
-def routine_answers_only_owner(row: RoutineRow) -> bool:
-    """Whether a routine's result reaches nobody but its owner: its owner's DM.
-
-    Explicit DM delivery reaches only the owner, even with a saved source
-    channel. A legacy routine with neither destination nor channel also keeps
-    its result private. Explicit DM routines use the normal live-DM pipeline,
-    including the owner's personal memory and DM tool authority. Legacy
-    owner-only headless runs never mount personal memory.
-    A channel/thread routine may fall back to a DM, but cannot read personal
-    memory because public delivery remains possible. Decided at every fire.
-    """
-    return row.destination_kind == "dm" or (
-        row.destination_kind is None and row.destination_id is None and row.channel_id is None
-    )
-
-
 def is_routine_parent_unknown(row: RoutineRow) -> bool:
     """A thread destination saved before its parent channel was recorded, whose id
     doesn't carry it (a Discord thread; a Slack one is ``channel:ts``, a Teams one
@@ -234,15 +218,13 @@ def keeps_routine_inside(
     `parent_channel_id` once the destination's parent is resolved; until then a
     thread whose parent is unknown stays inside while any channel is kept to its own agents.
     """
-    if row.destination_kind == "dm" and not row.source_provenance_known:
-        return True
-    if (
-        row.destination_kind == "dm"
-        and row.source_channel_id is not None
-        and limiting_ids_at(
-            policy,
-            channel_id=row.source_channel_id,
-            thread_id=row.source_thread_id,
+    if row.destination_kind == "dm" and (
+        not row.source_provenance_known
+        or (
+            row.source_channel_id is not None
+            and limiting_ids_at(
+                policy, channel_id=row.source_channel_id, thread_id=row.source_thread_id
+            )
         )
     ):
         return True

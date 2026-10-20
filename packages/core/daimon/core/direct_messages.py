@@ -48,7 +48,7 @@ from daimon.core.stores.direct_messages import (
     quarantine_conversation,
     start_conversation,
 )
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import Role, TenantRow
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_turn_contexts import (
     create_slack_turn_context,
@@ -56,7 +56,11 @@ from daimon.core.stores.slack_turn_contexts import (
 )
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.thread_agent_bindings import create_binding
-from daimon.core.stores.thread_sessions import get_live_thread_session, mark_dead
+from daimon.core.stores.thread_sessions import (
+    get_live_thread_session,
+    mark_dead,
+    retire_dm_scope,
+)
 from daimon.core.turn.admission import Admission, AdmissionGrant, DmSource, admit
 from daimon.core.turn.ceiling import TURN_CEILING_S, turn_deadline
 from daimon.core.turn.deps import TurnDeps
@@ -66,6 +70,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
+from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from mux.profiles import MANAGED_AGENTS
 from sqlalchemy.exc import SQLAlchemyError
@@ -101,6 +106,16 @@ async def load_dm_access_policy(
         raise DirectMessageAccessRevoked("policy_unreadable", message=str(error)) from error
 
 
+def tenant_ready(tenant: TenantRow | None, *, platform: str | None = None) -> bool:
+    """A provisioned, unarchived tenant, on `platform` when one is named."""
+    return (
+        tenant is not None
+        and (platform is None or tenant.platform == platform)
+        and tenant.archived_at is None
+        and tenant.provision_status == "ready"
+    )
+
+
 async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None:
     """Recheck recipient and exact answering agent immediately before private output.
 
@@ -127,9 +142,7 @@ async def require_dm_delivery(deps: TurnDeps, reply: DirectMessageReply) -> None
         )
     if (
         not enabled
-        or tenant is None
-        or tenant.archived_at is not None
-        or tenant.provision_status != "ready"
+        or not tenant_ready(tenant)
         or current is None
         or current.scope_id != conversation.scope_id
         or current.account_id != conversation.account_id
@@ -243,10 +256,7 @@ async def _quarantine(deps: TurnDeps, conversation: DirectMessageRow) -> None:
 async def _require_source_still_unsealed(deps: TurnDeps, conversation: DirectMessageRow) -> None:
     """Quarantine the conversation when its source has been sealed since.
 
-    The row (copied context and private history) is deleted and the scope's
-    provider sessions retired, so nothing supplied earlier survives into a
-    later turn; a fresh /dm-me is required. `reauthorize` asks the same question
-    again right before the DM's session is built (`DmSourceSealedError`).
+    Deletes the row and retires the scope's sessions; a fresh /dm-me is required.
     """
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=conversation.tenant_id)
@@ -284,11 +294,9 @@ async def start_dm(
 ) -> DirectMessageRow:
     """Select a workspace explicitly and give the DM a new thread-like scope.
 
-    Caller admits the source with is_dm=True and `dm_source_channel_id`, and
-    calls `require_unsealed_source`, before reading history or opening the DM.
-    `source_channel_id` is the parent channel `/dm-me` ran in; the DM's turns
-    count toward its budget. Each move resets the private scope; a prior
-    workspace's physical DM history is never replayed into this one.
+    Caller admits the source (is_dm=True, `dm_source_channel_id`) and calls
+    `require_unsealed_source` before reading history. The DM bills
+    `source_channel_id`; each move resets the scope and replays no prior history.
     """
     require_unsealed_source(admission)
     await require_dm_enabled(deps, tenant_id=tenant_id)
@@ -353,13 +361,7 @@ async def admit_cold_dm(
     async with deps.sessionmaker() as session:
         tenant = await get_tenant(session, tenant_id)
         name = await get_dm_agent_name(session, tenant_id=tenant_id)
-    if (
-        tenant is None
-        or tenant.platform != "discord"
-        or tenant.archived_at is not None
-        or tenant.provision_status != "ready"
-        or name is None
-    ):
+    if not tenant_ready(tenant, platform="discord") or name is None:
         raise AdmissionDenied(reason="invoker_not_allowed")
     return await admit(
         deps,
@@ -425,8 +427,6 @@ async def start_cold_dm(
         await start_conversation(session, conversation=conversation, now=datetime.now(UTC))
         if current is not None:
             # Retired mappings can never be reused by a later private turn.
-            from daimon.core.stores.thread_sessions import retire_dm_scope
-
             await retire_dm_scope(
                 session,
                 tenant_id=current.tenant_id,
@@ -504,7 +504,6 @@ async def _run_admitted_dm_turn(
     on_sealed: Callable[[], Awaitable[None]],
     destination: AbstractAsyncContextManager[None] | None = None,
     origin: TurnContext = "chat",
-    attended: bool | None = None,
 ) -> tuple[str, str]:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -524,7 +523,7 @@ async def _run_admitted_dm_turn(
             responder_ma_agent_id=prepared.admission.agent.id,
             responder_name=prepared.admission.agent.name,
             role=role,
-            attended=attended if attended is not None else origin != "routine",
+            attended=origin != "routine",
         ) as turn_origin_row,
     ):
         user_message = f"{render_turn_origin(turn_origin_row)}\n{prompt}"
@@ -547,7 +546,6 @@ async def _run_admitted_dm_turn(
                 recovery_lifecycle=lambda _: _CollectReply(),
                 origin=origin,
                 deadline=deadline,
-                attended=attended,
             )
         except DmSourceSealedError:
             # Decided again during a dead-session recovery.
@@ -557,13 +555,10 @@ async def _run_admitted_dm_turn(
         await on_sealed()
     if outcome.state.error is not None:
         raise outcome.state.error
-    if origin == "routine":
-        from daimon.core.turn.termination import TerminationReason
-
-        if outcome.state.termination != TerminationReason.COMPLETED:
-            raise DirectMessageAccessRevoked(
-                "execution_incomplete", message="The run did not complete."
-            )
+    if origin == "routine" and outcome.state.termination != TerminationReason.COMPLETED:
+        raise DirectMessageAccessRevoked(
+            "execution_incomplete", message="The run did not complete."
+        )
     answer = (
         extract_final_response(outcome.state.content) or "The turn completed without a text reply."
     )
@@ -615,199 +610,166 @@ async def reply_to_dm_result(
     verified_membership: bool | None = None,
     on_agent: Callable[[str], Awaitable[None]] | None = None,
 ) -> DirectMessageReply | None:
-    async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True):
-        return await _reply_to_dm_result(
-            deps,
-            platform=platform,
-            route_key=route_key,
-            external_user_id=external_user_id,
-            message_id=message_id,
-            expected_scope_id=expected_scope_id,
-            text=text,
-            role=role,
-            role_ids=role_ids,
-            verified_membership=verified_membership,
-            on_agent=on_agent,
-        )
-
-
-async def _reply_to_dm_result(
-    deps: TurnDeps,
-    *,
-    platform: str,
-    route_key: str,
-    external_user_id: str,
-    message_id: str,
-    expected_scope_id: str,
-    text: str,
-    role: Role,
-    role_ids: tuple[str, ...] = (),
-    verified_membership: bool | None = None,
-    on_agent: Callable[[str], Awaitable[None]] | None = None,
-) -> DirectMessageReply | None:
     """Admit every DM, serialize its scope, run a billed turn, retain bounded history.
 
     A duplicate delivery returns None. The adapter verifies live membership
     and supplies the current role before entering; stored admin roles never
     authorize a private turn. Platform API errors must fail that check closed.
     """
-    now = datetime.now(UTC)
-    async with deps.sessionmaker.begin() as session:
-        conversation = await claim_message(
-            session,
-            platform=platform,
-            route_key=route_key,
-            external_user_id=external_user_id,
-            message_id=message_id,
-            expected_scope_id=expected_scope_id,
-            now=now,
-            active_until=now + timedelta(seconds=TURN_CEILING_S + 60),
-        )
-    if conversation is None:
-        return None
-    history: list[dict[str, str]] | None = None
-    bound = False
-    try:
-        async with deps.sessionmaker() as session:
-            if not await dm_enabled(session, tenant_id=conversation.tenant_id):
-                raise DirectMessageAccessRevoked(
-                    "dm_disabled",
-                    message="Daimon DMs are off here.\n\nAsk an admin to run /dm-me enable.",
-                )
-        async with deps.sessionmaker() as session:
-            tenant = await get_tenant(session, conversation.tenant_id)
-        if tenant is None or tenant.archived_at is not None or tenant.provision_status != "ready":
-            raise DirectMessageAccessRevoked(
-                "tenant_unavailable",
-                message="This workspace is not available. No DM turn was started.",
+    async with owner_dm_turn(deps, platform=platform, owner=external_user_id, wait=True):
+        now = datetime.now(UTC)
+        async with deps.sessionmaker.begin() as session:
+            conversation = await claim_message(
+                session,
+                platform=platform,
+                route_key=route_key,
+                external_user_id=external_user_id,
+                message_id=message_id,
+                expected_scope_id=expected_scope_id,
+                now=now,
+                active_until=now + timedelta(seconds=TURN_CEILING_S + 60),
             )
-        await _require_source_still_unsealed(deps, conversation)
-        admission = await admit(
-            deps,
-            tenant_id=conversation.tenant_id,
-            platform=platform,
-            external_user_id=external_user_id,
-            channel_id=conversation.channel_id,
-            thread_id=conversation.scope_id,
-            role=role,
-            role_ids=role_ids,
-            verified_membership=verified_membership,
-            is_dm=True,
-            dm_source_channel_id=conversation.source_channel_id,
-            cold_dm=conversation.is_cold,
-            now=now,
-        )
-        if admission.account_id != conversation.account_id:
-            raise DirectMessageAccessRevoked(
-                "account_changed",
-                message=(
-                    "Your account changed, so this DM can't continue.\n\n"
-                    "Run /dm-me again in the channel you came from."
-                ),
-            )
-        if on_agent is not None:
-            await on_agent(admission.agent.name)
-        execution_id = uuid.uuid4() if platform == "slack" else None
-        admission = replace(
-            admission,
-            memory_read_only=admission.memory_read_only or conversation.memory_read_only,
-            slack_turn_context_id=execution_id,
-            private_dm_id=str(execution_id) if execution_id else conversation.scope_id,
-            # Re-asked by `reauthorize` right before the DM's session is built.
-            grant=replace(
-                admission.grant,
-                dm_source=None
-                if conversation.is_cold
-                else DmSource(
-                    channel_id=conversation.source_channel_id,
-                    thread_id=conversation.source_thread_id,
-                    thread_keys=tuple(conversation.source_thread_keys or ()),
-                ),
-            )
-            if admission.grant is not None
-            else None,
-        )
-        deadline = turn_deadline(now=now)
+        if conversation is None:
+            return None
+        history: list[dict[str, str]] | None = None
+        bound = False
         try:
-            prepared = await bind_session(
+            async with deps.sessionmaker() as session:
+                if not await dm_enabled(session, tenant_id=conversation.tenant_id):
+                    raise DirectMessageAccessRevoked(
+                        "dm_disabled",
+                        message="Daimon DMs are off here.\n\nAsk an admin to run /dm-me enable.",
+                    )
+            async with deps.sessionmaker() as session:
+                tenant = await get_tenant(session, conversation.tenant_id)
+            if not tenant_ready(tenant):
+                raise DirectMessageAccessRevoked(
+                    "tenant_unavailable",
+                    message="This workspace is not available. No DM turn was started.",
+                )
+            await _require_source_still_unsealed(deps, conversation)
+            admission = await admit(
                 deps,
-                admission,
                 tenant_id=conversation.tenant_id,
                 platform=platform,
                 external_user_id=external_user_id,
+                channel_id=conversation.channel_id,
                 thread_id=conversation.scope_id,
-                session_account_id=admission.account_id,
-                # Never attach a later Slack turn to a prior turn's bearer credential.
-                reuse_existing=platform != "slack",
-                deadline=deadline,
+                role=role,
+                role_ids=role_ids,
+                verified_membership=verified_membership,
+                is_dm=True,
+                dm_source_channel_id=conversation.source_channel_id,
+                cold_dm=conversation.is_cold,
+                now=now,
             )
-        except DmSourceSealedError:
-            # The source was sealed after admission: same quarantine as above.
-            await _quarantine(deps, conversation)
-            raise
-        bound = True
-        previous = [
-            TranscriptTurn(role="user" if item["role"] == "user" else "agent", text=item["text"])
-            for item in conversation.history
-        ]
-        context = (
-            conversation.context
-            + "\n"
-            + render_previous_session(
-                bounded_turns(previous), from_agent_name="private conversation"
+            if admission.account_id != conversation.account_id:
+                raise DirectMessageAccessRevoked(
+                    "account_changed",
+                    message=(
+                        "Your account changed, so this DM can't continue.\n\n"
+                        "Run /dm-me again in the channel you came from."
+                    ),
+                )
+            if on_agent is not None:
+                await on_agent(admission.agent.name)
+            execution_id = uuid.uuid4() if platform == "slack" else None
+            admission = replace(
+                admission,
+                memory_read_only=admission.memory_read_only or conversation.memory_read_only,
+                slack_turn_context_id=execution_id,
+                private_dm_id=str(execution_id) if execution_id else conversation.scope_id,
+                # Re-asked by `reauthorize` right before the DM's session is built.
+                grant=replace(
+                    admission.grant,
+                    dm_source=None
+                    if conversation.is_cold
+                    else DmSource(
+                        channel_id=conversation.source_channel_id,
+                        thread_id=conversation.source_thread_id,
+                        thread_keys=tuple(conversation.source_thread_keys or ()),
+                    ),
+                )
+                if admission.grant is not None
+                else None,
             )
-        )
-        answer, _ = await _run_admitted_dm_turn(
-            deps,
-            prepared,
-            tenant_id=conversation.tenant_id,
-            platform=platform,
-            parent_channel_id=conversation.channel_id,
-            scope_id=conversation.scope_id,
-            external_user_id=external_user_id,
-            role=role,
-            prompt=f"{context}\n\n{text}",
-            deadline=deadline,
-            destination=_dm_destination(deps, conversation, admission.slack_turn_context_id),
-            on_sealed=lambda: _quarantine(deps, conversation),
-        )
-        turns = bounded_turns(
-            [
-                *previous,
-                TranscriptTurn(role="user", text=text),
-                TranscriptTurn(role="agent", text=answer),
+            deadline = turn_deadline(now=now)
+            try:
+                prepared = await bind_session(
+                    deps,
+                    admission,
+                    tenant_id=conversation.tenant_id,
+                    platform=platform,
+                    external_user_id=external_user_id,
+                    thread_id=conversation.scope_id,
+                    session_account_id=admission.account_id,
+                    # Never attach a later Slack turn to a prior turn's bearer credential.
+                    reuse_existing=platform != "slack",
+                    deadline=deadline,
+                )
+            except DmSourceSealedError:
+                # The source was sealed after admission: same quarantine as above.
+                await _quarantine(deps, conversation)
+                raise
+            bound = True
+            previous = [
+                TranscriptTurn(
+                    role="user" if item["role"] == "user" else "agent", text=item["text"]
+                )
+                for item in conversation.history
             ]
-        )
-        history = [{"role": turn.role, "text": turn.text} for turn in turns]
-        grant = prepared.admission.grant
-        if grant is None:
-            raise DirectMessageAccessRevoked(
-                "authorization_missing", message="Private authority unavailable."
+            context = (
+                conversation.context
+                + "\n"
+                + render_previous_session(
+                    bounded_turns(previous), from_agent_name="private conversation"
+                )
             )
-        return DirectMessageReply(text=answer, conversation=conversation, grant=grant)
-    except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
-        reason = (
-            "policy_unreadable"
-            if isinstance(error, AccessPolicyUnreadable)
-            else "agent_unavailable"
-        )
-        raise DirectMessageAccessRevoked(reason, message=str(error)) from error
-    except asyncio.CancelledError:
-        if bound and deps.running_turns.is_drain_cancel():
-            await _settle_shutdown_cancelled_dm(deps, conversation)
-        raise
-    finally:
-        async with deps.sessionmaker.begin() as session:
-            await finish_message(session, conversation=conversation, history=history)
+            answer, _ = await _run_admitted_dm_turn(
+                deps,
+                prepared,
+                tenant_id=conversation.tenant_id,
+                platform=platform,
+                parent_channel_id=conversation.channel_id,
+                scope_id=conversation.scope_id,
+                external_user_id=external_user_id,
+                role=role,
+                prompt=f"{context}\n\n{text}",
+                deadline=deadline,
+                destination=_dm_destination(deps, conversation, admission.slack_turn_context_id),
+                on_sealed=lambda: _quarantine(deps, conversation),
+            )
+            turns = bounded_turns(
+                [
+                    *previous,
+                    TranscriptTurn(role="user", text=text),
+                    TranscriptTurn(role="agent", text=answer),
+                ]
+            )
+            history = [{"role": turn.role, "text": turn.text} for turn in turns]
+            grant = prepared.admission.grant
+            if grant is None:
+                raise DirectMessageAccessRevoked(
+                    "authorization_missing", message="Private authority unavailable."
+                )
+            return DirectMessageReply(text=answer, conversation=conversation, grant=grant)
+        except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
+            raise _revoked(error) from error
+        except asyncio.CancelledError:
+            if bound and deps.running_turns.is_drain_cancel():
+                await _settle_shutdown_cancelled_dm(deps, conversation)
+            raise
+        finally:
+            async with deps.sessionmaker.begin() as session:
+                await finish_message(session, conversation=conversation, history=history)
 
 
 @dataclass(frozen=True)
 class DmRoutineReply:
-    """A DM routine's final text, the session that produced it and its authority."""
+    """A DM routine's final text, the session and the agent that produced it."""
 
     text: str
     session_id: str
-    grant: AdmissionGrant
     producing_agent_id: str
 
 
@@ -825,158 +787,125 @@ async def run_dm_routine(
     source: DmSource | None,
     budget_channel_id: str | None,
 ) -> DmRoutineReply:
-    async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False):
-        return await _scheduled_dm_turn(
-            deps,
-            tenant_id=tenant_id,
-            owner_user_id=owner_user_id,
-            agent_name=agent_name,
-            prompt=prompt,
-            source=source,
-            budget_channel_id=budget_channel_id,
-        )
+    """Run a DM routine's fire as a fresh, unattended private DM turn of its owner.
 
-
-async def _scheduled_dm_turn(
-    deps: TurnDeps,
-    *,
-    tenant_id: uuid.UUID,
-    owner_user_id: str,
-    agent_name: str,
-    prompt: str,
-    source: DmSource | None,
-    budget_channel_id: str | None,
-) -> DmRoutineReply:
-    """Run a DM routine's fire as a fresh private DM turn of its owner.
-
-    Ordinary DM admission (`cold_dm`, the routine's saved agent through the
-    cold-DM agent checks, fresh membership), the session a fresh live DM of
-    the same owner and agent gets, personal memory included, and the shared
-    prepared-turn execution. The run is unattended: every session it runs in,
-    a recovery's replacement included, is gated before anything is sent to it
-    and its pauses decided by `unattended_posture`, so a call that needs
-    someone's Approve is refused. Only Managed Agents agents run: another
-    provider is refused (`MANAGED_AGENTS_ONLY`) before a session exists.
-
-    It owns a new private scope, never the owner's selected DM conversation,
-    and starts with no history. `source` is the routine's creation source,
-    rechecked for a seal whenever the session is built; `budget_channel_id`
-    only bills. Crash, cancellation and stop behaviour are the ordinary live-DM
-    behaviour. Nothing is posted here: the caller queues the final output.
+    Ordinary cold-DM admission and session (personal memory included), in a new
+    scope with no history. Every session is gated, so a call needing Approve is
+    refused; only Managed Agents agents run (`MANAGED_AGENTS_ONLY`). `source` is
+    rechecked for a seal whenever the session is built; `budget_channel_id` only
+    bills. Nothing is posted here: the caller queues the final output.
     """
-    now = datetime.now(UTC)
-    async with deps.sessionmaker() as session:
-        enabled = await dm_enabled(session, tenant_id=tenant_id)
-        tenant = await get_tenant(session, tenant_id)
-    if not enabled:
-        raise DirectMessageAccessRevoked("dm_disabled", message="Daimon DMs are off here.")
-    if (
-        tenant is None
-        or tenant.platform != "discord"
-        or tenant.archived_at is not None
-        or tenant.provision_status != "ready"
-    ):
-        raise DirectMessageAccessRevoked(
-            "tenant_unavailable", message="This workspace is not available."
-        )
-    scope_id = f"{DM_SCOPE_PREFIX}{uuid.uuid4()}"
-    try:
-        admission = await admit(
-            deps,
-            tenant_id=tenant_id,
-            platform="discord",
-            external_user_id=owner_user_id,
-            channel_id=scope_id,
-            now=now,
-            is_dm=True,
-            dm_source_channel_id=budget_channel_id,
-            dm_agent_name=agent_name,
-            cold_dm=True,
-        )
-        if (
-            admission.backend_revision is not None
-            and admission.backend_revision.profile != MANAGED_AGENTS.profile_id
-        ):
-            raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
-        if admission.grant is None:
+    async with owner_dm_turn(deps, platform="discord", owner=owner_user_id, wait=False):
+        now = datetime.now(UTC)
+        async with deps.sessionmaker() as session:
+            enabled = await dm_enabled(session, tenant_id=tenant_id)
+            tenant = await get_tenant(session, tenant_id)
+        if not enabled:
+            raise DirectMessageAccessRevoked("dm_disabled", message="Daimon DMs are off here.")
+        if not tenant_ready(tenant, platform="discord"):
             raise DirectMessageAccessRevoked(
-                "authorization_missing", message="Private authority unavailable."
+                "tenant_unavailable", message="This workspace is not available."
             )
-        admission = replace(
-            admission,
-            private_dm_id=scope_id,
-            # Re-asked by `reauthorize` right before the session is built.
-            grant=replace(admission.grant, dm_source=source, act_for_creator=True),
-        )
-        if deps.backend is not None and (deps.turn_path or load_turn_settings().path) == "mux":
-            from mux.drivers.anthropic.sessions_lifecycle import (
-                SESSION_READS_NAMESPACE,
-                SessionReads,
-            )
-            from mux.errors import UnsupportedCapability
-
-            try:
-                deps.backend.extension(SessionReads, namespace=SESSION_READS_NAMESPACE, version=1)
-            except UnsupportedCapability as error:
-                raise DirectMessageAccessRevoked(
-                    MANAGED_AGENTS_ONLY,
-                    message="DM routines require a gateable Managed Agents runtime.",
-                ) from error
-        deadline = turn_deadline(now=now)
-        prepared = await bind_session(
-            deps,
-            admission,
-            tenant_id=tenant_id,
-            platform="discord",
-            external_user_id=owner_user_id,
-            thread_id=scope_id,
-            session_account_id=admission.account_id,
-            reuse_existing=False,
-            deadline=deadline,
-        )
-    except DmSourceSealedError as error:
-        raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE) from error
-    except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
-        raise _revoked(error) from error
-    grant = prepared.admission.grant
-    if prepared.backend is not None or grant is None:
-        raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
-
-    async def sealed() -> None:
-        raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
-
-    try:
-        text, session_id = await _run_admitted_dm_turn(
-            deps,
-            prepared,
-            tenant_id=tenant_id,
-            platform="discord",
-            parent_channel_id=scope_id,
-            scope_id=scope_id,
-            external_user_id=owner_user_id,
-            role=Role.ADMIN if grant.subject.is_admin else Role.USER,
-            prompt=prompt,
-            deadline=deadline,
-            on_sealed=sealed,
-            origin="routine",
-            attended=False,
-        )
-    except asyncio.CancelledError:
-        if deps.running_turns.is_drain_cancel():
-            await _settle_shutdown_dm_scope(
+        scope_id = f"{DM_SCOPE_PREFIX}{uuid.uuid4()}"
+        try:
+            admission = await admit(
                 deps,
                 tenant_id=tenant_id,
                 platform="discord",
-                scope_id=scope_id,
-                account_id=admission.account_id,
+                external_user_id=owner_user_id,
+                channel_id=scope_id,
+                now=now,
+                is_dm=True,
+                dm_source_channel_id=budget_channel_id,
+                dm_agent_name=agent_name,
+                cold_dm=True,
             )
-        raise
-    return DmRoutineReply(
-        text=text,
-        session_id=session_id,
-        grant=grant,
-        producing_agent_id=prepared.admission.agent.id,
-    )
+            if (
+                admission.backend_revision is not None
+                and admission.backend_revision.profile != MANAGED_AGENTS.profile_id
+            ):
+                raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+            if admission.grant is None:
+                raise DirectMessageAccessRevoked(
+                    "authorization_missing", message="Private authority unavailable."
+                )
+            admission = replace(
+                admission,
+                private_dm_id=scope_id,
+                # Re-asked by `reauthorize` right before the session is built.
+                grant=replace(admission.grant, dm_source=source, act_for_creator=True),
+            )
+            if deps.backend is not None and (deps.turn_path or load_turn_settings().path) == "mux":
+                from mux.drivers.anthropic.sessions_lifecycle import (
+                    SESSION_READS_NAMESPACE,
+                    SessionReads,
+                )
+                from mux.errors import UnsupportedCapability
+
+                try:
+                    deps.backend.extension(
+                        SessionReads, namespace=SESSION_READS_NAMESPACE, version=1
+                    )
+                except UnsupportedCapability as error:
+                    raise DirectMessageAccessRevoked(
+                        MANAGED_AGENTS_ONLY,
+                        message="DM routines require a gateable Managed Agents runtime.",
+                    ) from error
+            deadline = turn_deadline(now=now)
+            prepared = await bind_session(
+                deps,
+                admission,
+                tenant_id=tenant_id,
+                platform="discord",
+                external_user_id=owner_user_id,
+                thread_id=scope_id,
+                session_account_id=admission.account_id,
+                reuse_existing=False,
+                deadline=deadline,
+            )
+        except DmSourceSealedError as error:
+            raise DirectMessageAccessRevoked(
+                "source_sealed", message=SEALED_SINCE_MESSAGE
+            ) from error
+        except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
+            raise _revoked(error) from error
+        grant = prepared.admission.grant
+        if prepared.backend is not None or grant is None:
+            raise DirectMessageAccessRevoked(MANAGED_AGENTS_ONLY, message=MANAGED_AGENTS_ONLY)
+
+        async def sealed() -> None:
+            raise DirectMessageAccessRevoked("source_sealed", message=SEALED_SINCE_MESSAGE)
+
+        try:
+            text, session_id = await _run_admitted_dm_turn(
+                deps,
+                prepared,
+                tenant_id=tenant_id,
+                platform="discord",
+                parent_channel_id=scope_id,
+                scope_id=scope_id,
+                external_user_id=owner_user_id,
+                role=Role.ADMIN if grant.subject.is_admin else Role.USER,
+                prompt=prompt,
+                deadline=deadline,
+                on_sealed=sealed,
+                origin="routine",
+            )
+        except asyncio.CancelledError:
+            if deps.running_turns.is_drain_cancel():
+                await _settle_shutdown_dm_scope(
+                    deps,
+                    tenant_id=tenant_id,
+                    platform="discord",
+                    scope_id=scope_id,
+                    account_id=admission.account_id,
+                )
+            raise
+        return DmRoutineReply(
+            text=text,
+            session_id=session_id,
+            producing_agent_id=prepared.admission.agent.id,
+        )
 
 
 def _revoked(
@@ -993,15 +922,10 @@ _SHUTDOWN_INTERRUPT_TIMEOUT_S = 3.0
 
 
 async def _settle_shutdown_cancelled_dm(deps: TurnDeps, conversation: DirectMessageRow) -> None:
-    """Stop the MA turn a shutdown cancelled; a DM has no marker for recovery.
+    """Interrupt the MA turn a shutdown cancelled, marking it dead if unconfirmed.
 
-    Nothing will read the session again, so it is interrupted, and marked dead
-    when the interrupt is unconfirmed, so the next DM starts a fresh session
-    instead of sending into a busy one. Only while this delivery still holds
-    the conversation's claim (`active_until`, as `finish_message` compares):
-    the claim serializes the scope, so the live mapping is this turn's own,
-    including a replacement made by dead-session recovery. Best effort: a
-    database failure is logged and the claim expires on its own.
+    Only while this delivery still holds the conversation's claim, so the live
+    mapping is this turn's own. Best effort: a database failure is only logged.
     """
     await _settle_shutdown_dm_scope(
         deps,
@@ -1088,10 +1012,8 @@ async def owner_dm_turn(
             db = await stack.enter_async_context(AsyncSession(bind=connection))
             await stack.enter_async_context(db.begin())
             await try_fence(db, f"owner_dm:{platform}:{owner}", schema_scoped=True)
-            # Keep the owner's transaction on a dedicated connection. Returning
-            # its pool slot leaves ordinary preparation/mutation headroom even
-            # with the minimum four-connection work pool. Closing this detached
-            # connection physically releases the lock on every local exit.
+            # Detach so the lock does not hold a work-pool slot; closing the
+            # detached connection releases the lock on every local exit.
             await connection.run_sync(lambda sync: sync.detach())
         except BaseException:
             await stack.aclose()

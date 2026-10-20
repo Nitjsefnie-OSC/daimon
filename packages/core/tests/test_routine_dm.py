@@ -9,7 +9,8 @@ from alembic.operations import Operations
 from daimon.core.access_policy import ChannelRule, TenantAccessPolicy
 from daimon.core.errors import StoreError
 from daimon.core.routine_delivery import delivery_target, destination_shape_error
-from daimon.core.rule_views import routine_answers_only_owner, routine_destination_channel
+from daimon.core.routines import has_private_output
+from daimon.core.rule_views import routine_destination_channel
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.routines import create_routine, record_result, update_routine
 from daimon.testing.factories import make_tenant
@@ -37,7 +38,7 @@ async def _create(session: AsyncSession, **overrides):
 async def test_dm_resolves_owner_and_retains_source_budget(db_session: AsyncSession) -> None:
     row = await _create(db_session, channel_id="456")
     assert row.destination_id == row.created_by_user_id == "123"
-    assert routine_answers_only_owner(row)
+    assert has_private_output(row)
     assert routine_destination_channel(row) is None
     assert delivery_target(row, platform="discord") is None
     await record_result(db_session, row.id, tail="private", error=None, delivery="pending")
@@ -52,7 +53,7 @@ async def test_dm_resolves_owner_and_retains_source_budget(db_session: AsyncSess
     assert updated is not None
     assert updated.delivery_status == "skipped"
     assert updated.delivery_payload is None
-    assert not routine_answers_only_owner(updated)
+    assert not has_private_output(updated)
 
 
 @pytest.mark.parametrize(
