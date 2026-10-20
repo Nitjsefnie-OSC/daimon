@@ -742,12 +742,13 @@ _EDITOR_SCRIPT = """
       trigger.setAttribute("aria-expanded", "false");
     }
   }
-  function makeAddedRow(id, name) {
+  function makeAddedRow(id, name, installation) {
     const row = document.getElementById("added-row-template")
       .content.firstElementChild.cloneNode(true);
     row.dataset.repoId = id;
     row.dataset.name = name;
     row.dataset.added = "true";
+    row.dataset.installation = installation || "";
     row.dataset.workingEligible = "true";
     row.querySelector(".gh-row-name").textContent = name.split("/").slice(1).join("/");
     row.querySelector(".gh-remove-action").setAttribute("aria-label", "Remove " + name);
@@ -839,18 +840,21 @@ _EDITOR_SCRIPT = """
     cancel.hidden = !!parts.length;
     save.hidden = !parts.length;
     saveHelp.hidden = !parts.length;
-    // The server enforces the same limit; this keeps the ticks instead of a dead end.
+    // The server enforces the same limit by App installation; counting the same ids
+    // keeps the ticks instead of a dead end. The owner name is only a fallback.
     const accounts = new Set(rows().filter(row => !removed.has(row.dataset.repoId))
-      .map(row => row.closest(".gh-owner-group")?.dataset.owner.toLowerCase())
-      .filter(Boolean));
+      .map(row => row.dataset.installation ? "i:" + row.dataset.installation :
+        "o:" + (row.closest(".gh-owner-group")?.dataset.owner || "").toLowerCase()));
     const limit = Number(form.dataset.ownerLimit);
     const over = accounts.size - limit;
     const ownerLimit = document.getElementById("owner-limit");
     ownerLimit.hidden = !(over > 0 && parts.length);
-    ownerLimit.querySelector("span").textContent = over > 0 ? form.dataset.agent +
+    const limitText = over > 0 ? form.dataset.agent +
       " can use repos from up to " + limit + " GitHub accounts or orgs. These changes use " +
       accounts.size + ". Remove the repos from " + over + " " +
       (over === 1 ? "account" : "accounts") + " to save." : "";
+    const limitSpan = ownerLimit.querySelector("span");
+    if (limitSpan.textContent !== limitText) limitSpan.textContent = limitText;
     save.disabled = !parts.length || over > 0;
     save.textContent = "Save changes";
     workingInput.value = workingExplicit ||
@@ -1066,7 +1070,7 @@ _EDITOR_SCRIPT = """
     for (const option of selected) {
       const id = option.dataset.repoId;
       staged.set(id, "write");
-      if (!rowFor(id)) makeAddedRow(id, option.dataset.name);
+      if (!rowFor(id)) makeAddedRow(id, option.dataset.name, option.dataset.installation);
       removed.delete(id);
     }
     for (const row of rows()) {
@@ -1376,6 +1380,7 @@ def _agent_editor_page(
             parts.append(
                 f'<article class="gh-agent-row" data-repo-id="{repo.repo_id}" '
                 f'data-name="{data_name}" '
+                f'data-installation="{repo.installation_id or ""}" '
                 f'data-working-eligible="{str(editable and repo.status == "active").lower()}" '
                 f'data-access="{repo.ceiling_access}">'
                 '<div class="gh-row-top"><span class="gh-row-icon">'

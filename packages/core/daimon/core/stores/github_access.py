@@ -330,6 +330,9 @@ class AgentRepo(BaseModel):
     is_working_repo: bool = False
     grant_version: int = 0
     authorization_version: int = 0
+    # The App installation the repo's authorization rests on; the per-agent
+    # account limit counts these, not owner names (an owner can be renamed).
+    installation_id: int | None = None
 
 
 async def list_agent_repos(
@@ -359,6 +362,7 @@ async def list_agent_repos(
                 is_working_repo=grant.is_working_repo,
                 grant_version=grant.version,
                 authorization_version=row.version,
+                installation_id=row.installation_id,
             )
         )
     return sorted(result, key=lambda repo: repo.full_name.casefold())

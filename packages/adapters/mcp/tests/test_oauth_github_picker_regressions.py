@@ -174,7 +174,8 @@ def test_selected_view_is_not_titled_with_one_owner(browser_page: object) -> Non
     assert page.inner_text("#repo-picker-title") == "Add northwind repos"
 
 
-def _twelve_account_editor_html() -> str:
+def _twelve_account_editor_html(*, renamed_first: bool = False) -> str:
+    """12 saved accounts and a 13th to pick, or the first org renamed with a 2nd repo."""
     from datetime import UTC, datetime
 
     from daimon.core.stores.github_access import AgentRepo
@@ -187,14 +188,21 @@ def _twelve_account_editor_html() -> str:
             owner_login=f"org{n:02d}",
             repository_selection="selected",
             owner_type="Organization",
-            repos=(oauth_github._Repo(7000 + n, 500 + n, 100 + n, f"org{n:02d}/r", "admin"),),
+            repos=(oauth_github._Repo(7000 + n, 500 + n, 100 + n, f"org{n:02d}/r", "admin"),)
+            + (
+                (oauth_github._Repo(8000, 500, 100, "org00/r2", "admin"),)
+                if renamed_first and n == 0
+                else ()
+            ),
         )
-        for n in range(13)
+        for n in range(12 if renamed_first else 13)
     ]
     grants = [
         AgentRepo(
             repo_id=7000 + n,
-            full_name=f"org{n:02d}/r",
+            # A renamed owner: the saved grant still carries the old login.
+            full_name="old-org/r" if renamed_first and n == 0 else f"org{n:02d}/r",
+            installation_id=100 + n,
             scope="agent",
             max_access="write",
             baseline_access="write",
@@ -249,6 +257,24 @@ def test_thirteenth_account_keeps_the_ticks_and_says_what_to_remove() -> None:
         # The pick is still there, and removing one saved account makes it savable.
         assert page.locator('.gh-agent-row[data-repo-id="7012"]').count() == 1
         page.click('.gh-agent-row[data-repo-id="7005"] .gh-remove-action')
+        assert page.is_enabled("#save-repos")
+        assert page.is_hidden("#owner-limit")
+        browser.close()
+
+
+def test_renamed_owner_is_still_one_account() -> None:
+    """The server counts App installations; an old and a new owner name are one account."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    if not _CHROME.exists():
+        pytest.skip("Chromium for Playwright is not installed")
+    with sync_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(_CHROME), args=["--no-sandbox"])
+        page = browser.new_page()
+        page.set_content(_twelve_account_editor_html(renamed_first=True))
+        page.click("#open-repo-picker")
+        page.click('.gh-owner-button[data-owner="org00"]')
+        page.check('.gh-picker-choice[data-repo-id="8000"] .gh-picker-toggle')
+        page.click("#stage-repos")
         assert page.is_enabled("#save-repos")
         assert page.is_hidden("#owner-limit")
         browser.close()
