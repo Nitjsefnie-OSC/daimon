@@ -1,4 +1,5 @@
 import { validateNamePrefix } from './names.bicep'
+import { validateChartStorage, chartArtifactsEnvironment } from './chart-storage.bicep'
 
 targetScope = 'resourceGroup'
 
@@ -31,6 +32,9 @@ param containerImage string = ''
 param deployServices bool = false
 @description('Disable to deploy the existing backend before Azure OpenAI quota is available.')
 param deployAi bool = true
+@allowed(['azure_blob', 'external'])
+@description('azure_blob configures MCP and Blob roles. external leaves artifact configuration and permissions to the operator.')
+param chartStorage string = 'azure_blob'
 @description('Enable for production/tenant-sealed installs. Cannot be disabled again on an existing vault.')
 param vaultPurgeProtection bool = false
 @allowed(['discord', 'teams', 'mcp', 'scheduler'])
@@ -49,6 +53,7 @@ param serviceSecretNames object = {}
 param postgresFirewallRules array = []
 
 var checkedNamePrefix = validateNamePrefix(namePrefix)
+var checkedChartStorage = validateChartStorage(chartStorage, secretNames, serviceSecretNames.?mcp ?? {})
 var suffix = uniqueString(resourceGroup().id)
 var stem = '${checkedNamePrefix}-${suffix}'
 var tags = { application: 'daimon' }
@@ -61,6 +66,7 @@ module foundation './modules/foundation.bicep' = {
     compactName: '${checkedNamePrefix}${suffix}'
     tags: tags
     vaultPurgeProtection: vaultPurgeProtection
+    chartStorage: checkedChartStorage
   }
 }
 
@@ -108,6 +114,13 @@ var commonSecrets = union(
     DAIMON_CRYPTO__KEYS: 'crypto-keys'
   },
   secretNames
+)
+
+var artifactsEnvironment = chartArtifactsEnvironment(
+  checkedChartStorage,
+  foundation.outputs.blobEndpoint,
+  foundation.outputs.chartsContainerName,
+  foundation.outputs.identityClientId
 )
 
 module init './modules/init.bicep' = if (!empty(containerImage)) {
@@ -174,6 +187,7 @@ module apps './modules/app.bicep' = [
       command: service.command
       port: service.port
       environment: union(
+        service.name == 'mcp' ? artifactsEnvironment : {},
         commonEnvironment,
         service.name == 'mcp' && contains(services, 'teams') ? (serviceEnvironment.?teams ?? {}) : {},
         serviceEnvironment[?service.name] ?? {}
@@ -197,7 +211,8 @@ output initJobName string = '${stem}-init'
 output containerAppNames array = [for service in services: '${stem}-${service}']
 output postgresHost string = database.outputs.host
 output chartsBlobEndpoint string = foundation.outputs.blobEndpoint
-output chartsContainerName string = 'charts'
+output chartsContainerName string = foundation.outputs.chartsContainerName
+output mcpArtifactsEnvironment object = artifactsEnvironment
 output foundryProjectId string = deployAi ? ai!.outputs.projectId : ''
 output daimonEnvironment object = commonEnvironment
 output daimonSecretNames object = commonSecrets

@@ -5,6 +5,8 @@ param stem string
 param compactName string
 param tags object
 param vaultPurgeProtection bool
+@allowed(['azure_blob', 'external'])
+param chartStorage string = 'azure_blob'
 
 resource identity 'Microsoft.ManagedIdentity/userAssignedIdentities@2023-01-31' = {
   name: '${stem}-runtime'
@@ -111,7 +113,7 @@ resource secretsRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
   }
 }
 // Container scope only; no storage-account management or key access.
-resource chartsRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
+resource chartsRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (chartStorage == 'azure_blob') {
   scope: charts
   name: guid(charts.id, identity.id, 'blob-contributor')
   properties: {
@@ -120,6 +122,19 @@ resource chartsRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = {
     roleDefinitionId: subscriptionResourceId(
       'Microsoft.Authorization/roleDefinitions',
       'ba92f5b4-2d11-453d-a403-e96b0029c9fe'
+    )
+  }
+}
+// Delegation keys require account scope; blob data access stays container-scoped.
+resource chartsDelegatorRole 'Microsoft.Authorization/roleAssignments@2022-04-01' = if (chartStorage == 'azure_blob') {
+  scope: storage
+  name: guid(storage.id, identity.id, 'blob-delegator')
+  properties: {
+    principalId: identity.properties.principalId
+    principalType: 'ServicePrincipal'
+    roleDefinitionId: subscriptionResourceId(
+      'Microsoft.Authorization/roleDefinitions',
+      'db58b8e5-c6ad-4a2a-8342-4190687cbf4a'
     )
   }
 }
@@ -133,3 +148,4 @@ output registryServer string = registry.properties.loginServer
 output vaultName string = vault.name
 output vaultUri string = vault.properties.vaultUri
 output blobEndpoint string = storage.properties.primaryEndpoints.blob
+output chartsContainerName string = charts.name
