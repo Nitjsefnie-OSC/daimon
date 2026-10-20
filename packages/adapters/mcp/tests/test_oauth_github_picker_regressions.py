@@ -172,3 +172,83 @@ def test_selected_view_is_not_titled_with_one_owner(browser_page: object) -> Non
     assert page.inner_text("#repo-picker-title") == "Selected repos"
     page.click("#show-selected-repos")
     assert page.inner_text("#repo-picker-title") == "Add northwind repos"
+
+
+def _twelve_account_editor_html() -> str:
+    from datetime import UTC, datetime
+
+    from daimon.core.stores.github_access import AgentRepo
+
+    now = datetime.now(UTC)
+    installations = [
+        oauth_github._Installation(
+            id=100 + n,
+            owner_id=500 + n,
+            owner_login=f"org{n:02d}",
+            repository_selection="selected",
+            owner_type="Organization",
+            repos=(oauth_github._Repo(7000 + n, 500 + n, 100 + n, f"org{n:02d}/r", "admin"),),
+        )
+        for n in range(13)
+    ]
+    grants = [
+        AgentRepo(
+            repo_id=7000 + n,
+            full_name=f"org{n:02d}/r",
+            scope="agent",
+            max_access="write",
+            baseline_access="write",
+            ceiling_access="write",
+            staged=False,
+            status="active",
+            added_by_account_id=None,
+            added_at=now,
+            granted_by_account_id=None,
+            granted_at=now,
+            is_working_repo=n == 0,
+        )
+        for n in range(12)
+    ]
+    page = oauth_github._agent_editor_page(
+        root="https://mcp.test",
+        state="state",
+        invitation_hash="invitation",
+        secret="secret",
+        agent_name="Editor",
+        workspace="Test",
+        platform="discord",
+        grants=grants,
+        installations=installations,
+        snapshot="snap",
+        cancel_url="https://mcp.test/cancel",
+        install_url="https://github.com/apps/x/installations/new",
+        github_user_id=1,
+    )
+    return page.body.decode()
+
+
+def test_thirteenth_account_keeps_the_ticks_and_says_what_to_remove() -> None:
+    """Adding a 13th account used to save, fail with "already uses 12" and drop the ticks."""
+    sync_api = pytest.importorskip("playwright.sync_api")
+    if not _CHROME.exists():
+        pytest.skip("Chromium for Playwright is not installed")
+    with sync_api.sync_playwright() as playwright:
+        browser = playwright.chromium.launch(executable_path=str(_CHROME), args=["--no-sandbox"])
+        page = browser.new_page()
+        page.set_content(_twelve_account_editor_html())
+        page.click("#open-repo-picker")
+        page.click('.gh-owner-button[data-owner="org12"]')
+        page.check('.gh-picker-choice[data-owner="org12"] .gh-picker-toggle')
+        page.click("#stage-repos")
+        assert page.is_disabled("#save-repos")
+        warning = page.inner_text("#owner-limit")
+        assert "up to 12 GitHub accounts or orgs" in warning
+        assert "These changes use 13" in warning
+        assert "from 1 account to save" in warning
+        assert "already" not in warning
+        # The pick is still there, and removing one saved account makes it savable.
+        assert page.locator('.gh-agent-row[data-repo-id="7012"]').count() == 1
+        page.click('.gh-agent-row[data-repo-id="7005"] .gh-remove-action')
+        assert page.is_enabled("#save-repos")
+        assert page.is_hidden("#owner-limit")
+        browser.close()

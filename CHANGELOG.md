@@ -31,6 +31,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- **Picking repos from a 13th GitHub account no longer ends on an error page that drops every tick.** An agent can use repos from up to 12 accounts or orgs; that limit is unchanged. The repo page now says so before you save ("These changes use 13. Remove the repos from 1 account to save."), keeps what you picked and turns Save back on once you remove one. If the server still refuses, its message no longer claims the agent "already uses" 12 accounts when the new picks are what cross the limit.
+
 - **GitHub's "Open GitHub setup" no longer ends on "This link has expired."** After changing which repos the Daimon app can use, GitHub sometimes sends people back without the link's state, and the page refused them. The browser now remembers the state for the same 15 minutes as the rest of the connection, so they land back on the repo picker. In the picker, reopening Add repos after choosing an account shows the account list under the right title again, and an account with no repos to add says so instead of showing an empty list.
 
 - Adding a skill to an agent, or changing its skills, no longer unpins the skills it already has. Every path that keeps an agent's other skills (the add-skill chat tool and panels, `update_agent`, `daimon skills add` and `daimon defaults apply`) dropped each kept skill's version, which the provider reads as latest, so a skill pinned to one version moved to whatever was uploaded last. Kept skills now stay on their pinned version; unpinned ones stay on latest.

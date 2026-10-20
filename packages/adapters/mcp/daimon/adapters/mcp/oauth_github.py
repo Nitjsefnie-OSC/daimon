@@ -839,7 +839,19 @@ _EDITOR_SCRIPT = """
     cancel.hidden = !!parts.length;
     save.hidden = !parts.length;
     saveHelp.hidden = !parts.length;
-    save.disabled = !parts.length;
+    // The server enforces the same limit; this keeps the ticks instead of a dead end.
+    const accounts = new Set(rows().filter(row => !removed.has(row.dataset.repoId))
+      .map(row => row.closest(".gh-owner-group")?.dataset.owner.toLowerCase())
+      .filter(Boolean));
+    const limit = Number(form.dataset.ownerLimit);
+    const over = accounts.size - limit;
+    const ownerLimit = document.getElementById("owner-limit");
+    ownerLimit.hidden = !(over > 0 && parts.length);
+    ownerLimit.querySelector("span").textContent = over > 0 ? form.dataset.agent +
+      " can use repos from up to " + limit + " GitHub accounts or orgs. These changes use " +
+      accounts.size + ". Remove the repos from " + over + " " +
+      (over === 1 ? "account" : "accounts") + " to save." : "";
+    save.disabled = !parts.length || over > 0;
     save.textContent = "Save changes";
     workingInput.value = workingExplicit ||
       (working !== initialWorking && !removed.has(initialWorking))
@@ -1266,6 +1278,8 @@ def _agent_editor_page(
         '<form id="github-connect-form" class="gh-editor" method="post" '
         f'data-working="{working.repo_id if working else ""}" '
         f'data-may-change-working="{str(may_change_working).lower()}" '
+        f'data-agent="{esc(agent_name, quote=True)}" '
+        f'data-owner-limit="{github_access.MAX_AGENT_INSTALLATIONS}" '
         f'action="{esc(root, quote=True)}/oauth/github/confirm">',
         f'<input type="hidden" name="state" value="{esc(state, quote=True)}">',
         f'<input type="hidden" name="invitation" value="{esc(invitation_hash, quote=True)}">',
@@ -1614,7 +1628,9 @@ def _agent_editor_page(
         '<div class="gh-dock-chips"><span id="dock-add" hidden></span>'
         '<span id="dock-remove" hidden></span>'
         f'<span id="dock-working" hidden>{icon("pin")}<span></span></span></div>'
-        '<small id="save-help" hidden></small></div>'
+        '<small id="save-help" hidden></small>'
+        f'<p id="owner-limit" class="gh-dock-warning" role="alert" hidden>{icon("triangle-alert")}'
+        "<span></span></p></div>"
         '<div class="gh-editor-footer-actions">'
         '<button id="discard-repos" class="gh-editor-discard gh-js" type="button" hidden>'
         "Discard changes</button>"
@@ -2721,9 +2737,15 @@ def build_oauth_github_routes(
                 return _error(
                     "The agent's repos changed. Reload and try again.", 409, retry_confirm_url
                 )
+            except github_access.InstallationLimitError as exc:
+                return _error(
+                    str(exc),
+                    400,
+                    retry_confirm_url,
+                    action="Go back, remove the repos from at least one account, then save again.",
+                )
             except (
                 github_connect.GrantReassignmentError,
-                github_access.InstallationLimitError,
                 github_access.SessionVaultBudgetError,
                 github_access.ReadOnlyMultiInstallationError,
             ) as exc:

@@ -107,8 +107,9 @@ def require_projected_grant_budget(
     """Check the complete stored grant set before changing it or its alias."""
     if len(repo_ids_by_installation) > MAX_AGENT_INSTALLATIONS:
         raise InstallationLimitError(
-            f"{agent_name} already uses repos from 12 GitHub accounts or orgs, "
-            "the most one agent can hold. Remove one first."
+            f"{agent_name} can use repos from up to {MAX_AGENT_INSTALLATIONS} GitHub "
+            f"accounts or orgs, and this change would make it "
+            f"{len(repo_ids_by_installation)}. Nothing was saved."
         )
     multi_installation = len(repo_ids_by_installation) > 1
     if multi_installation and any_read_only:

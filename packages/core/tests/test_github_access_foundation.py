@@ -369,7 +369,10 @@ async def test_agent_refuses_thirteenth_installation_but_allows_more_repos_in_ex
         await db_session.flush()
     with pytest.raises(
         github_access.InstallationLimitError,
-        match="ResearchBot already uses repos from 12 GitHub accounts or orgs, the most one agent can hold. Remove one first.",
+        match=(
+            r"ResearchBot can use repos from up to 12 GitHub accounts or orgs, "
+            r"and this change would make it 13\. Nothing was saved\."
+        ),
     ):
         await github_access.stage_grant(
             db_session,
