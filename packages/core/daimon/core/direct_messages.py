@@ -504,7 +504,6 @@ async def _run_admitted_dm_turn(
     on_sealed: Callable[[], Awaitable[None]],
     destination: AbstractAsyncContextManager[None] | None = None,
     origin: TurnContext = "chat",
-    attended: bool | None = None,
 ) -> tuple[str, str]:
     """Run one admitted, bound private turn and return its final text and session.
 
@@ -524,7 +523,7 @@ async def _run_admitted_dm_turn(
             responder_ma_agent_id=prepared.admission.agent.id,
             responder_name=prepared.admission.agent.name,
             role=role,
-            attended=attended if attended is not None else origin != "routine",
+            attended=origin != "routine",
         ) as turn_origin_row,
     ):
         user_message = f"{render_turn_origin(turn_origin_row)}\n{prompt}"
@@ -547,7 +546,6 @@ async def _run_admitted_dm_turn(
                 recovery_lifecycle=lambda _: _CollectReply(),
                 origin=origin,
                 deadline=deadline,
-                attended=attended,
             )
         except DmSourceSealedError:
             # Decided again during a dead-session recovery.
@@ -913,7 +911,6 @@ async def run_dm_routine(
                 deadline=deadline,
                 on_sealed=sealed,
                 origin="routine",
-                attended=False,
             )
         except asyncio.CancelledError:
             if deps.running_turns.is_drain_cancel():
