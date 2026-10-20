@@ -15,6 +15,10 @@ the capability surface of a turn nobody watches is decided in one place:
 - `capability_posture` makes the decider agree: a built-in call is refused
   for every unattended turn, and a call outside the allowlist is refused.
 
+An allowlist entry is a `ServerTool` pair, never a `server/tool` string to
+split: a server named `linear/bridge` would otherwise alias a tool on
+`linear`. A server name holding `/` is refused outright.
+
 `ENTRY_POINT_POLICY` records each entry point's skills policy. Built-in
 sandbox and custom tools are off everywhere, with no opt-in.
 """
@@ -25,7 +29,7 @@ import asyncio
 import uuid
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from typing import Any, Final, Literal, NoReturn, cast, get_args
+from typing import Any, Final, Literal, NamedTuple, NoReturn, cast, get_args
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
@@ -68,6 +72,15 @@ UnattendedEntryPoint = Literal[
 BUILTIN_TOOLSET: Final[str] = "agent_toolset_20260401"
 MCP_TOOLSET: Final[str] = "mcp_toolset"
 CUSTOM_TOOL: Final[str] = "custom"
+#: Joins a server and a tool in operator keys, so never part of a server name.
+SERVER_SEPARATOR: Final[str] = "/"
+
+
+class ServerTool(NamedTuple):
+    """One MCP tool by its server and its own name, kept apart."""
+
+    server: str
+    tool: str
 
 
 @dataclass(frozen=True)
@@ -390,7 +403,8 @@ def require_allowed_capabilities(
     """Refuse a session whose capabilities cannot be constrained, before any send.
 
     Pure: reads only `snapshot`. Raises `AdmissionDenied` for a coordinator
-    roster, for skills unless `allow_skills`, and for any field this release
+    roster, for skills unless `allow_skills`, for a server name holding `/`,
+    and for any field this release
     has not reviewed, at every capability-bearing level: the session and its
     resources, the agent, its model, skills and servers, each tool, toolset
     default and per-tool config, and their permission policies. An unknown
@@ -411,7 +425,7 @@ def require_allowed_capabilities(
         if skill.type not in _SKILL_TYPES:
             _refuse()
     names = [server.name for server in agent.mcp_servers]
-    if len(set(names)) != len(names):
+    if len(set(names)) != len(names) or any(SERVER_SEPARATOR in name for name in names):
         _refuse()
     for server in agent.mcp_servers:
         _only(server, _SERVER)
@@ -424,6 +438,8 @@ def require_allowed_capabilities(
         if tool.type not in _TOOLSETS:
             _refuse()
         _only(tool, _TOOLSETS[tool.type])
+        if tool.type == MCP_TOOLSET and SERVER_SEPARATOR in tool.mcp_server_name:
+            _refuse()
         _require_toolset_configs(tool)
     for resource in snapshot.resources:
         kind = getattr(resource, "type", None)
@@ -500,11 +516,14 @@ def _asking(tool: dict[str, Any]) -> dict[str, Any]:
 def _allowlisted(
     tools: list[dict[str, Any]],
     servers: list[dict[str, Any]],
-    allowlist: frozenset[str],
+    allowlist: frozenset[ServerTool],
     *,
     public_url: str | None,
 ) -> tuple[list[dict[str, Any]], list[dict[str, Any]]]:
-    """Only the MCP tools named `server/tool` in `allowlist`, each enabled alone.
+    """Only the MCP tools `allowlist` names, each enabled alone.
+
+    An entry whose server name holds `/` is refused rather than skipped: a
+    caller that built one has already confused a composite key for a server.
 
     Daimon's own management server is never kept, whatever the list says:
     `daimon-mcp`, a server named `sandbox`, and any server whose URL is the
@@ -517,8 +536,9 @@ def _allowlisted(
         if public_url and isinstance(s.get("url"), str) and same_mcp_endpoint(s["url"], public_url)
     }
     wanted: dict[str, list[str]] = {}
-    for key in sorted(allowlist):
-        server, _, name = key.partition("/")
+    for server, name in sorted(allowlist):
+        if SERVER_SEPARATOR in server:
+            _refuse()
         if server and name and server not in own:
             wanted.setdefault(server, []).append(name)
     kept: list[dict[str, Any]] = []
@@ -554,13 +574,13 @@ async def constrain_capabilities(
     session_factory: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID | None,
     allow_skills: bool = False,
-    tool_allowlist: frozenset[str] | None = None,
+    tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> ConstrainedSession:
     """The tools and servers `snapshot` may run with unattended. No provider call.
 
     Refuses first (`require_allowed_capabilities`). Built-in and custom tools
     are always disabled; with a `tool_allowlist` of
-    `server/tool` keys only those MCP tools stay, and every server no kept
+    `ServerTool` pairs only those MCP tools stay, and every server no kept
     toolset names is dropped. Every MCP toolset left, Daimon's own included and
     with tool safety on or off, asks on its default and on every per-tool
     config, so each call reaches the unattended decider; Daimon's
@@ -671,7 +691,7 @@ async def _update(
 def capability_posture(
     posture: PolicyApproval,
     *,
-    tool_allowlist: frozenset[str] | None = None,
+    tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> PolicyApproval:
     """`posture`, refusing what `constrain_capabilities` took out of the session.
 
@@ -690,7 +710,10 @@ def capability_posture(
                     "unattended turn. The tool call did not run."
                 ),
             )
-        if tool_allowlist is not None and call.key not in tool_allowlist:
+        if (
+            tool_allowlist is not None
+            and ServerTool(call.server_name, call.tool_name) not in tool_allowlist
+        ):
             return ToolConfirmationResult(
                 allow=False,
                 deny_message=(

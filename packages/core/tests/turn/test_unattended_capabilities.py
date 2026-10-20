@@ -20,10 +20,11 @@ from daimon.core.turn import unattended_capabilities as caps
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.posture import BillingExempt, PolicyApproval
+from daimon.core.turn.posture import BillingExempt, PolicyApproval, ToolConfirmationResult
 from daimon.core.turn.unattended import gate_session_snapshot, session_gate, unattended_posture
 from daimon.core.turn.unattended_capabilities import (
     ENTRY_POINT_POLICY,
+    ServerTool,
     UnattendedEntryPoint,
     capability_posture,
     constrain_capabilities,
@@ -538,7 +539,7 @@ async def test_allowlist_keeps_only_named_tools_and_asks() -> None:
         public_url=None,
         session_factory=None,
         tenant_id=None,
-        tool_allowlist=frozenset({"linear/get_issue"}),
+        tool_allowlist=frozenset({ServerTool("linear", "get_issue")}),
     )
     tools = constrained.send.tools
     assert [t["type"] for t in tools] == ["agent_toolset_20260401", "mcp_toolset"]
@@ -552,7 +553,8 @@ async def test_allowlist_keeps_only_named_tools_and_asks() -> None:
     assert constrained.original.tools == [t.model_dump(mode="json") for t in session.agent.tools]
 
     posture = capability_posture(
-        PolicyApproval(decide=AsyncMock()), tool_allowlist=frozenset({"linear/get_issue"})
+        PolicyApproval(decide=AsyncMock()),
+        tool_allowlist=frozenset({ServerTool("linear", "get_issue")}),
     )
     refused = await posture.decide(
         ToolCall(tool_use_id="x", server_name="linear", tool_name="create_issue")
@@ -597,10 +599,118 @@ async def test_allowlist_drops_management_endpoint_aliases(query: str) -> None:
         public_url="https://daimon.invalid/mcp",
         session_factory=None,
         tenant_id=None,
-        tool_allowlist=frozenset({"renamed/get_agent", "daimon-mcp/get_agent"}),
+        tool_allowlist=frozenset(
+            {ServerTool("renamed", "get_agent"), ServerTool("daimon-mcp", "get_agent")}
+        ),
     )
     assert constrained.send.tools == []
     assert constrained.send.mcp_servers == []
+
+
+def _bridged_session() -> BetaManagedAgentsSession:
+    """Ported from the watches review: `linear/bridge` beside `linear`, both with get_issue.
+
+    `linear` lists get_issue disabled; the second server enables it. Split at
+    the first `/`, the allowlist key `linear/bridge/get_issue` enabled an
+    absent `bridge/get_issue` config on `linear`.
+    """
+    off = {"enabled": False, "permission_policy": {"type": "always_ask"}}
+    return _mutated(
+        lambda s: s["agent"].update(
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "linear",
+                    "default_config": _ASKING,
+                    "configs": [{"name": "get_issue", **off}],
+                },
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "linear/bridge",
+                    "default_config": _ASKING,
+                    "configs": [{"name": "get_issue", **_ASKING}],
+                },
+            ],
+            mcp_servers=[
+                *deepcopy(SERVERS),
+                {"name": "linear/bridge", "type": "url", "url": "https://bridge.invalid/mcp"},
+            ],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "allowlist",
+    [
+        None,
+        frozenset({ServerTool("linear/bridge", "get_issue")}),
+        frozenset({ServerTool("linear", "bridge/get_issue")}),
+    ],
+    ids=["no_allowlist", "bridge_pair", "split_pair"],
+)
+async def test_a_server_name_with_a_slash_is_refused_before_mutation(
+    allowlist: frozenset[ServerTool] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    update = AsyncMock()
+    monkeypatch.setattr(caps, "update_session_record", update)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await constrain_capabilities(
+            _bridged_session(),
+            ToolSafetyPolicy(),
+            public_url=None,
+            session_factory=None,
+            tenant_id=None,
+            tool_allowlist=allowlist,
+        )
+    update.assert_not_awaited()
+
+
+@pytest.mark.parametrize("where", ["server", "toolset"])
+def test_a_slash_in_either_server_name_is_refused(where: str) -> None:
+    session = _mutated(
+        lambda s: (
+            s["agent"]["mcp_servers"][0] if where == "server" else s["agent"]["tools"][1]
+        ).update(**{"name" if where == "server" else "mcp_server_name": "linear/bridge"})
+    )
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(session)
+
+
+async def test_an_allowlist_pair_never_reaches_another_server() -> None:
+    """A tool name may hold `/`; it stays that tool on that server."""
+    session = _root_session()
+    constrained = await constrain_capabilities(
+        session,
+        ToolSafetyPolicy(),
+        public_url=None,
+        session_factory=None,
+        tenant_id=None,
+        tool_allowlist=frozenset({ServerTool("linear", "bridge/get_issue")}),
+    )
+    [linear] = [t for t in constrained.send.tools if t["type"] == "mcp_toolset"]
+    assert linear["mcp_server_name"] == "linear"
+    assert [c["name"] for c in linear["configs"]] == ["bridge/get_issue"]
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await constrain_capabilities(
+            session,
+            ToolSafetyPolicy(),
+            public_url=None,
+            session_factory=None,
+            tenant_id=None,
+            tool_allowlist=frozenset({ServerTool("linear/bridge", "get_issue")}),
+        )
+    posture = capability_posture(
+        PolicyApproval(decide=AsyncMock(return_value=ToolConfirmationResult(allow=True))),
+        tool_allowlist=frozenset({ServerTool("linear", "bridge/get_issue")}),
+    )
+    aliased = await posture.decide(
+        ToolCall(tool_use_id="a", server_name="linear/bridge", tool_name="get_issue")
+    )
+    listed = await posture.decide(
+        ToolCall(tool_use_id="l", server_name="linear", tool_name="bridge/get_issue")
+    )
+    assert not aliased.allow
+    assert listed.allow
 
 
 async def test_apply_invalidates_cached_tools_before_mutating(
