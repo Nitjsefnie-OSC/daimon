@@ -151,7 +151,6 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import TEAMS_BILLING_COMMAND, RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
-from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
 from daimon.core.turn.run import run_prepared_turn
@@ -1625,7 +1624,7 @@ class TeamsApp:
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
         final = holder[-1]
-        if not isinstance(getattr(final, "output_authorization", None), OutputAuthorization):
+        if final.output_authorization is None:
             if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
                 sweep = self.outputs.sweep(
                     inbound,
