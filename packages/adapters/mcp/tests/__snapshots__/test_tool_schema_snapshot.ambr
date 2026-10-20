@@ -2248,7 +2248,9 @@
         Watch an OS page event or a reviewed OS read tool from this conversation.
         <blank line>
         Binds the current human owner, tenant, agent and exact Discord thread.
-        Requires an attended turn origin. Polls run without an AI turn; firings
+        Requires an attended turn origin and verified owner card approval.
+        Backends without tool confirmation refuse enrollment.
+        Polls run without an AI turn; firings
         use unattended read-and-report turns and current access/spend checks.
         Poll arguments must explicitly name a source different from the reporting thread.
         Only read_thread and read_channel are pollable; no URLs or outside tools.
@@ -5556,6 +5558,8 @@
       'description': '''
         Resume your paused watch from an attended owner turn after fresh access checks.
         Only the owner may resume; an admin cannot override the owner pause.
+        Server-side owner card proof is required, including with tool safety off.
+        Backends without tool confirmation refuse.
         Imported watches require operator confirmation; source_unmapped never resumes.
       ''',
       'parameters': dict({
@@ -5598,7 +5602,8 @@
       'description': '''
         Rotate an OS page signing key, revoke the old key and cancel queued wakes. The fresh
         key goes to its owner by private DM once. Requires an attended owner turn;
-        an admin cannot rotate another owner's key.
+        an admin cannot rotate another owner's key. Server-side owner card proof is
+        required; backends without tool confirmation refuse.
       ''',
       'parameters': dict({
         'additionalProperties': False,

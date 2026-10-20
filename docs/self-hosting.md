@@ -1443,6 +1443,15 @@ caller-selected owner or destination. Only reviewed `read_thread` and `read_chan
 are pollable; no arbitrary HTTP or external sender mode is supported. Poll intervals
 are 60–86400 seconds, with 1–30 day lifetime and at most 25 live watches per owner.
 The first successful poll establishes the baseline without waking the agent.
+Polls select human-authored rows before the message limit; bots/assistants and
+pagination metadata never enter projections. Self-reports and cross-watch reports
+cannot trigger polls. At most 201 messages are scanned; an incomplete human window
+backs off without changing the baseline. Poll documents contain only `rows`;
+legacy baselines are re-established without firing, and the versioned saved-value
+envelope shares the 4 KiB bound. Source IDs require canonical positive
+ASCII decimal spelling (1–20 digits). Enrollment verifies the attended owner's
+exact-tool card proof server-side via `session_card_gap`; unsupported backends and
+ungated/unreadable sessions refuse, including with tool safety off.
 Poll arguments must name a source distinct from the reporting thread. The agent
 must have the read enabled without approval on its canonical OS MCP toolset.
 Gate, expiry and lease races release the matching poll lease without marking owner

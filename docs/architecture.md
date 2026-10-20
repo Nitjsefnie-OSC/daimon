@@ -2446,6 +2446,15 @@ before saving its result. It uses existing Discord `read_thread` and `read_chann
 implementations as the human owner. No AI turn is spent polling. Both producer
 gates apply before a source is read; stopped/expired leases cannot commit.
 
+Polls exclude bot/assistant rows before selecting the latest human-message window
+and before projection; pagination metadata is excluded too. Neither self-reports
+nor cross-watch reports can trigger polls. A scan stops at 201 messages; an
+incomplete human window backs off without changing baseline or evidence.
+Source IDs must match `^[1-9][0-9]{0,19}$`; resolved places are compared before
+reads. Enrollment verifies the attended owner's exact-tool approval with
+`session_card_gap` inside the tool. Unsupported backends and ungated/unreadable
+proofs refuse, including with tool safety off.
+
 `continuity.poll_tools.POLL_TOOLS` is an explicit reviewed READ catalogue; unlisted,
 non-READ and NO_WATCH operations cannot enroll. Poll arguments must explicitly
 name a source different from the reporting thread, preventing self-report wake loops.

@@ -20,6 +20,7 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_session, ma_session_agent
 from daimon.testing.watch_fixtures import install_poll_ports
 from fastmcp.exceptions import ToolError
 from sqlalchemy import text
@@ -113,6 +114,34 @@ async def runtime_watch(db_session_factory, monkeypatch):
             )
         ),
     )
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools._session_gate.retrieve_session",
+        AsyncMock(
+            return_value=ma_session(
+                agent=ma_session_agent(
+                    id="agent-bound",
+                    tools=[
+                        {
+                            "type": "mcp_toolset",
+                            "mcp_server_name": "daimon-mcp",
+                            "default_config": {
+                                "enabled": True,
+                                "permission_policy": {"type": "always_allow"},
+                            },
+                            "configs": [
+                                {
+                                    "name": name,
+                                    "enabled": True,
+                                    "permission_policy": {"type": "always_ask"},
+                                }
+                                for name in ("create_watch", "resume_watch", "rotate_watch_key")
+                            ],
+                        }
+                    ],
+                )
+            )
+        ),
+    )
     auth = AuthIdentity(
         account_id=watch.owner_account_id,
         tenant_id=watch.tenant_id,
@@ -159,10 +188,16 @@ async def lease(runtime, watch):
 
 async def test_polls_recheck_live_owner_before_every_read_and_cancel_revoked_wakes(runtime_watch):
     runtime, watch, _ = runtime_watch
-    source = AsyncMock(return_value=SimpleNamespace(model_dump=lambda **_: {"rows": [1]}))
+    source = AsyncMock(
+        return_value=SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "1"}]}
+        )
+    )
     with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", source):
         assert await run_poll(runtime, watch.id, await lease(runtime, watch))
-        source.return_value = SimpleNamespace(model_dump=lambda **_: {"rows": [2]})
+        source.return_value = SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "2"}]}
+        )
         assert await run_poll(runtime, watch.id, await lease(runtime, watch))
         runtime.membership_resolver.resolve.return_value = Membership(is_member=False)
         assert not await run_poll(runtime, watch.id, await lease(runtime, watch))
@@ -185,7 +220,9 @@ async def test_revocation_during_source_read_discards_result(runtime_watch):
 
     async def revoked_read(*args, **kwargs):
         runtime.membership_resolver.resolve.return_value = Membership(is_member=False)
-        return SimpleNamespace(model_dump=lambda **_: {"rows": ["untrusted result"]})
+        return SimpleNamespace(
+            model_dump=lambda **_: {"rows": [{"role": "user", "content": "untrusted result"}]}
+        )
 
     with patch("daimon.adapters.mcp.watch_polling._read_thread_impl", revoked_read):
         assert not await run_poll(runtime, watch.id, await lease(runtime, watch))

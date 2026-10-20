@@ -96,6 +96,7 @@ async def _history_page(
     before: discord.Object | None,
     read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
     parent_id: str = "",
+    poll_humans_only: bool = False,
 ) -> tuple[list[MessageRow], str | None, str | None]:
     """Fetch one history page; return oldest-first rows, cursor, and hint.
 
@@ -105,6 +106,28 @@ async def _history_page(
     back empty and ends the sweep. Notices naming a sealed thread are dropped;
     the cursor still follows the page as Discord returned it.
     """
+    if poll_humans_only:
+        # Select the latest human rows, not a latest-message page filtered later:
+        # bot traffic must not evict human rows and turn that eviction into a change.
+        page: list[discord.Message] = []
+        scanned = 0
+        async for message in channel.history(limit=201):
+            scanned += 1
+            if not message.author.bot:
+                page.append(message)
+                if len(page) == limit:
+                    break
+        if len(page) < limit and scanned == 201:
+            raise ValueError("Polling human window exceeds the bounded history scan")
+        return (
+            [
+                _to_message_row(message)
+                for message in reversed(page)
+                if _sealed_thread_named(message, read_policy, parent_id=parent_id) is None
+            ],
+            None,
+            None,
+        )
     page = [m async for m in channel.history(limit=limit, before=before)]
     rows = [
         _to_message_row(m)
@@ -134,6 +157,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
     before: str | None = None,
     read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
     require_owner_history: bool = False,
+    poll_humans_only: bool = False,
 ) -> ReadChannelResult:
     """Read channel messages, oldest-first, with before-cursor pagination.
 
@@ -176,6 +200,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
                 before=before_obj,
                 read_policy=read_policy,
                 parent_id=str(channel.id),
+                poll_humans_only=poll_humans_only,
             )
         except discord.Forbidden as exc:
             if exc.code == 50001:
@@ -340,6 +365,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
     before: str | None = None,
     read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
     require_owner_history: bool = False,
+    poll_humans_only: bool = False,
 ) -> ReadThreadResult:
     """Read messages from a thread, oldest-first, with before-cursor pagination.
 
@@ -381,6 +407,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 before=before_obj,
                 read_policy=read_policy,
                 parent_id=str(channel.id),
+                poll_humans_only=poll_humans_only,
             )
         except discord.Forbidden as exc:
             if exc.code == 50001:

@@ -1,4 +1,11 @@
-"""Owner-bound watch management. Secrets travel only in a private owner DM."""
+"""Owner-bound watch management. Secrets travel only in a private owner DM.
+
+I2 (enrollment): Every create, resume and signing-key rotation requires a
+verified attended owner origin and server-side proof of that owner's card
+approval for that exact tool via session_card_gap before any mutation or secret
+delivery. Backend or session gating alone is not proof. A backend without
+tool_confirmation, an ungated session or an unreadable proof refuses enrollment.
+"""
 
 from __future__ import annotations
 
@@ -10,6 +17,7 @@ from typing import Literal, cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools import _session_gate
 from daimon.adapters.mcp.tools._channel_policy import require_dm_recipient_allowed
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools.discord._client import (
@@ -21,10 +29,14 @@ from daimon.adapters.mcp.watch_polling import authorize_poll
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.membership_subject import resolve_subject
-from daimon.core.stores import watches
-from daimon.core.stores.domain import ChatPlatform, WatchRow
+from daimon.core.stores import mux_state, watches
+from daimon.core.stores.domain import ChatPlatform, TurnOriginRow, WatchRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.contracts.ids import ChannelRef, ThreadRef
+from mux.contracts.profile import SUPPORTED
+from mux.profiles import get_profile
+from mux.state.lease import Slot
 from pydantic import BaseModel
 
 
@@ -101,13 +113,39 @@ async def fresh_admin(runtime: McpRuntime, auth: AuthIdentity) -> bool:
 
 
 async def require_attended_owner(
-    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None
-) -> None:
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None, *, tool_name: str
+) -> TurnOriginRow:
     if origin_context_id is None:
         raise ToolError("An attended owner turn origin is required")
     origin = await require_turn_origin(runtime, auth, origin_context_id)
     if not origin.attended or auth.platform != "discord" or auth.platform_user_id is None:
         raise ToolError("An attended owner Discord turn is required")
+    try:
+        slot = Slot(
+            thread=ThreadRef(
+                channel=ChannelRef(
+                    tenant_id=str(auth.tenant_id),
+                    platform=origin.platform,
+                    channel_id=origin.parent_channel_id,
+                ),
+                thread_id=origin.thread_id,
+            ),
+            account_id=str(auth.account_id),
+        )
+        async with runtime.session_factory() as db:
+            binding = await mux_state.get_binding(db, slot, read_persisted=True)
+        if (
+            binding is not None
+            and get_profile(binding.profile).support_for("tool_confirmation") not in SUPPORTED
+        ):
+            raise ToolError("Backend cannot prove owner card approval")
+        gap = await _session_gate.session_card_gap(runtime, auth, origin, tool_name=tool_name)
+    except Exception:
+        # Unsupported backends and unreadable proofs cannot authorize enrollment.
+        raise ToolError("Owner card approval cannot be verified on this backend/session") from None
+    if gap is not None:
+        raise ToolError("Owner card approval is required; this backend/session cannot prove it")
+    return origin
 
 
 async def create_watch_impl(
@@ -125,9 +163,10 @@ async def create_watch_impl(
     interval: int = 300,
     lifetime_days: int = 7,
 ) -> WatchSummary:
-    origin = await require_turn_origin(runtime, auth, origin_context_id)
-    if not origin.attended or auth.platform != "discord" or auth.platform_user_id is None:
-        raise ToolError("Create a watch from an attended Discord conversation")
+    origin = await require_attended_owner(
+        runtime, auth, origin_context_id, tool_name="create_watch"
+    )
+    assert auth.platform_user_id is not None
     if not 1 <= lifetime_days <= 30:
         raise ToolError("Watch lifetime must be 1 to 30 days")
     now = datetime.now(UTC)
@@ -144,6 +183,7 @@ async def create_watch_impl(
         reason="watch_fired",
         idempotency_key=uuid.uuid4(),
     )
+    key_id, key = secrets.token_hex(12), secrets.token_urlsafe(48)
     try:
         async with runtime.session_factory.begin() as db:
             if source == "poll":
@@ -173,10 +213,14 @@ async def create_watch_impl(
                 )
             # Current owner/agent/seal policy, independently of the origin grant.
             await authorize_poll(runtime, watch)
+            if source == "page_event":
+                # The approved create includes initial key issuance, not a second
+                # rotate tool action without its own approval.
+                await watches.rotate_signing_key(
+                    db, watch.id, key_id=key_id, key=key, expires_at=watch.expires_at
+                )
         if source == "page_event":
-            return await rotate_watch_impl(
-                runtime, auth, watch_id=str(watch.id), origin_context_id=origin_context_id
-            )
+            return await deliver_rotated_key(runtime, auth, watch, key_id=key_id, key=key)
         return summary(watch)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
@@ -195,23 +239,32 @@ async def rotate_watch_impl(
                 account_id=auth.account_id,
                 is_admin=False,
             )
-            await require_attended_owner(runtime, auth, origin_context_id)
+            await require_attended_owner(
+                runtime, auth, origin_context_id, tool_name="rotate_watch_key"
+            )
             if watch.source != "page_event":
                 raise ValueError("Poll watches have no signing key")
             await watches.rotate_signing_key(
                 db, watch.id, key_id=key_id, key=key, expires_at=watch.expires_at
             )
-        try:
-            await private_key_delivery(runtime, auth, watch, key_id=key_id, key=key)
-        except Exception:
-            async with runtime.session_factory.begin() as db:
-                await watches.pause_watch(db, watch.id, reason="key_delivery_failed")
-            raise ToolError(
-                "Private key delivery failed; watch paused. Rotate again to retry."
-            ) from None
-        return summary(watch, key_id=key_id)
+        return await deliver_rotated_key(runtime, auth, watch, key_id=key_id, key=key)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def deliver_rotated_key(
+    runtime: McpRuntime, auth: AuthIdentity, watch: WatchRow, *, key_id: str, key: str
+) -> WatchSummary:
+    """Deliver an already-authorized key; failure pauses without exposing its value."""
+    try:
+        await private_key_delivery(runtime, auth, watch, key_id=key_id, key=key)
+    except Exception:
+        async with runtime.session_factory.begin() as db:
+            await watches.pause_watch(db, watch.id, reason="key_delivery_failed")
+        raise ToolError(
+            "Private key delivery failed; watch paused. Rotate again to retry."
+        ) from None
+    return summary(watch, key_id=key_id)
 
 
 async def manage_watch_impl(
@@ -236,7 +289,9 @@ async def manage_watch_impl(
             if action == "pause":
                 await watches.pause_watch(db, row.id)
             elif action == "resume":
-                await require_attended_owner(runtime, auth, origin_context_id)
+                await require_attended_owner(
+                    runtime, auth, origin_context_id, tool_name="resume_watch"
+                )
                 await watches.resume_watch(db, row.id, now=now)
                 await authorize_poll(runtime, row)
             elif action == "delete":
@@ -267,7 +322,9 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Watch an OS page event or a reviewed OS read tool from this conversation.
 
         Binds the current human owner, tenant, agent and exact Discord thread.
-        Requires an attended turn origin. Polls run without an AI turn; firings
+        Requires an attended turn origin and verified owner card approval.
+        Backends without tool confirmation refuse enrollment.
+        Polls run without an AI turn; firings
         use unattended read-and-report turns and current access/spend checks.
         Poll arguments must explicitly name a source different from the reporting thread.
         Only read_thread and read_channel are pollable; no URLs or outside tools.
@@ -325,6 +382,8 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def resume_watch(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Resume your paused watch from an attended owner turn after fresh access checks.
         Only the owner may resume; an admin cannot override the owner pause.
+        Server-side owner card proof is required, including with tool safety off.
+        Backends without tool confirmation refuse.
         Imported watches require operator confirmation; source_unmapped never resumes.
         """
         return await manage_watch_impl(
@@ -339,7 +398,8 @@ def register_watch_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def rotate_watch_key(ctx: Context, watch_id: str, origin_context_id: str) -> WatchSummary:  # pyright: ignore[reportUnusedFunction]
         """Rotate an OS page signing key, revoke the old key and cancel queued wakes. The fresh
         key goes to its owner by private DM once. Requires an attended owner turn;
-        an admin cannot rotate another owner's key.
+        an admin cannot rotate another owner's key. Server-side owner card proof is
+        required; backends without tool confirmation refuse.
         """
         return await rotate_watch_impl(
             runtime, await _auth(ctx), watch_id=watch_id, origin_context_id=origin_context_id

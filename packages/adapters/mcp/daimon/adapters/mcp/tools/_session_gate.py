@@ -27,7 +27,11 @@ from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
 from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
-from daimon.core.tool_safety import has_confirmation_gate, microsoft_send_tools
+from daimon.core.tool_safety import (
+    WATCH_CONFIRMED_TOOLS,
+    has_confirmation_gate,
+    microsoft_send_tools,
+)
 from daimon.core.turn.approvals import daimon_rule_tools_for
 from mux.errors import ScopeViolation
 
@@ -185,9 +189,8 @@ async def _recorded_as_gated(
                 tool_safety=runtime.settings.tool_safety,
                 public_url=None if public_url is None else str(public_url),
                 asks_before_publishing=asks_before_publishing,
-                confirmed_tools=backend_switch_tools(
-                    enabled=backend_selection_enabled(runtime.settings.turn)
-                )
+                confirmed_tools=WATCH_CONFIRMED_TOOLS
+                | backend_switch_tools(enabled=backend_selection_enabled(runtime.settings.turn))
                 | microsoft_send_tools(
                     enabled=runtime.settings.microsoft_accounts.configured,
                     tool_safety_on=runtime.settings.tool_safety.enabled,

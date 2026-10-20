@@ -40,7 +40,7 @@ from daimon.adapters.mcp.tools.discord._visibility import (
 from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
 from daimon.core.config import load_watches_settings
 from daimon.core.continuity.poll_tools import require_distinct_source, validate_poll
-from daimon.core.continuity.watch_projection import Rule, evaluate, project
+from daimon.core.continuity.watch_projection import Rule, bounded, evaluate, project
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
@@ -192,6 +192,9 @@ async def authorize_poll(
         except ValueError as exc:
             raise PollAccessRevoked(str(exc)) from exc
         source_place = await poll_read_place(runtime, auth, source_id)
+        # Identity equality follows native resolution, never caller spelling.
+        if source_place.channel_id == place.channel_id:
+            raise PollAccessRevoked("Poll source resolves to the reporting thread")
     # Policy is read after all native/provider lookups, immediately before the
     # source call. The executor repeats this check after the read before commit.
     async with runtime.session_factory() as db:
@@ -259,6 +262,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     limit=limit,
                     read_policy=read,
                     require_owner_history=True,
+                    poll_humans_only=True,
                 )
             else:
                 document = await _read_channel_impl(
@@ -268,15 +272,26 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     limit=limit,
                     read_policy=read,
                     require_owner_history=True,
+                    poll_humans_only=True,
                 )
-            value = project(document.model_dump(mode="json"), expression)
+            # Keep only human-authored rows; no pagination metadata or assistant
+            # output can enter any projection, including identity (".").
+            raw = document.model_dump(mode="json")
+            human_document: JsonValue = {
+                "rows": [row for row in raw["rows"] if row.get("role") == "user"]
+            }
+            value = project(human_document, expression)
             previous = cast(JsonValue, watch.baseline.get("value"))
-            if "value" in watch.baseline:
-                evidence = evaluate(cast(Rule, rule), previous, value)
+            # A legacy baseline may contain bot output or pagination metadata.
+            # Re-establish it without firing; the version and value commit together.
+            if isinstance(previous, dict) and previous.get("document") == "human_rows_v1":
+                evidence = evaluate(cast(Rule, rule), previous["projection"], value)
             else:
                 # Validate added/updated baseline shape before saving the first value.
                 evaluate(cast(Rule, rule), value, value)
                 evidence = None
+            saved: JsonValue = {"document": "human_rows_v1", "projection": value}
+            bounded(saved)
             # Recheck membership/policy after network I/O before persisting evidence.
             await authorize_poll(runtime, watch)
             async with runtime.session_factory.begin() as db:
@@ -287,7 +302,7 @@ async def run_poll(runtime: McpRuntime, watch_id: uuid.UUID, lease: str) -> bool
                     db,
                     watch,
                     lease,
-                    value=value,
+                    value=saved,
                     payload=None if evidence is None else json.dumps(evidence, ensure_ascii=True),
                 )
             return True

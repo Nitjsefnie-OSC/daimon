@@ -151,3 +151,28 @@ async def test_lead_resolution_requires_recorded_and_current_confirmation_gate(
         )
         is expected
     )
+
+
+@pytest.mark.parametrize("tool", ["create_watch", "resume_watch", "rotate_watch_key"])
+async def test_recorded_watch_card_is_proven_with_tool_safety_off(monkeypatch, tool):
+    from daimon.core.tool_safety import OPEN_TOOL_SAFETY, WATCH_CONFIRMED_TOOLS
+
+    runtime = _runtime()
+    runtime.settings.tool_safety = OPEN_TOOL_SAFETY
+    monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=frozenset()))
+    recorded = session_tools(
+        AGENT,
+        frozenset(),
+        tool_safety=OPEN_TOOL_SAFETY,
+        public_url="https://mcp.example/mcp",
+        confirmed_tools=WATCH_CONFIRMED_TOOLS,
+    )
+    live = SimpleNamespace(effective_config=SimpleNamespace(tools_sha256=hash_tools(recorded)))
+    assert await _session_gate._recorded_as_gated(
+        runtime,
+        AUTH,
+        live,
+        tool_name=tool,
+        ma_agent_id=AGENT.id,
+        reported_tools_sha256=hash_tools(AGENT.tools),
+    )
