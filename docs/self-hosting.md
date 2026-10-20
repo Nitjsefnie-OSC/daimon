@@ -1341,28 +1341,6 @@ membership lookup cannot authorize private delivery. Inspect routine
 `delivery_status` and `delivery_note` when a DM fails; do not manually reset an
 uncertain or partially sent claim to pending, because delivery is at most once.
 
-Native [lead intake](lead-intake.md) uses the existing `DAIMON_CRYPTO__KEYS`
-MultiFernet ring for tenant evidence and service-owned integration credentials.
-Provision private operator files with `daimon leads configure`; do not put
-Gmail/HubSpot secrets in prompts or agent vaults. Keep the scheduler running so
-raw-source and 90-day evidence expiry happen even when no triage routine fires.
-
-### Clearing retained legacy routine output
-
-Migration `0117_clear_legacy_routine_output` clears `last_result_tail`,
-`last_error`, `delivery_payload`, and `delivery_note` on existing routines whose
-`destination_kind`, `destination_id`, and `channel_id` are all NULL, including
-paused and failed routines. Older runners could save the owner's personal-memory
-output in these rows. The cleanup does not change schedules or destinations.
-Downgrade is a no-op for this erased data; it cannot restore previews or errors.
-
-Stop all old scheduler, adapter, and MCP processes before applying this migration,
-then start the upgraded processes. An old producer left running could repopulate
-private data after the purge. Upgraded readers restrict these rows' previews and
-diagnostics to the identified owner, including when an administrator manages the
-routine. The same owner restriction applies to explicit DM results.
-
-
 
 ### Signed page-event watch sidecar
 
@@ -1372,7 +1350,7 @@ and digest-pinned TLS proxy after migrations. Set `DAIMON_SIDECAR_PUBLIC_HOST`
 Only callback paths are public; database, `/healthz` and other paths remain private.
 The application uses the lane's `DAIMON_LANE_IMAGE` and `DAIMON_LANE_SHA`.
 
-Migration `0117_watches` follows `0116_thread_model_settings` and has no downgrade;
+Migration `0119_watches` follows `0118_lead_intake` and has no downgrade;
 retain compatible readers for rollback. `DAIMON_WATCHES__ENABLED` and the core-owned
 database `global` gate default false. Enable both only after release review.
 Disabling either blocks new events and future sends; disabling the durable gate
@@ -1423,3 +1401,25 @@ report under current access, spend and execution-origin checks; shell, built-ins
 skills and management tools are unavailable. There are no polling or MCP management
 tools. See [architecture](architecture.md#signed-page-event-watch-entry-point) for
 per-write output checks, tool restoration and cancellation behavior.
+
+
+Native [lead intake](lead-intake.md) uses the existing `DAIMON_CRYPTO__KEYS`
+MultiFernet ring for tenant evidence and service-owned integration credentials.
+Provision private operator files with `daimon leads configure`; do not put
+Gmail/HubSpot secrets in prompts or agent vaults. Keep the scheduler running so
+raw-source and 90-day evidence expiry happen even when no triage routine fires.
+
+### Clearing retained legacy routine output
+
+Migration `0117_clear_legacy_routine_output` clears `last_result_tail`,
+`last_error`, `delivery_payload`, and `delivery_note` on existing routines whose
+`destination_kind`, `destination_id`, and `channel_id` are all NULL, including
+paused and failed routines. Older runners could save the owner's personal-memory
+output in these rows. The cleanup does not change schedules or destinations.
+Downgrade is a no-op for this erased data; it cannot restore previews or errors.
+
+Stop all old scheduler, adapter, and MCP processes before applying this migration,
+then start the upgraded processes. An old producer left running could repopulate
+private data after the purge. Upgraded readers restrict these rows' previews and
+diagnostics to the identified owner, including when an administrator manages the
+routine. The same owner restriction applies to explicit DM results.

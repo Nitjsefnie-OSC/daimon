@@ -145,7 +145,7 @@ for migrations. Only callback paths are public; `/healthz` and the database stay
 private. Set `DAIMON_SIDECAR_PUBLIC_HOST` (default `localhost` for local use) and,
 optionally, `DAIMON_SIDECAR_TLS_PORT`.
 
-Migration `0117_watches` follows `0116_thread_model_settings`. Keep both
+Migration `0119_watches` follows `0118_lead_intake`. Keep both
 `DAIMON_WATCHES__ENABLED` and the core-owned database `global` gate off until
 release review. The sidecar cannot change either gate. Disabling the durable gate
 also cancels queued wakes; stop controls remain available with producers off.
