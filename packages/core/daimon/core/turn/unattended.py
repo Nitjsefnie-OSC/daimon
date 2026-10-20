@@ -97,6 +97,7 @@ async def gate_session_snapshot(
     session_factory: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID | None,
     entry_point: UnattendedEntryPoint | None = None,
+    routine_sandbox_tools: bool = False,
 ) -> None:
     """Make `session`'s gated calls pause under `policy`, before anything is sent.
 
@@ -104,20 +105,22 @@ async def gate_session_snapshot(
     caller's resources stay as they are; nothing is restored from the
     agent's deployment-wide definition. `constrain_capabilities` refuses a
     session it cannot constrain (a coordinator, skills the `entry_point`
-    does not allow, an unknown field) before any update, always turns
-    built-ins off, rewrites
+    does not allow, an unknown field) before any update, turns built-ins off
+    unless `routine_sandbox_tools` opts a `routine` in (`capability_policy`),
+    rewrites
     both the toolset defaults and every per-tool config, makes Daimon's
     `protected_tools` ask, and heals a foreign `daimon-mcp` URL, policy on or
     off. A refusal or a failed update raises, so the send never happens on an
     ungated session. An `entry_point` of None gets no built-ins and no skills.
     """
-    allowed = capability_policy(entry_point)
+    allowed = capability_policy(entry_point, routine_sandbox_tools=routine_sandbox_tools)
     constrained = await constrain_capabilities(
         session,
         policy,
         public_url=public_url,
         session_factory=session_factory,
         tenant_id=tenant_id,
+        allow_builtins=allowed.allow_builtins,
         allow_skills=allowed.allow_skills,
     )
     await apply_capabilities(
@@ -165,6 +168,7 @@ def unattended_posture(
     fernet: MultiFernet | None = None,
     agent_id: uuid.UUID | None = None,
     entry_point: UnattendedEntryPoint | None = None,
+    routine_sandbox_tools: bool = False,
 ) -> PolicyApproval:
     """How an unattended turn on `session` answers its pauses.
 
@@ -174,8 +178,9 @@ def unattended_posture(
     for a DM or no channel); with no database or tenant there are no rules to
     read. `protected_tools` are refused. `annotations_for`
     is the seam for operator-trusted MCP hints; it must answer only for
-    trusted servers. A built-in or custom call is always refused
-    (`capability_posture`), regardless of `entry_point`.
+    trusted servers. A built-in or custom call is refused (`capability_posture`)
+    unless `routine_sandbox_tools` opts a `routine` in; no other `entry_point`
+    can be opted in.
     """
     posture = PolicyApproval(
         decide=unattended_decider(
@@ -204,7 +209,12 @@ def unattended_posture(
             ),
         )
     )
-    return capability_posture(posture)
+    return capability_posture(
+        posture,
+        allow_builtins=capability_policy(
+            entry_point, routine_sandbox_tools=routine_sandbox_tools
+        ).allow_builtins,
+    )
 
 
 def session_gate(
@@ -218,6 +228,7 @@ def session_gate(
     tenant_id: uuid.UUID | None,
     read_session: Callable[[], Awaitable[BetaManagedAgentsSession]] | None = None,
     entry_point: UnattendedEntryPoint | None = None,
+    routine_sandbox_tools: bool = False,
 ) -> Callable[[], Awaitable[None]]:
     """The gate a driven unattended turn runs before each send (`unattended_sends`).
 
@@ -226,7 +237,8 @@ def session_gate(
     failed read or update raises, and the send it guards does not happen.
     An injected mux backend supplies its own `read_session`; its snapshot is
     never replaced by a read through a different runtime. `entry_point`
-    picks the `CapabilityPolicy` (`gate_session_snapshot`).
+    and `routine_sandbox_tools` pick the `CapabilityPolicy`
+    (`gate_session_snapshot`).
     """
 
     async def gate() -> None:
@@ -241,6 +253,7 @@ def session_gate(
             session_factory=session_factory,
             tenant_id=tenant_id,
             entry_point=entry_point,
+            routine_sandbox_tools=routine_sandbox_tools,
         )
 
     return gate

@@ -10,21 +10,24 @@ the capability surface of a turn nobody watches is decided in one place:
   change it mid-session, so a coordinator session is never repaired, only
   refused.
 - `constrain_capabilities` works out the tools and servers to send: built-in
-  sandbox and custom tools always disabled, an optional explicit tool
-  allowlist, and every MCP toolset gated for the unattended decider.
+  sandbox tools disabled unless the policy allows them, custom tools always
+  removed, an optional explicit tool allowlist, and every MCP toolset gated
+  for the unattended decider.
 - `invalidate_cached_tools` then `send_capabilities` put it on the session
   (`apply_capabilities` runs both); a caller that restores the session's own
   tools afterwards registers that restore between the two.
   `restore_capabilities` puts them back.
 - `capability_posture` makes the decider agree: a built-in call is refused
-  for every unattended turn, and a call outside the allowlist is refused.
+  when built-ins are off, and a call outside the allowlist is refused.
 
 An allowlist entry is a `ServerTool` pair, never a `server/tool` string to
 split: a server named `linear/bridge` would otherwise alias a tool on
 `linear`. A server name holding `/` is refused outright.
 
 `ENTRY_POINT_POLICY` records each entry point's skills policy. Built-in
-sandbox and custom tools are off everywhere, with no opt-in.
+sandbox tools are off everywhere; the one opt-in is an admin's, per routine
+(`Routine.sandbox_tools_enabled`), and `capability_policy` honours it only for
+the `routine` entry point.
 """
 
 from __future__ import annotations
@@ -32,7 +35,7 @@ from __future__ import annotations
 import asyncio
 import uuid
 from collections.abc import Callable, Mapping
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from typing import Any, Final, Literal, NamedTuple, NoReturn, cast, get_args
 
 import structlog
@@ -79,6 +82,12 @@ UnattendedEntryPoint = Literal[
 log = structlog.get_logger(__name__)
 
 BUILTIN_TOOLSET: Final[str] = "agent_toolset_20260401"
+#: The tools `BUILTIN_TOOLSET` offers, frozen here like the reviewed fields: a
+#: built-in a later SDK adds is refused even for an opted-in routine until it
+#: is reviewed and listed.
+BUILTIN_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {"bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"}
+)
 MCP_TOOLSET: Final[str] = "mcp_toolset"
 CUSTOM_TOOL: Final[str] = "custom"
 
@@ -94,13 +103,14 @@ class ServerTool(NamedTuple):
 class CapabilityPolicy:
     """What one unattended entry point may keep beyond gated MCP tools."""
 
-    #: The sandbox toolset (bash, read, write, edit, …) and custom tools.
-    allow_builtins: Literal[False]
+    #: The sandbox toolset (bash, read, write, edit, …).
+    allow_builtins: bool
     #: Skills, which cannot be removed from a session once it exists.
     allow_skills: bool
 
 
-#: Built-ins are off for every unattended entry point, without an opt-in.
+#: Built-ins are off for every unattended entry point. Only a routine can be
+#: opted in, one at a time, by an admin (`capability_policy`).
 ENTRY_POINT_POLICY: Final[Mapping[UnattendedEntryPoint, CapabilityPolicy]] = {
     "watch": CapabilityPolicy(allow_builtins=False, allow_skills=False),
     "routine": CapabilityPolicy(allow_builtins=False, allow_skills=True),
@@ -114,9 +124,20 @@ ENTRY_POINT_POLICY: Final[Mapping[UnattendedEntryPoint, CapabilityPolicy]] = {
 _CLOSED: Final[CapabilityPolicy] = CapabilityPolicy(allow_builtins=False, allow_skills=False)
 
 
-def capability_policy(entry_point: UnattendedEntryPoint | None) -> CapabilityPolicy:
-    """The entry point's policy; a caller that names none gets nothing extra."""
-    return _CLOSED if entry_point is None else ENTRY_POINT_POLICY[entry_point]
+def capability_policy(
+    entry_point: UnattendedEntryPoint | None, *, routine_sandbox_tools: bool = False
+) -> CapabilityPolicy:
+    """The entry point's policy; a caller that names none gets nothing extra.
+
+    `routine_sandbox_tools` is the routine's own admin opt-in
+    (`Routine.sandbox_tools_enabled`). It turns built-ins on for the `routine`
+    entry point and is ignored for every other: watches, wakes, agent chat,
+    fleet workers, `daimon run` and checkpoints have no opt-in.
+    """
+    policy = _CLOSED if entry_point is None else ENTRY_POINT_POLICY[entry_point]
+    if entry_point == "routine" and routine_sandbox_tools:
+        return replace(policy, allow_builtins=True)
+    return policy
 
 
 def unattended_entry_point(origin: TurnContext) -> UnattendedEntryPoint:
@@ -823,13 +844,15 @@ async def constrain_capabilities(
     public_url: str | None,
     session_factory: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID | None,
+    allow_builtins: bool = False,
     allow_skills: bool = False,
     tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> ConstrainedSession:
     """The tools and servers `snapshot` may run with unattended. No provider call.
 
-    Refuses first (`require_allowed_capabilities`). Built-in and custom tools
-    are always disabled; with a `tool_allowlist` of
+    Refuses first (`require_allowed_capabilities`). Built-in tools are
+    disabled unless `allow_builtins`, and custom tools are always removed;
+    with a `tool_allowlist` of
     `ServerTool` pairs only those MCP tools stay, and every server no kept
     toolset names is dropped. Every MCP toolset left, Daimon's own included and
     with tool safety on or off, asks on its default and on every per-tool
@@ -842,7 +865,9 @@ async def constrain_capabilities(
     tools = [dict(tool) for tool in original.tools]
     servers = [dict(server) for server in original.mcp_servers]
     tools = [
-        _disabled_builtins(tool) if tool.get("type") == BUILTIN_TOOLSET else tool
+        _disabled_builtins(tool)
+        if tool.get("type") == BUILTIN_TOOLSET and not allow_builtins
+        else tool
         for tool in tools
         if tool.get("type") != CUSTOM_TOOL
     ]
@@ -972,18 +997,23 @@ async def _update(
 def capability_posture(
     posture: PolicyApproval,
     *,
+    allow_builtins: bool = False,
     tool_allowlist: frozenset[ServerTool] | None = None,
 ) -> PolicyApproval:
     """`posture`, refusing what `constrain_capabilities` took out of the session.
 
     A disabled tool should never pause, so this is the second lock: a
-    built-in or custom call (`server_name=None`) is always refused, and with
-    a `tool_allowlist` so is every unlisted call.
+    built-in or custom call (`server_name=None`) is refused unless
+    `allow_builtins` (a routine an admin opted in) and it names a reviewed
+    built-in (`BUILTIN_TOOL_NAMES`), so a custom tool's call is refused even
+    then. With a `tool_allowlist` so is every unlisted call.
     """
     decide = posture.decide
 
     async def constrained(call: ToolCall) -> ToolConfirmationResult:
-        if call.server_name is None:
+        if call.server_name is None and (
+            not allow_builtins or call.tool_name not in BUILTIN_TOOL_NAMES
+        ):
             return ToolConfirmationResult(
                 allow=False,
                 deny_message=(
@@ -992,7 +1022,8 @@ def capability_posture(
                 ),
             )
         if (
-            tool_allowlist is not None
+            call.server_name is not None
+            and tool_allowlist is not None
             and ServerTool(call.server_name, call.tool_name) not in tool_allowlist
         ):
             return ToolConfirmationResult(

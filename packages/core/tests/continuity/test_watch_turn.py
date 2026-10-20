@@ -638,3 +638,28 @@ async def test_watch_refuses_duplicate_server_toolsets_before_any_mutation(monke
         )
     projection.assert_not_awaited()
     update.assert_not_awaited()
+
+
+async def test_watch_cannot_be_opted_in_to_sandbox_tools():
+    """The per-routine sandbox opt-in never reaches a watch.
+
+    The shared policy ignores the flag for the watch entry point, the watch
+    path takes no such flag at all, and its posture refuses a native call.
+    """
+    import inspect
+
+    opted = capabilities.capability_policy("watch", routine_sandbox_tools=True)
+    assert opted.allow_builtins is False
+    assert opted.allow_skills is False
+    for entry in (
+        watch_turn.watch_capabilities,
+        watch_turn.validate_watch_snapshot,
+        watch_posture,
+    ):
+        assert not {"routine_sandbox_tools", "sandbox_tools", "allow_builtins"} & set(
+            inspect.signature(entry).parameters
+        )
+    decision = await watch_posture(ToolSafetyPolicy(enabled=True)).decide(
+        ToolCall(tool_use_id="tu_bash", server_name=None, tool_name="bash")
+    )
+    assert decision.allow is False

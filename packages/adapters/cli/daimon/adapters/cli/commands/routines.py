@@ -7,7 +7,9 @@ forthcoming NOT NULL flip, this command walks every routine whose
 into the row.
 
 Owner-DM creation is available to operators; interactive edits use chat tools
-and the adapters' `/routines` command.
+and the adapters' `/routines` command. `sandbox-tools` is the operator's
+switch for a routine's built-in sandbox tools, one routine or a confirmed list
+of them (the cutover), with a dry run.
 """
 
 from __future__ import annotations
@@ -22,7 +24,7 @@ import structlog
 import typer
 from anthropic import APIStatusError
 from daimon.adapters.cli.runtime import CliRuntime, build_runtime
-from daimon.core.authz import Action, Place, Surface, authorize, build_agent_ref
+from daimon.core.authz import Action, Place, Subject, Surface, authorize, build_agent_ref
 from daimon.core.config import DirectMessagePolicy, load_settings
 from daimon.core.cron import validated_next_slot
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag
@@ -33,12 +35,23 @@ from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.routine_sandbox import (
+    SandboxPin,
+    SandboxPinUnavailable,
+    current_pin,
+    pin_of,
+)
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
+from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.routines import (
+    DM_SANDBOX_REFUSAL,
+    PIN_UNAVAILABLE_REFUSAL,
     create_routine,
+    get_routine,
     list_routines_missing_agent_name,
+    set_sandbox_tools,
     update_routine,
     validate_dm_source,
 )
@@ -261,3 +274,123 @@ async def run_create_dm_routine(
             next_fire_at=next_fire,
         )
     console.print(f"Created routine {row.id}.")
+
+
+@routines_app.command("sandbox-tools")
+def sandbox_tools_command(
+    routine_ids: Annotated[list[uuid.UUID], typer.Argument(help="Routine ids to change.")],
+    tenant: Annotated[uuid.UUID, typer.Option("--tenant")],
+    off: Annotated[
+        bool, typer.Option("--off", help="Turn sandbox tools off instead of on.")
+    ] = False,
+    dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+) -> None:
+    """Turn built-in sandbox tools on (or --off) for each listed routine's own runs.
+
+    Operator only. Every id must name a routine in --tenant, or nothing is
+    changed. A routine already set that way is left alone, so re-running is
+    safe. Each change records the CLI operator and the time.
+    """
+    settings = load_settings()
+
+    async def run() -> None:
+        async with build_runtime(settings) as rt:
+            await run_sandbox_tools(
+                rt=rt,
+                console=Console(highlight=False),
+                tenant_id=tenant,
+                routine_ids=routine_ids,
+                enabled=not off,
+                dry_run=dry_run,
+            )
+
+    asyncio.run(run())
+
+
+async def run_sandbox_tools(
+    *,
+    rt: CliRuntime,
+    console: Console,
+    tenant_id: uuid.UUID,
+    routine_ids: list[uuid.UUID],
+    enabled: bool,
+    dry_run: bool,
+) -> None:
+    """Check every id first, then change each routine not already set, in one transaction."""
+    ids = list(dict.fromkeys(routine_ids))
+    state = "on" if enabled else "off"
+    async with rt.sessionmaker.begin() as session:
+        tenant = await get_tenant(session, tenant_id)
+        if tenant is None or tenant.archived_at is not None:
+            raise UserFacingError("Select an active tenant.")
+        rows = {rid: await get_routine(session, rid, tenant_id=tenant_id) for rid in ids}
+        missing = [str(rid) for rid, row in rows.items() if row is None]
+        if missing:
+            raise UserFacingError(
+                f"No routine in this tenant with id {', '.join(missing)}. Nothing was changed."
+            )
+        dms = [
+            str(rid)
+            for rid, row in rows.items()
+            if row is not None and row.destination_kind == "dm"
+        ]
+        if enabled and dms:
+            raise UserFacingError(f"{', '.join(dms)}: {DM_SANDBOX_REFUSAL}")
+        # An opt-in covers the agent version and environment each routine would
+        # run with now; one that can't be read refuses the whole list.
+        pins: dict[uuid.UUID, SandboxPin] = {}
+        if enabled:
+            unreadable: list[str] = []
+            for rid, row in rows.items():
+                assert row is not None
+                try:
+                    pins[rid] = await current_pin(
+                        rt.anthropic, rt.sessionmaker, row, default=rt.deployment_default
+                    )
+                except SandboxPinUnavailable:
+                    unreadable.append(str(rid))
+            if unreadable:
+                raise UserFacingError(f"{', '.join(unreadable)}: {PIN_UNAVAILABLE_REFUSAL}")
+        pending = [
+            rid
+            for rid, row in rows.items()
+            if row is not None
+            and (row.sandbox_tools_enabled != enabled or (enabled and pin_of(row) != pins[rid]))
+        ]
+        for rid in ids:
+            row = rows[rid]
+            label = (
+                "already " + state
+                if rid not in pending
+                else "re-approve current agent and environment"
+                if enabled and row is not None and row.sandbox_tools_enabled
+                else "turn " + state
+            )
+            pinned = pins.get(rid)
+            if pinned is not None:
+                label += (
+                    f" (agent {pinned.agent_id} version {pinned.agent_version}, environment "
+                    f"{pinned.environment_id} as of {pinned.environment_updated_at.isoformat()})"
+                )
+            console.print(f"{rid}: {label}")
+        if dry_run:
+            console.print(f"Dry run: {len(pending)} routine(s) would change; nothing written.")
+            return
+        principal = await get_or_create_cli_principal(
+            session, tenant_id=tenant_id, os_user=rt.settings.cli.local_user
+        )
+        for rid in pending:
+            await set_sandbox_tools(
+                session,
+                rid,
+                tenant_id=tenant_id,
+                enabled=enabled,
+                set_by=str(principal.id),
+                # Whoever holds the database credentials is the operator.
+                actor=Subject(is_admin=True),
+                via="cli",
+                pin=pins.get(rid),
+            )
+    console.print(
+        f"Sandbox tools {state} for {len(pending)} routine(s); {len(ids) - len(pending)} unchanged."
+    )

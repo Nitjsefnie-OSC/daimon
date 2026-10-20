@@ -1,4 +1,4 @@
-"""Routines tools: create / list / get / update / delete.
+"""Routines tools: create / list / get / update / delete, and an admin's sandbox opt-in.
 
 ``register_routines_tools(mcp, runtime)`` wires the ``@mcp.tool`` closures for
 this group; each closure delegates to a module-private ``_*_impl`` function
@@ -52,12 +52,22 @@ from daimon.adapters.mcp.tools.teams._directory import (
     split_thread,
 )
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.authz import (
+    Action,
+    AgentRef,
+    Place,
+    Subject,
+    Surface,
+    authorize,
+    build_agent_ref,
+    build_subject,
+)
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.discord_membership import verify_discord_source
 from daimon.core.errors import StoreError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.membership_subject import resolve_subject
 from daimon.core.permissions import (
     any_agent_rules,
     any_own_readers,
@@ -66,10 +76,11 @@ from daimon.core.permissions import (
     limiting_ids_at,
 )
 from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.routine_sandbox import SandboxPinUnavailable, current_pin
 from daimon.core.routines import routine_for_reader
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import ScopeContext
-from daimon.core.security_audit import record_authz_denial
+from daimon.core.security_audit import record_authz_denial, record_policy_decision
 from daimon.core.stores import routines as routines_store
 from daimon.core.stores.access_policy import AccessPolicyUnreadable, load_access_policy
 from daimon.core.stores.direct_messages import DM_SCOPE_PREFIX, get_conversation_by_scope
@@ -825,6 +836,7 @@ async def _update_routine_impl(
             destination_id=destination_id,
             clear_destination=clear_destination,
             channel_id=new_destination_channel_id,
+            edited_by=str(auth.account_id),
         )
         if updated is None:
             raise ToolError("routine not found")
@@ -848,6 +860,101 @@ async def _delete_routine_impl(
         if not deleted:
             raise ToolError("routine not found")
     return DeleteResult(deleted=True, routine_id=str(routine_id))
+
+
+_SANDBOX_PERSON_ONLY = (
+    "A routine's sandbox tools are changed by the operator with "
+    "`daimon routines sandbox-tools`, the supported way today. This tool does not "
+    "accept an agent, an agent in a conversation, an operator token or a legacy "
+    "token. Do not retry."
+)
+_SANDBOX_ADMIN_ONLY = (
+    "A routine's sandbox tools are changed by the operator with "
+    "`daimon routines sandbox-tools`, the supported way today. This tool accepts "
+    "only a live Discord server admin's own token, which no Daimon surface issues "
+    "yet; the routine's owner cannot. Do not retry."
+)
+
+
+async def _sandbox_admin(runtime: McpRuntime, auth: AuthIdentity) -> Subject:
+    """The caller, only if they are a person and a Discord server admin right now.
+
+    An allowlist, not a denylist: the token must carry a jti (no legacy
+    vault token from before the sweep), must not be an operator token, an
+    agent key or an agent in a conversation, and its holder must be a
+    verified member and admin of the Discord server on a fresh membership
+    read. Any other platform fails closed, as `watches.fresh_admin` does; the
+    operator uses the CLI there.
+    """
+    if (
+        auth.token_jti is None
+        or auth.is_operator
+        or auth.agent_id is not None
+        or auth.chat_agent_id is not None
+    ):
+        record_authz_denial(Action.SET_ROUTINE_SANDBOX_TOOLS, "person_only")
+        raise ToolError(_SANDBOX_PERSON_ONLY)
+    admin = False
+    if auth.is_admin and auth.platform == "discord" and auth.platform_user_id is not None:
+        live = await resolve_subject(
+            runtime.session_factory,
+            runtime.membership_resolver,
+            tenant_id=auth.tenant_id,
+            user_id=auth.platform_user_id,
+            require_fresh=True,
+        )
+        admin = live.is_admin and live.verified_membership is True
+    subject = build_subject(is_admin=admin, platform_user_id=auth.platform_user_id)
+    decision = authorize(
+        TenantAccessPolicy(), subject=subject, action=Action.SET_ROUTINE_SANDBOX_TOOLS
+    )
+    if not decision:
+        record_authz_denial(Action.SET_ROUTINE_SANDBOX_TOOLS, decision.reason)
+        raise ToolError(_SANDBOX_ADMIN_ONLY)
+    record_policy_decision(Action.SET_ROUTINE_SANDBOX_TOOLS, "allow")
+    return subject
+
+
+async def _set_routine_sandbox_tools_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    routine_id: UUID,
+    enabled: bool,
+) -> RoutineRow:
+    actor = await _sandbox_admin(runtime, auth)
+    caller = await load_isolation_view(runtime, auth)
+    async with runtime.session_factory() as session:
+        row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
+    if row is None or not _sees_routine(caller, row):
+        raise ToolError("routine not found")
+    # The opt-in covers the agent version and environment the routine would
+    # run with now; the scheduler keeps built-ins off once either changes.
+    pin = None
+    if enabled:
+        try:
+            pin = await current_pin(
+                runtime.client, runtime.session_factory, row, default=runtime.deployment_default
+            )
+        except SandboxPinUnavailable as exc:
+            raise ToolError(routines_store.PIN_UNAVAILABLE_REFUSAL) from exc
+    async with runtime.session_factory.begin() as session:
+        try:
+            result = await routines_store.set_sandbox_tools(
+                session,
+                routine_id,
+                tenant_id=auth.tenant_id,
+                enabled=enabled,
+                set_by=str(auth.account_id),
+                actor=actor,
+                via="mcp",
+                pin=pin,
+            )
+        except StoreError as exc:
+            raise ToolError(str(exc)) from exc
+    if result is None:
+        raise ToolError("routine not found")
+    return _routine_for_reader(auth, result[0])
 
 
 def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -992,3 +1099,27 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     async def delete_routine(ctx: Context, routine_id: UUID) -> DeleteResult:  # pyright: ignore[reportUnusedFunction]
         """Delete a routine (hard delete, tenant-scoped)."""
         return await _delete_routine_impl(runtime, await _auth(ctx), routine_id=routine_id)
+
+    @mcp.tool(tags={"admin"})
+    async def set_routine_sandbox_tools(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context, routine_id: UUID, enabled: bool
+    ) -> RoutineRow:
+        """Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
+        for one routine's own scheduled runs. Admin only.
+
+        They are off for every unattended run by default. The supported way today is the
+        operator's ``daimon routines sandbox-tools``. This tool accepts only a live Discord
+        server admin's own token, re-checked against the server on each call; no Daimon
+        surface issues such a token yet, and the tool is kept for a future admin surface.
+        Owning the routine is not enough, and agent keys, agents in a conversation, operator
+        tokens, legacy tokens and other platforms are refused. DM routines cannot be opted
+        in. An opt-in covers exactly the routine's current agent version and environment:
+        once either changes, runs go without built-ins and the opt-in is cleared. Each
+        change records who made it and when, and ``get_routine``/``list_routines`` show it
+        as ``sandbox_tools_enabled``. It takes effect from the routine's next run. Setting
+        the value a routine already has changes nothing. Timers, watches, agent chat, fleet
+        workers, ``daimon run`` and checkpoints cannot be opted in.
+        """
+        return await _set_routine_sandbox_tools_impl(
+            runtime, await _auth(ctx), routine_id=routine_id, enabled=enabled
+        )

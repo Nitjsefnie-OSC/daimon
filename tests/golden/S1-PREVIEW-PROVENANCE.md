@@ -35,3 +35,16 @@ after waiting. The interrupt remains unconditional after authorization.
 These recordings supersede the byte-identical MCP statement above for this
 follow-up only. No other recording, projection or oracle rule changes.
 Both legacy and mux replay against the same two updated recordings.
+
+## Routine sandbox opt-in (2026-10-20)
+
+The per-routine sandbox opt-in adds one keyword to the scheduler's
+`headless_runner.run_turn` call: `sandbox`, the routine's recorded opt-in
+(`routine_sandbox.RoutineSandbox`: the agent version and environment revision
+the admin approved, and the callback that clears a drifted opt-in), or null.
+`scheduler_run.json` and `sealed_channel.json` were re-recorded with the
+documented legacy runner (`--turn-path legacy --regen scheduler_run
+sealed_channel`); each gains only `"sandbox": null` in that call's recorded
+arguments, since neither routine is opted in. No request, effect or database
+fact changes, and both recordings replay on the legacy and mux paths. An
+earlier revision of this change recorded `"sandbox_tools": false` instead.

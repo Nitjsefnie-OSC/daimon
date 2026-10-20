@@ -38,7 +38,8 @@ MAIN = "0110_microsoft_accounts"
 PREVIOUS_HEAD = "0117_clear_legacy_routine_output"
 LEAD_HEAD = "0118_lead_intake"
 WATCH_HEAD = "0119_watches"
-HEAD = "0120_watch_polling"
+WATCH_POLLING = "0120_watch_polling"
+HEAD = "0121_routine_sandbox_tools"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
@@ -50,8 +51,19 @@ CHAIN = [
     PREVIOUS_HEAD,
     LEAD_HEAD,
     WATCH_HEAD,
+    WATCH_POLLING,
     HEAD,
 ]
+# Added by HEAD, so absent from every older revision the chain is checked at.
+SANDBOX_COLUMNS = {
+    "sandbox_tools_enabled",
+    "sandbox_tools_set_by",
+    "sandbox_tools_set_at",
+    "sandbox_agent_id",
+    "sandbox_agent_version",
+    "sandbox_environment_id",
+    "sandbox_environment_updated_at",
+}
 # The preview chain before the ID repair: each legacy revision ran the
 # canonical script under its own ID and parent. The sha256 pins the bytes
 # preview databases ran, so an edit to a deployed canonical script fails here
@@ -92,6 +104,8 @@ TABLES = {
     "lead_opportunities",
     "lead_mailbox_scans",
     "lead_mailbox_messages",
+    # Added by HEAD, with its index and via check; compared only there.
+    "routine_sandbox_history",
 }
 
 
@@ -138,9 +152,11 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
 
     compared_tables = (
         TABLES
-        if expected in (LEAD_HEAD, WATCH_HEAD, HEAD)
+        if expected in (LEAD_HEAD, WATCH_HEAD, WATCH_POLLING, HEAD)
         else {name for name in TABLES if not name.startswith("lead_")}
     )
+    if expected != HEAD:
+        compared_tables = compared_tables - {"routine_sandbox_history"}
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
         return kind != "table" or name in compared_tables
@@ -152,6 +168,8 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         _reflected: bool,
         _compare_to: object,
     ) -> bool:
+        if kind == "column" and expected != HEAD:
+            return name not in SANDBOX_COLUMNS
         return kind != "table" or name in compared_tables
 
     migration_context = MigrationContext.configure(
@@ -161,6 +179,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     inspector = inspect(connection)
     constraints = {c["name"] for c in inspector.get_check_constraints("routines")}
     assert {"ck_routines_destination_kind", "ck_routines_dm_owner"} <= constraints
+    if expected == HEAD:
+        # compare_metadata does not compare CHECK constraints.
+        [via] = [
+            c
+            for c in inspector.get_check_constraints("routine_sandbox_history")
+            if c["name"] == "ck_routine_sandbox_history_via"
+        ]
+        assert all(f"'{name}'" in via["sqltext"] for name in ("mcp", "cli", "edit"))
     # The usage table retains legacy repair columns intentionally absent from
     # the ORM. Compare only the two columns introduced by this chain.
     usage_columns = {c["name"]: c for c in inspector.get_columns("usage_reconcile_progress")}
@@ -343,8 +369,13 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 is False
             )
             sync.commit()
+            # The sandbox opt-in reverses; the watch evidence below it does not.
+            command.downgrade(config, WATCH_POLLING)
+            _assert_head(sync, WATCH_POLLING)
             with pytest.raises(NotImplementedError, match="Watch evidence"):
                 command.downgrade(config, LEAD_HEAD)
+            _assert_head(sync, WATCH_POLLING)
+            command.upgrade(config, "head")
             _assert_head(sync)
 
         await connection.run_sync(exercise)

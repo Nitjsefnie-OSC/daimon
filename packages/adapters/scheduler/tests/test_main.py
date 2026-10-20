@@ -3225,14 +3225,42 @@ async def test_legacy_public_routines_still_fire_with_unknown_creation_source(
     await client.close()
 
 
+@pytest.mark.parametrize("sandbox", ["default", "opted_in", "agent_changed", "environment_changed"])
 @pytest.mark.parametrize("agent_posted", [False, True])
 async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
-    db_session, db_session_factory, monkeypatch, agent_posted
+    db_session, db_session_factory, monkeypatch, agent_posted, sandbox
 ):
-    """Sandbox tools are disabled before a routine runs, so it produces no files."""
+    """Sandbox tools are disabled before a routine runs, so it produces no files.
+
+    Only a routine an admin opted in keeps them on the wire at send time, and
+    only while the run's agent version and environment are the ones the
+    admin approved. After an edit to either, the run goes ahead without them
+    and the opt-in is cleared.
+    """
+    from dataclasses import replace
+    from datetime import timedelta
+
+    from daimon.core.authz import Subject
     from daimon.core.routine_files import decode_payload
+    from daimon.core.stores.domain import SandboxPin
+    from daimon.core.stores.routines import set_sandbox_tools
     from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
     from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+
+    environment = ma_environment(id="env")
+    approved = SandboxPin(
+        agent_id="ag",
+        agent_version=ma_session(agent_id="ag").agent.version,
+        environment_id="env",
+        environment_updated_at=datetime.fromisoformat(environment.updated_at),
+    )
+    pin = {
+        "agent_changed": replace(approved, agent_version=approved.agent_version - 1),
+        "environment_changed": replace(
+            approved, environment_updated_at=approved.environment_updated_at - timedelta(hours=1)
+        ),
+    }.get(sandbox, approved)
+    builtins_on = sandbox == "opted_in"
 
     tenant = await make_tenant(db_session, platform="slack")
     await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
@@ -3248,6 +3276,19 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
         destination_kind="channel",
         destination_id="C123",
     )
+    if sandbox != "default":
+        result = await set_sandbox_tools(
+            db_session,
+            row.id,
+            tenant_id=tenant.id,
+            enabled=True,
+            pin=pin,
+            set_by="admin",
+            actor=Subject(is_admin=True),
+            via="cli",
+        )
+        assert result is not None
+        row = result[0]
     await db_session.commit()
     router = MARouter()
     snapshot = ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(
@@ -3269,8 +3310,8 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
 
     def send_event(request, match):
         [builtins] = snapshot["agent"]["tools"]
-        assert builtins["default_config"]["enabled"] is False
-        assert all(config["enabled"] is False for config in builtins["configs"])
+        assert builtins["default_config"]["enabled"] is builtins_on
+        assert all(config["enabled"] is builtins_on for config in builtins["configs"])
         return httpx.Response(200, json={"data": None})
 
     router.add("POST", r"/v1/sessions/[^/]+$", update_session)
@@ -3282,7 +3323,7 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
     router.add(
         "GET",
         r"/v1/environments/([^/]+)",
-        lambda r, m: httpx.Response(200, json=ma_environment(id="env").model_dump(mode="json")),
+        lambda r, m: httpx.Response(200, json=environment.model_dump(mode="json")),
     )
     router.add(
         "POST",
@@ -3406,3 +3447,7 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
     assert payload.text == ("" if agent_posted else "Here is the report.")
     assert payload.files == []
     assert after.last_result_tail == "Here is the report."
+    # A drifted opt-in is cleared, by the fire, without touching the run's result.
+    assert after.sandbox_tools_enabled is (sandbox == "opted_in")
+    if sandbox in ("agent_changed", "environment_changed"):
+        assert after.sandbox_tools_set_by == "agent_changed"

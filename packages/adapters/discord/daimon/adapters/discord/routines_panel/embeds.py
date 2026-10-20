@@ -101,6 +101,13 @@ def build_panel_container(
         timeline_body += f"\nStatus: {routine.delivery_status}"
     if routine.delivery_note is not None:
         timeline_body += "\n" + routine.delivery_note.replace("_", " ")
+    # An admin's per-routine opt-in; off for every routine unless set.
+    if routine.destination_kind == "dm":
+        timeline_body += "\n\nSandbox tools: off (DM routines can't use sandbox tools)"
+    elif routine.sandbox_tools_enabled:
+        timeline_body += "\n\nSandbox tools: on (admin opt-in)"
+    else:
+        timeline_body += "\n\nSandbox tools: off"
 
     # Accent: only non-blurple states carry the color bar
     accent: int | None = color_int if color_int != theme.COLOR_BLURPLE else None

@@ -163,7 +163,9 @@ The platform surfaces differ, and the difference is deliberate:
   chat, which calls `create_routine`
   (`packages/adapters/discord/daimon/adapters/discord/routines_panel/`).
 - The CLI has no routine CRUD. `daimon routines backfill-agent-names` is an
-  admin migration helper and nothing else.
+  admin migration helper, `daimon routines create --destination dm` creates
+  an owner-DM routine, and `daimon routines sandbox-tools` turns a routine's
+  built-in sandbox tools on or off (see [Sandbox tools](#sandbox-tools)).
 
 ## How the scheduler picks it up
 
@@ -265,9 +267,8 @@ routine refuses, and its card-only actions: a routine's session asks on a
 backend switch and Microsoft mail and invites, policy on or off, and on
 Microsoft file changes with it on, and the routine refuses them. A routine
 cannot use built-in sandbox tools (bash, file reads and edits, web fetch
-and the rest) or custom tools. This applies to every unattended run, with
-no opt-in, so routines and other unattended runs cannot generate files
-using sandbox tools. A routine whose agent coordinates other agents (`multiagent`), or whose session
+and the rest) or custom tools unless an admin has opted that routine in
+(see [Sandbox tools](#sandbox-tools)); custom tools stay off even then. A routine whose agent coordinates other agents (`multiagent`), or whose session
 carries a capability this release does not know, is refused before its
 message and records `AdmissionDenied: backend_unsupported`; see
 [permissions.md](permissions.md#what-an-unattended-session-may-carry). See
@@ -677,10 +678,83 @@ refuses the result; no destination post or private fallback is authorized
 by stale evidence. User exceptions and current server admins retain their
 invoker-policy bypass; destination and agent restrictions remain separate.
 
+### Sandbox tools
+
+Built-in sandbox tools are off for every routine run by default. They can be
+turned on for one channel or thread routine at a time, for that routine's own
+scheduled runs only. DM routines cannot be opted in: they run as the owner's
+private DM turn. Owning a routine is not enough to opt it in.
+
+An opt-in covers exactly the agent and environment the routine runs with when
+it is made. **Built-ins are enabled for a run only when the run's agent
+version and environment are exactly the ones recorded at opt-in; any mismatch
+or missing record keeps them off.** Opting in records the routine's agent id
+and version and its environment's id and revision (`updated_at`), and an
+opt-in is refused when they can't be read. At each fire the scheduler compares
+the run's own session with that record. After anyone edits the agent (its
+prompt, MCP servers, tools, skills or anything else that makes a new version)
+or the environment, or the routine resolves to a different one, the next run
+goes ahead without built-ins, the mismatch is logged, and the opt-in is
+cleared with an `edit` history row by `agent_changed`. The operator then
+re-approves the routine as it now is by running the command again.
+
+The record covers only what Managed Agents versions: the agent and its
+environment. It does not cover what Daimon attaches to a run, such as the
+agent's `.env` credentials, its repository binding, vault credentials or the
+channel's skills, so changing one of those does not turn the opt-in off. After
+changing any of them for an opted-in routine's agent or channel, re-review the
+routine and turn its sandbox tools off if the change is not wanted under bash.
+The CLI prints the agent version and environment it records for each routine,
+including on `--dry-run`.
+
+- **Operator CLI**, the supported way today, for one routine or a confirmed list of
+  them:
+
+  ```bash
+  daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID [ROUTINE_ID ...] --dry-run
+  daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID [ROUTINE_ID ...]
+  daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID --off
+  ```
+
+  Every id must name a routine in that tenant, none may be a DM routine when
+  turning tools on, and each routine's agent and environment must be readable,
+  or nothing changes. A routine already set that way, for the same agent
+  version and environment, is left alone, so the command can be re-run; one
+  whose agent or environment changed is re-approved as it now is. `--dry-run`
+  prints what would change and writes nothing.
+- **The `set_routine_sandbox_tools` MCP tool** (`routine_id`, `enabled`)
+  accepts only a live Discord server admin's own token, re-checked against the
+  server on every call. No Daimon surface issues such a token yet; the tool is
+  kept for a future admin surface. It refuses agent keys, agents acting in a
+  conversation, operator tokens, legacy tokens without a token id, and Slack or
+  Teams callers.
+
+Each change sets `sandbox_tools_set_by` (the account or CLI principal) and
+`sandbox_tools_set_at` on the routine and appends a row to
+`routine_sandbox_history` (routine id, before and after, who, when, and
+whether it came from `mcp`, `cli` or an `edit`). An edit that changes what was
+approved, meaning the routine's agent, trigger message, destination or budget
+channel (including turning it into a DM routine), turns the opt-in off and is
+logged as `edit`. Changing the schedule, pausing or resuming keeps it. When an
+account is erased for privacy, its id in `sandbox_tools_set_by` and in the
+history becomes `erased`; when, which routine and how are kept.
+`get_routine` and `list_routines` return `sandbox_tools_enabled`, and the
+Discord `/routines` panel shows "Sandbox tools: on (admin opt-in)",
+"Sandbox tools: off", or for a DM routine "off (DM routines can't use sandbox
+tools)".
+
+A change takes effect from the routine's next run. A run already in progress
+keeps the setting it started with, and because the change moves the routine
+to a new revision, that run's result is then neither recorded nor delivered.
+
+The opt-in reaches only the routine entry point. Watches, timers and
+worker-finished wakes, agent chat, fleet workers, `daimon run` and workspace
+checkpoints keep built-ins off with no opt-in.
+
 ### Generated files
 
-Routines cannot generate files with sandbox tools because those tools are
-disabled for every unattended run, with no opt-in. The delivery pipeline
+Routines cannot generate files with sandbox tools unless an admin opted the
+routine in ([Sandbox tools](#sandbox-tools)). The delivery pipeline
 still supports files already present in a session or queued in an outbox.
 
 After a successful run, Daimon collects any downloadable session outputs with

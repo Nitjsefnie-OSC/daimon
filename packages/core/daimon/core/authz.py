@@ -99,6 +99,9 @@ class Action(StrEnum):
     SET_AGENT_TOOL_RULE = "set_agent_tool_rule"
     # Set or clear one agent's tool rule for a parent channel.
     SET_CHANNEL_AGENT_TOOL_RULE = "set_channel_agent_tool_rule"
+    # Turn built-in sandbox tools on or off for one routine's own runs:
+    # current human admins only, never the routine's owner as such.
+    SET_ROUTINE_SANDBOX_TOOLS = "set_routine_sandbox_tools"
     # Hand a thread's conversation to another agent (`Place` is the thread).
     # Writers and the invoker allowlist as START_TURN, then RUN_AGENT on the
     # handoff surface, then who may bring that agent here: anyone when it is
@@ -552,6 +555,9 @@ def _decide(policy: TenantAccessPolicy, req: Request) -> Decision:
         return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
 
     if req.action is Action.SET_CHANNEL_AGENT_TOOL_RULE:
+        return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
+
+    if req.action is Action.SET_ROUTINE_SANDBOX_TOOLS:
         return ALLOW if subject.is_admin and not subject.via_agent_key else _deny("admin_required")
 
     if req.action in (Action.SET_CHANNEL_BUDGET, Action.SET_CHANNEL_SKILLS):

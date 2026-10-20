@@ -181,23 +181,50 @@ tool safety off, included. Each call therefore reaches the unattended decider,
 which answers as described above, with the agent's and the channel's rules:
 Daimon's ordinary tools and, with tool safety off, ordinary third-party calls
 are still allowed. Built-in sandbox tools (bash, file
-reads and edits, web fetch and the rest) and custom tools are disabled for
-every unattended entry point, with no opt-in. These runs cannot generate
-files using sandbox tools:
+reads and edits, web fetch and the rest) are disabled for every unattended
+entry point, and custom tools are removed. The one exception is a scheduled
+routine that an admin has opted in:
 
 | Entry point | Built-in tools | Skills |
 | --- | --- | --- |
-| Watches | off | denied |
-| Scheduled routines | off | allowed |
-| Timers and worker-finished wakes | off | allowed |
-| Fleet workers | off | allowed |
-| Agent chat | off | allowed |
-| `daimon run` | off | allowed |
-| Workspace checkpoints | off | allowed |
+| Watches | off, no opt-in | denied |
+| Scheduled routines | off, unless an admin opted that routine in | allowed |
+| Timers and worker-finished wakes | off, no opt-in | allowed |
+| Fleet workers | off, no opt-in | allowed |
+| Agent chat | off, no opt-in | allowed |
+| `daimon run` | off, no opt-in | allowed |
+| Workspace checkpoints | off, no opt-in | allowed |
 
-The session's built-in toolset is
-disabled (every tool `enabled: false`), custom tools are removed, and the
-decider refuses any built-in call that still pauses.
+With built-ins off, the session's built-in toolset is
+disabled (every tool `enabled: false`) and the decider refuses any built-in
+call that still pauses. An opted-in routine keeps its built-in toolset as the
+agent defines it; custom tools are still removed.
+
+### Routine sandbox opt-in
+
+The operator CLI, `daimon routines sandbox-tools`, is the supported way to opt
+a routine in today. The `set_routine_sandbox_tools` MCP tool accepts only a
+live Discord server admin's own token, re-checked against the server on every
+call; no Daimon surface issues such a token yet, and the tool is kept for a
+future admin surface. It refuses agent keys, agents acting in a conversation
+on an admin's behalf, operator tokens, legacy tokens without a token id, and
+Slack or Teams callers, and owning the routine is not enough. DM routines
+cannot be opted in.
+
+An opt-in covers exactly what was approved: built-ins are enabled for a run
+only when the run's agent version and environment are exactly the ones
+recorded at opt-in, and any mismatch or missing record keeps them off. An edit
+to the agent or its environment by anyone allowed to configure it therefore
+turns the opt-in off at the next run, as does an edit to the routine's agent,
+trigger message, destination or budget channel. Every change is recorded with
+who made it, when, the routine id and the agent version and environment it
+covers (`routine_sandbox_history`). Routine status shows the current setting.
+The record covers the Managed Agents agent version and environment only, not
+Daimon-side attachments (the agent's `.env`, repository binding, vault
+credentials or channel skills); an admin should re-review an opted-in routine
+after changing those.
+The opt-in applies to that routine's own scheduled runs only. See
+[routines.md](routines.md#sandbox-tools).
 
 A refused routine records `AdmissionDenied: backend_unsupported` as its
 result. Agent chat answers with a tool error, `daimon run` exits with the

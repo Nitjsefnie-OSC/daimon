@@ -231,6 +231,17 @@ class UnattendedRequester(BaseModel):
     role_ids: tuple[str, ...] = ()
 
 
+@dataclass(frozen=True)
+class SandboxPin:
+    """The agent version and environment revision an admin's routine opt-in covers."""
+
+    agent_id: str
+    agent_version: int
+    environment_id: str
+    #: Environments are edited in place; their `updated_at` is their revision.
+    environment_updated_at: datetime
+
+
 class RoutineRow(BaseModel):
     model_config = ConfigDict(from_attributes=True, frozen=True)
 
@@ -263,6 +274,15 @@ class RoutineRow(BaseModel):
     source_provenance_known: bool = False
     source_channel_id: str | None = None
     source_thread_id: str | None = None
+    #: An admin opted this routine's own runs in to built-in sandbox tools.
+    sandbox_tools_enabled: bool = False
+    sandbox_tools_set_by: str | None = None
+    sandbox_tools_set_at: datetime | None = None
+    #: The agent version and environment revision the opt-in covers.
+    sandbox_agent_id: str | None = None
+    sandbox_agent_version: int | None = None
+    sandbox_environment_id: str | None = None
+    sandbox_environment_updated_at: datetime | None = None
     created_at: datetime
     updated_at: datetime
 
