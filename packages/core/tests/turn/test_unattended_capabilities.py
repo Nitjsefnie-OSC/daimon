@@ -975,3 +975,60 @@ def test_telemetry_is_frozen_like_every_other_node(path: str, value: object) -> 
     session = _mutated(lambda s: (_with_telemetry(s), change(s)))
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
         require_allowed_capabilities(session)
+
+
+def _private_targets(session: BetaManagedAgentsSession) -> dict[str, object]:
+    toolset = session.agent.tools[1]
+    assert toolset.type == "mcp_toolset"
+    return {
+        "session": session,
+        "agent": session.agent,
+        "model": session.agent.model,
+        "skill": session.agent.skills[0],
+        "server": session.agent.mcp_servers[0],
+        "tool": toolset,
+        "default_config": toolset.default_config,
+        "config": toolset.configs[0],
+        "policy": toolset.configs[0].permission_policy,
+        "resource": session.resources[0],
+        "stats": session.stats,
+        "usage": session.usage,
+        "cache_creation": session.usage.cache_creation,
+        "outcome": session.outcome_evaluations[0],
+    }
+
+
+def _private_session() -> BetaManagedAgentsSession:
+    return _mutated(
+        lambda s: (
+            _with_telemetry(s),
+            s["agent"]["skills"].append({"type": "custom", "skill_id": "skill_1", "version": "1"}),
+            s["resources"].append(dict(_FILE)),
+        )
+    )
+
+
+@pytest.mark.parametrize("name", ["_future_execution_capability", "__future", "_request_ids"])
+@pytest.mark.parametrize("level", list(_private_targets(_private_session())))
+def test_private_instance_attributes_are_refused_at_every_level(level: str, name: str) -> None:
+    """Ported from the watches review: only the SDK's own `_request_id` is allowed."""
+    session = _private_session()
+    require_allowed_capabilities(session, allow_skills=True)
+    object.__setattr__(_private_targets(session)[level], name, False)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(session, allow_skills=True)
+
+
+def test_the_sdk_request_id_is_the_one_private_attribute_allowed() -> None:
+    from anthropic._models import add_request_id  # pyright: ignore[reportPrivateImportUsage]
+
+    session = _private_session()
+    add_request_id(session, "req_1")
+    require_allowed_capabilities(session, allow_skills=True)
+    object.__setattr__(session, "_request_id", {"tools": True})
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(session, allow_skills=True)
+    pydantic_private = _private_session()
+    object.__setattr__(pydantic_private.agent, "__pydantic_private__", {"_tools": True})
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(pydantic_private, allow_skills=True)

@@ -158,6 +158,8 @@ the turn, before anything is sent or changed, when the session:
   toolset's default and per-tool settings, and their permission policies.
   The session's telemetry (timing, token usage and its cache creation,
   outcome evaluations) is held to a reviewed schema the same way.
+  A private attribute on any part of the session is refused too; only the
+  request ID the SDK records on the response it returns is allowed.
   An unknown field is refused even when it is empty, and so is one a newer
   SDK has started to parse. A known field must also hold its reviewed shape:
   a setting that should be a word, number or true/false is refused when it

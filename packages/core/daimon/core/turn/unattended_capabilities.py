@@ -192,22 +192,56 @@ def _refuse() -> NoReturn:
     raise AdmissionDenied(reason="backend_unsupported")
 
 
+#: The one private attribute the SDK sets, on the response it returns.
+_REQUEST_ID: Final[str] = "_request_id"
+
+
 def _only(value: object, names: frozenset[str]) -> None:
     """Refuse `value` unless it is a parsed model carrying only `names`.
 
     Counts the fields the SDK declares (set or not), the response's extras
     and anything else on the instance, so neither a new provider key nor a
-    newly parsed SDK field passes unreviewed.
+    newly parsed SDK field passes unreviewed. Private attributes are checked
+    by `_no_private_attributes`, over the whole snapshot.
     """
     if not isinstance(value, BaseModel):
         _refuse()
     present = (
         set(type(value).model_fields)
         | set(value.model_extra or {})
-        | {name for name in vars(value) if not name.startswith("_")}
+        | {name for name in vars(value) if name != _REQUEST_ID}
     )
     if present - names:
         _refuse()
+
+
+def _no_private_attributes(value: object) -> None:
+    """Refuse any private or dunder attribute on any model in `value`.
+
+    Walks every parsed model, list and dict under the snapshot, opaque
+    fields included. Only the SDK's `_request_id` (a string, or None) is
+    allowed, and pydantic's own private storage must be empty.
+    """
+    if isinstance(value, BaseModel):
+        if value.__pydantic_private__:
+            _refuse()
+        attributes = vars(value)
+        request_id = attributes.get(_REQUEST_ID)
+        if request_id is not None and not isinstance(request_id, str):
+            _refuse()
+        if any(name.startswith("_") and name != _REQUEST_ID for name in attributes):
+            _refuse()
+        for name, entry in attributes.items():
+            if name != _REQUEST_ID:
+                _no_private_attributes(entry)
+        for entry in (value.model_extra or {}).values():
+            _no_private_attributes(entry)
+    elif isinstance(value, list | tuple):
+        for entry in cast("list[object] | tuple[object, ...]", value):
+            _no_private_attributes(entry)
+    elif isinstance(value, dict):
+        for entry in cast("dict[object, object]", value).values():
+            _no_private_attributes(entry)
 
 
 # Value shapes for the same nodes, checked on the snapshot's raw provider
@@ -437,6 +471,7 @@ def require_allowed_capabilities(
     and objects and lists are checked all the way down.
     """
     _only(snapshot, _SESSION)
+    _no_private_attributes(snapshot)
     if not _SESSION_SHAPE(snapshot.model_dump(mode="json", warnings=False)):
         _refuse()
     _only(snapshot.stats, _STATS)

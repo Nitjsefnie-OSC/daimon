@@ -42,6 +42,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - An unattended session's telemetry (timing, token usage and cache creation, outcome evaluations) must match its reviewed schema; a new or reshaped field there is refused like one anywhere else in the session.
 
+- An unattended session carrying a private attribute at any level is refused; only the SDK's own request ID is allowed.
+
 - Origin-based MCP actions require the signed grant of the calling session.
   Routines and timers cannot borrow a concurrent human origin, and empty origin
   IDs refuse. Human handoffs retain their approval surfaces.
