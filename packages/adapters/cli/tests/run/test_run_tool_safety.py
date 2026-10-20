@@ -9,20 +9,22 @@ built-in exemption never covers it.
 from __future__ import annotations
 
 import json
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from contextlib import asynccontextmanager
 from typing import Any
 
 import httpx
 import pytest
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.adapters.cli.run import command as cmd_mod
 from daimon.adapters.cli.runtime import CliRuntime
 from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings, Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, sse_response
-from daimon.testing.ma_models import ma_agent, ma_session
+from daimon.testing.ma_models import ma_agent, ma_session, with_coordinator, with_hidden_capability
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -76,14 +78,19 @@ class _Session:
         self.servers = servers
         self.metadata: dict[str, str] = {}
         self.wire: list[tuple[str, Any]] = []
+        self.unconstrainable: (
+            Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession] | None
+        ) = None
 
     def model(self) -> dict[str, Any]:
-        return ma_session(
+        snapshot = ma_session(
             id=_SESSION,
             agent=ma_agent(id="ag_cli", tools=self.tools, mcp_servers=self.servers),
             status="idle",
             metadata=self.metadata,
-        ).model_dump(mode="json")
+        )
+        changed = self.unconstrainable(snapshot) if self.unconstrainable else snapshot
+        return changed.model_dump(mode="json")
 
     def router(self, events: list[dict[str, Any]]) -> MARouter:
         router = MARouter()
@@ -394,3 +401,89 @@ async def test_cli_uses_only_trusted_session_annotations(
     )
     assert _confirmations(session) == [expected]
     assert catalogues == ([str(_LINEAR["url"])] if trusted else [])
+
+
+@pytest.mark.parametrize(
+    "unconstrainable",
+    [with_coordinator, with_hidden_capability],
+    ids=["coordinator", "hidden_field"],
+)
+async def test_an_operator_run_on_a_coordinator_session_is_refused_before_anything_is_sent(
+    unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession],
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The roster's children could write unasked; MA cannot remove it mid-session."""
+    session = _Session([_toolset("linear")], [_LINEAR])
+    session.unconstrainable = unconstrainable
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await _run(
+            monkeypatch,
+            db_session_factory,
+            session,
+            _events("linear", "create_issue"),
+            ToolSafetyPolicy(enabled=True),
+        )
+    assert session.wire == []
+
+
+async def test_an_operator_run_disables_its_sandbox_and_refuses_bash(
+    monkeypatch: pytest.MonkeyPatch, db_session_factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """`daimon run` disables built-ins and denies even a paused bash call."""
+    builtins = {
+        "type": "agent_toolset_20260401",
+        "configs": [],
+        "default_config": {"enabled": True, "permission_policy": {"type": "always_ask"}},
+    }
+    session = _Session([builtins, _toolset("linear")], [_LINEAR])
+    events = _events("linear", "create_issue")
+    events[0] = {
+        "id": "evt_tu",
+        "type": "agent.tool_use",
+        "name": "bash",
+        "input": {"command": "ls"},
+        "evaluated_permission": "ask",
+    }
+    await _run(monkeypatch, db_session_factory, session, events, ToolSafetyPolicy(enabled=True))
+    assert session.tools[0]["default_config"]["enabled"] is False
+    assert _confirmations(session) == ["deny"]
+
+
+@pytest.mark.parametrize(
+    ("server", "policy", "public_url"),
+    [
+        ("linear", ToolSafetyPolicy(enabled=False), None),
+        ("daimon-mcp", ToolSafetyPolicy(enabled=True), _PUBLIC),
+        ("daimon-mcp", ToolSafetyPolicy(enabled=False), _PUBLIC),
+    ],
+    ids=["foreign-safety-off", "trusted-safety-on", "trusted-safety-off"],
+)
+async def test_every_mcp_call_of_an_operator_run_pauses_for_the_decider(
+    server: str,
+    policy: ToolSafetyPolicy,
+    public_url: str | None,
+    monkeypatch: pytest.MonkeyPatch,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Neither a trusted server nor safety off leaves a tool that runs unasked;
+    the decider then allows the call as it did before."""
+    url = public_url if server == "daimon-mcp" else _LINEAR["url"]
+    session = _Session(
+        [_toolset(server, per_tool="list_agents")], [{"name": server, "type": "url", "url": url}]
+    )
+    await _run(
+        monkeypatch,
+        db_session_factory,
+        session,
+        _events(server, "list_agents"),
+        policy,
+        public_url=public_url,
+    )
+    kinds = [kind for kind, _ in session.wire]
+    assert kinds.index("update") < kinds.index("user.message")
+    toolset = session.wire[0][1]["tools"][0]
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    assert toolset["configs"]
+    assert all(c["permission_policy"] == {"type": "always_ask"} for c in toolset["configs"])
+    assert _confirmations(session) == ["allow"]

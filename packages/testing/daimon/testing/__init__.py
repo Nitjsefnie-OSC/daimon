@@ -59,6 +59,8 @@ from daimon.testing.ma_models import (
     ma_session_agent,
     ma_session_agent_from,
     tenant_metadata,
+    with_coordinator,
+    with_hidden_capability,
 )
 
 if TYPE_CHECKING:
@@ -189,6 +191,8 @@ __all__ = [
     "ma_session",
     "ma_session_agent",
     "ma_session_agent_from",
+    "with_coordinator",
+    "with_hidden_capability",
     "make_account",
     "make_agent_env_echo_handler",
     "make_agent_memory_store",

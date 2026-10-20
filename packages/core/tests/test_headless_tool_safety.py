@@ -11,16 +11,25 @@ from __future__ import annotations
 import datetime as dt
 import json
 import re
+from collections.abc import Callable
 from typing import Any
 
 import httpx
 import pytest
+from anthropic.types.beta import BetaManagedAgentsSession
 from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
 from daimon.core.sessions import create_session
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from daimon.testing.ma_models import (
+    ma_agent,
+    ma_environment,
+    ma_session,
+    with_coordinator,
+    with_hidden_capability,
+)
 from pydantic import HttpUrl
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)
@@ -74,6 +83,8 @@ def _router(
     events: list[dict[str, Any]] | None = None,
     agent_tools: list[dict[str, Any]] | None = None,
     agent_servers: list[dict[str, Any]] | None = None,
+    unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession] | None = None,
+    updates: list[dict[str, Any]] | None = None,
 ) -> MARouter:
     router = MARouter()
 
@@ -103,27 +114,29 @@ def _router(
 
     router.add("POST", r"/v1/sessions", handle_create)
     # The unattended gate reads the session before each send.
+    frozen = ma_session(
+        id="ses_1",
+        agent=ma_agent(
+            id="agent_x",
+            tools=agent_tools or [_LINEAR_TOOLSET],
+            mcp_servers=agent_servers
+            or [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
+        ),
+    )
+    if unconstrainable is not None:
+        frozen = unconstrainable(frozen)
     router.add(
         "GET",
         r"/v1/sessions/ses_1$",
-        lambda _r, _m: httpx.Response(
-            200,
-            json=ma_session(
-                id="ses_1",
-                agent=ma_agent(
-                    id="agent_x",
-                    tools=agent_tools or [_LINEAR_TOOLSET],
-                    mcp_servers=agent_servers
-                    or [{"name": "linear", "type": "url", "url": "https://mcp.linear.app/mcp"}],
-                ),
-            ).model_dump(mode="json"),
-        ),
+        lambda _r, _m: httpx.Response(200, json=frozen.model_dump(mode="json")),
     )
-    router.add(
-        "POST",
-        r"/v1/sessions/ses_1$",
-        lambda r, m: router.dispatch(httpx.Request("GET", r.url)),
-    )
+
+    def handle_update(request: httpx.Request, match: Any) -> httpx.Response:
+        if updates is not None:
+            updates.append(json.loads(request.content))
+        return router.dispatch(httpx.Request("GET", request.url))
+
+    router.add("POST", r"/v1/sessions/ses_1$", handle_update)
     router.add(
         "GET", r"/v1/sessions/[^/]+/events/stream", lambda r, m: sse_response(events or _events())
     )
@@ -166,9 +179,11 @@ async def test_routine_write_is_denied_when_the_policy_is_on() -> None:
 
 
 async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
+    """Created as the agent is; the unattended gate still makes every call pause."""
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
-    client = build_fake_anthropic(_router(creates=creates, sends=sends).dispatch)
+    updates: list[dict[str, Any]] = []
+    client = build_fake_anthropic(_router(creates=creates, sends=sends, updates=updates).dispatch)
 
     await run_turn(
         anthropic=client,
@@ -179,6 +194,10 @@ async def test_routine_session_is_unchanged_when_the_policy_is_off() -> None:
     )
 
     assert creates[0]["agent"] == "agent_x", "no override when enforcement is off"
+    # The fake keeps serving the frozen snapshot, so every gate rewrites it.
+    assert updates
+    (toolset,) = updates[0]["agent"]["tools"]
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
     (sent,) = _confirmations(sends)
     assert sent["result"] == "allow", "off allows an ordinary third-party call"
 
@@ -451,3 +470,97 @@ async def test_a_routine_never_sends_microsoft_mail_policy_on_or_off(enabled: bo
     assert "microsoft_send" in asked
     (sent,) = _confirmations(sends)
     assert sent["result"] == "deny"
+
+
+_BUILTINS: dict[str, object] = {
+    "type": "agent_toolset_20260401",
+    "configs": [],
+    "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+}
+
+
+@pytest.mark.parametrize(
+    "unconstrainable",
+    [with_coordinator, with_hidden_capability],
+    ids=["coordinator", "hidden_field"],
+)
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
+    enabled: bool,
+    unconstrainable: Callable[[BetaManagedAgentsSession], BetaManagedAgentsSession],
+) -> None:
+    """The roster cannot be removed from a live session, so nothing is sent."""
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    client = build_fake_anthropic(
+        _router(creates=creates, sends=sends, unconstrainable=unconstrainable).dispatch
+    )
+
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await run_turn(
+            anthropic=client,
+            agent_id="agent_x",
+            environment_id="env_x",
+            trigger_message="file tonight's bugs",
+            tool_safety=ToolSafetyPolicy(enabled=enabled),
+        )
+
+    assert sends == []
+
+
+async def test_a_routine_disables_its_sandbox_before_sending() -> None:
+    """Routines cannot generate files using sandbox tools."""
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+    tools = [_BUILTINS, _LINEAR_TOOLSET]
+    client = build_fake_anthropic(
+        _router(creates=creates, sends=sends, agent_tools=tools, updates=updates).dispatch
+    )
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="write the report",
+        tool_safety=ToolSafetyPolicy(enabled=True),
+    )
+
+    assert updates, "the unattended gate rewrites the MCP toolset before the message"
+    for body in updates:
+        (builtins,) = [t for t in body["agent"]["tools"] if t["type"] == "agent_toolset_20260401"]
+        assert builtins["default_config"]["enabled"] is False
+        assert all(config["enabled"] is False for config in builtins.get("configs", []))
+
+
+@pytest.mark.parametrize("enabled", [True, False])
+async def test_a_routines_own_daimon_tools_pause_for_the_decider(enabled: bool) -> None:
+    """Trusted is not unasked: Daimon's ordinary tools pause, and the decider allows them."""
+    creates: list[dict[str, Any]] = []
+    sends: list[dict[str, Any]] = []
+    updates: list[dict[str, Any]] = []
+    client = build_fake_anthropic(
+        _router(
+            creates=creates,
+            sends=sends,
+            updates=updates,
+            agent_tools=[_toolset("daimon-mcp")],
+            agent_servers=[{"name": "daimon-mcp", "type": "url", "url": _PUBLIC_URL}],
+            events=_events(server="daimon-mcp", name="list_agents", tool_input={}),
+        ).dispatch
+    )
+
+    await run_turn(
+        anthropic=client,
+        agent_id="agent_x",
+        environment_id="env_x",
+        trigger_message="list them",
+        tool_safety=ToolSafetyPolicy(enabled=enabled),
+        mcp_settings=McpSettings(public_url=HttpUrl(_PUBLIC_URL)),
+    )
+
+    toolset = updates[-1]["agent"]["tools"][0]
+    assert toolset["mcp_server_name"] == "daimon-mcp"
+    assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}
+    (sent,) = _confirmations(sends)
+    assert sent["result"] == "allow"

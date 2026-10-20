@@ -99,7 +99,10 @@ def test_a_destructive_hint_wins_over_read_only() -> None:
 
 
 @pytest.mark.parametrize("enabled", [False, True])
-async def test_gate_rewrites_default_and_per_tool_configs_or_nothing(enabled: bool) -> None:
+async def test_gate_rewrites_default_and_per_tool_configs_policy_on_or_off(
+    enabled: bool,
+) -> None:
+    """Off too: every MCP call pauses so the decider (which then allows it) sees it."""
     updates: list[dict[str, Any]] = []
 
     def update(request: httpx.Request, _m: Any) -> httpx.Response:
@@ -121,9 +124,6 @@ async def test_gate_rewrites_default_and_per_tool_configs_or_nothing(enabled: bo
         )
     finally:
         await client.close()
-    if not enabled:
-        assert updates == []
-        return
     [agent] = updates
     toolset = agent["tools"][0]
     assert toolset["default_config"]["permission_policy"] == {"type": "always_ask"}

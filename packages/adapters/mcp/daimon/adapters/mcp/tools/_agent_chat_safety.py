@@ -47,6 +47,7 @@ from daimon.core.turn.approvals import (
     tool_calls_for,
 )
 from daimon.core.turn.ceiling import TURN_CEILING_S
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.io import LegacyTurnIO
 from daimon.core.turn.reducers import apply
 from daimon.core.turn.state import TurnState
@@ -113,16 +114,27 @@ def require_session_driver(session: BetaManagedAgentsSession, auth: AuthIdentity
 
 
 async def gate(runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgentsSession) -> None:
-    """Rewrite `session`'s tool config from the current policy before a send."""
-    await gate_session_snapshot(
-        single_attempt(runtime),
-        session,
-        runtime.settings.tool_safety,
-        scope=mcp_scope(auth),
-        public_url=_public_url(runtime),
-        session_factory=runtime.session_factory,
-        tenant_id=auth.tenant_id,
-    )
+    """Rewrite `session`'s tool config from the current policy before a send.
+
+    A session the unattended gate cannot constrain (a coordinator agent, or
+    a capability this release does not know) is refused as a tool error.
+    """
+    try:
+        await gate_session_snapshot(
+            single_attempt(runtime),
+            session,
+            runtime.settings.tool_safety,
+            scope=mcp_scope(auth),
+            public_url=_public_url(runtime),
+            session_factory=runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            entry_point="mcp_chat",
+        )
+    except AdmissionDenied as err:
+        raise ToolError(
+            "This agent cannot run here: it has capabilities (such as delegating to "
+            "other agents) that an agent chat nobody watches cannot limit."
+        ) from err
 
 
 def rules_channel(auth: AuthIdentity, session: BetaManagedAgentsSession) -> str | None:
@@ -334,6 +346,7 @@ async def _answer(
         tenant_id=auth.tenant_id,
         channel_id=rules_channel_id,
         annotations_for=annotations_for,
+        entry_point="mcp_chat",
     )
     decisions = [
         (call.tool_use_id, await posture.decide(call)) for call in tool_calls_for(turn.state, ids)

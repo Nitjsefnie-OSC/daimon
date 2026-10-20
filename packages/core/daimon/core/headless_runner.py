@@ -106,7 +106,8 @@ from daimon.core.turn.run import (
 from daimon.core.turn.runtime_manifest import capture_preparation_source
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
-from daimon.core.turn.unattended import protected_tools, session_gate, unattended_posture
+from daimon.core.turn.unattended import session_gate, unattended_posture
+from daimon.core.turn.unattended_capabilities import protected_tools
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import TextPart
@@ -512,6 +513,7 @@ async def run_turn_impl(
                 public_url=public_url,
                 session_factory=session_factory,
                 tenant_id=tenant_id,
+                entry_point="routine",
             )
         ):
             state: TurnState = await drive_turn(
@@ -534,6 +536,7 @@ async def run_turn_impl(
                     session_factory=session_factory,
                     tenant_id=tenant_id,
                     channel_id=origin_place.channel_id if origin_place is not None else None,
+                    entry_point="routine",
                 ),
                 deadline=effective_deadline,
             )
