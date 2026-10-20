@@ -6,6 +6,7 @@ import base64
 import json
 from datetime import datetime, timedelta
 from typing import Any, Literal, cast, overload
+from urllib.parse import quote
 
 import httpx
 from daimon.core.lead_intake import (
@@ -150,12 +151,16 @@ class HttpIntakePorts:
             raise ValueError("explicit_author_registration_required")
         return VerifiedSource(source=source, text=str(message["content"]))
 
+    async def _require_mailbox(self, config: IntakeConfig, error: type[Exception]) -> None:
+        """The Gmail token must still belong to the configured mailbox."""
+        profile = await self.request("gmail", "GET", "profile")
+        if str(profile["emailAddress"]).casefold() != config.gmail_mailbox.casefold():
+            raise error("configured_mailbox_mismatch")
+
     async def scan(
         self, config: IntakeConfig, start: datetime, end: datetime, cursor: str | None
     ) -> tuple[list[str], str | None]:
-        profile = await self.request("gmail", "GET", "profile")
-        if str(profile["emailAddress"]).casefold() != config.gmail_mailbox.casefold():
-            raise ValueError("configured_mailbox_mismatch")
+        await self._require_mailbox(config, ValueError)
         params = {
             "q": f"in:anywhere after:{int(start.timestamp()) - 1} before:{int(end.timestamp())}",
             "includeSpamTrash": "true",
@@ -305,9 +310,7 @@ class HttpIntakePorts:
                 return None
             raise ReviewRequired("dossier_history_review")
         if step == "archive":
-            profile = await self.request("gmail", "GET", "profile")
-            if str(profile["emailAddress"]).casefold() != config.gmail_mailbox.casefold():
-                raise ReviewRequired("configured_mailbox_mismatch")
+            await self._require_mailbox(config, ReviewRequired)
             message = await self.request(
                 "gmail", "GET", f"messages/{p['message']}", params={"format": "minimal"}
             )
@@ -327,8 +330,6 @@ class HttpIntakePorts:
             "deal": "daimon_intake_identity",
         }[step]
         value = p["email"] if step == "contact" else effect.key
-        from urllib.parse import quote
-
         selected = p.get("selected")
         if selected:
             approved = await self.request(
@@ -461,9 +462,7 @@ class HttpIntakePorts:
             )
             return str(response["id"])
         if step == "archive":
-            profile = await self.request("gmail", "GET", "profile")
-            if str(profile["emailAddress"]).casefold() != config.gmail_mailbox.casefold():
-                raise ReviewRequired("configured_mailbox_mismatch")
+            await self._require_mailbox(config, ReviewRequired)
             await self.request(
                 "gmail", "POST", f"messages/{p['message']}/modify", {"removeLabelIds": ["INBOX"]}
             )

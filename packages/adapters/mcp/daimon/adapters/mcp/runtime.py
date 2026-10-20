@@ -69,6 +69,11 @@ class McpRuntime:
 
     # The explicit operator deployment capability for OpenAI agents. None (the
     # default) keeps every tool on its existing Anthropic path.
+    resource_hosts: McpResourceHostFactory | None = field(default=None)
+
+    # Separate explicit capability; absent/disabled keeps existing dispatch.
+    gemini_skill_capability: GeminiSkillCapability | None = field(default=None)
+
     membership_resolver: MembershipResolver | None = None
 
     def __post_init__(self) -> None:
@@ -78,8 +83,3 @@ class McpRuntime:
                 "membership_resolver",
                 DiscordRestMembershipResolver(self.settings.discord.bot_token.get_secret_value()),
             )
-
-    resource_hosts: McpResourceHostFactory | None = field(default=None)
-
-    # Separate explicit capability; absent/disabled keeps existing dispatch.
-    gemini_skill_capability: GeminiSkillCapability | None = field(default=None)

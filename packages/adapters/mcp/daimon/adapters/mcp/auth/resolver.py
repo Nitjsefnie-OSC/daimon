@@ -46,9 +46,10 @@ class AuthIdentity:
     platform: str | None = None
     external_id: str | None = None  # guild snowflake from tenant.external_id
     agent_id: uuid.UUID | None = None
-    # Ordinary chat execution identity; consumed only by the Google token broker.
+    # Signed lead-intake routine execution grant, never a tool argument.
     routine_id: uuid.UUID | None = None
     execution_id: uuid.UUID | None = None
+    # Ordinary chat execution identity (see the module docstring).
     chat_agent_id: uuid.UUID | None = None
     platform_user_id: str | None = None
     # True when the minted JWT carries is_admin=True.

@@ -25,18 +25,8 @@ Headless loop (primitives plus the bounded ``ask`` convenience tool):
 - ``list_events`` returns the transcript; the caller reads the reply from the
   ``agent.message`` events. Read-only, not gated.
 
-Nobody watches these turns, so they run under the unattended tool policy
-(``_agent_chat_safety``). Before every message the session's own tool config
-is rewritten from the current policy so every gated call pauses, and the
-sending process answers its own turn's pauses: reads run, writes are refused
-unless the operator allowed them in unattended runs, Daimon's card-only
-actions are always refused, and the turn's channel's tool rules apply. With
-tool safety off (the explicit ``enabled=False`` setting) ordinary paused
-third-party calls are allowed. A read never answers a pause. After a restart
-a paused turn stays paused and gated, and status reads report ``paused``
-until the session's owner calls ``continue_turn``, which re-gates the
-session and answers the pauses from the current policy, only on a turn agent
-chat started.
+Nobody watches these turns, so they run under the unattended tool policy;
+``_agent_chat_safety`` says how their pauses are answered.
 - ``list_sessions`` enumerates this agent's sessions for resume. Read-only,
   not gated.
 - ``ask`` starts a turn, polls until idle for at most two minutes, and returns
@@ -751,7 +741,6 @@ async def _continue_turn_impl(
     *,
     now: Callable[[], dt.datetime] = lambda: dt.datetime.now(dt.UTC),
     recheck: Callable[[], Awaitable[None]] | None = None,
-    resume_wait_s: float = _RESUME_WAIT_S,
 ) -> dict[str, str]:
     """Send a follow-up message on an existing session.
 
@@ -761,7 +750,7 @@ async def _continue_turn_impl(
     answers the paused turn's calls from the current policy. With no
     ``message`` that is all it does, and the paused turn's boundary is
     returned. With one, the message is sent once the resumed turn ends, which
-    is waited for up to ``resume_wait_s``; past that the call is refused and
+    is waited for up to ``_RESUME_WAIT_S``; past that the call is refused and
     the resumed turn keeps running.
 
     Returns ``{"handle": handle, "turn_event_id": ..., "turn_started_at": ...}``,
@@ -833,7 +822,7 @@ async def _continue_turn_impl(
                     "turn_started_at": now().isoformat(),
                 }
             try:
-                ended = await asyncio.wait_for(asyncio.shield(resumed.worker), resume_wait_s)
+                ended = await asyncio.wait_for(asyncio.shield(resumed.worker), _RESUME_WAIT_S)
             except TimeoutError:
                 raise ToolError(_RESUMED_STILL_RUNNING_MSG) from None
             if not ended:
