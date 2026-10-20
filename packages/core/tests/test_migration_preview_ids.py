@@ -96,6 +96,8 @@ TABLES = {
     "lead_opportunities",
     "lead_mailbox_scans",
     "lead_mailbox_messages",
+    # Added by HEAD, with its index and via check; compared only there.
+    "routine_sandbox_history",
 }
 
 
@@ -145,6 +147,8 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
         if expected in (LEAD_HEAD, WATCH_HEAD, WATCH_POLLING, HEAD)
         else {name for name in TABLES if not name.startswith("lead_")}
     )
+    if expected != HEAD:
+        compared_tables = compared_tables - {"routine_sandbox_history"}
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
         return kind != "table" or name in compared_tables
@@ -167,6 +171,14 @@ def _assert_head(connection: Connection, expected: str = HEAD) -> None:
     inspector = inspect(connection)
     constraints = {c["name"] for c in inspector.get_check_constraints("routines")}
     assert {"ck_routines_destination_kind", "ck_routines_dm_owner"} <= constraints
+    if expected == HEAD:
+        # compare_metadata does not compare CHECK constraints.
+        [via] = [
+            c
+            for c in inspector.get_check_constraints("routine_sandbox_history")
+            if c["name"] == "ck_routine_sandbox_history_via"
+        ]
+        assert all(f"'{name}'" in via["sqltext"] for name in ("mcp", "cli", "edit"))
     # The usage table retains legacy repair columns intentionally absent from
     # the ORM. Compare only the two columns introduced by this chain.
     usage_columns = {c["name"]: c for c in inspector.get_columns("usage_reconcile_progress")}
