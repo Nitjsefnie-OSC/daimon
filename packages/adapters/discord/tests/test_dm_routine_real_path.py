@@ -1871,5 +1871,5 @@ async def test_dm_routine_refuses_unreviewed_session_before_first_send(
     await task
     async with harness.factory() as session:
         after = await get_routine(session, row.id, tenant_id=row.tenant_id)
-    assert after is not None and after.last_error == "AdmissionDenied: backend_unsupported"
+    assert after is not None and after.last_error == "backend_unsupported"
     assert upstream.sent == [], "the actual DM session must be checked before its first send"
