@@ -81,6 +81,7 @@ __all__ = [
     "destination_shape_error",
     "failure_notice_text",
     "record_failure",
+    "record_routine_failure",
     "render_fallback_dm",
     "DirectPost",
     "clear_creator",
@@ -364,6 +365,32 @@ async def record_failure(
         ):
             log.info("routine.failure_notice_queued", routine_id=str(routine_id))
     await record_result(session, routine_id, tail=None, error=error, expected_row=expected_row)
+
+
+async def record_routine_failure(
+    session: AsyncSession,
+    row: RoutineRow,
+    *,
+    error: str,
+    reason: TerminationReason | None,
+) -> None:
+    """Record a fire that failed or was refused, fenced on the row it was claimed as.
+
+    An owner-DM routine records only the error, and only while its private
+    revision and destination are unchanged; any other routine goes through
+    `record_failure`.
+    """
+    if row.destination_kind == "dm":
+        await record_result(
+            session,
+            row.id,
+            tail=None,
+            error=error,
+            expected_destination=(row.destination_kind, row.destination_id),
+            expected_private=row,
+        )
+    else:
+        await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
 
 
 def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
