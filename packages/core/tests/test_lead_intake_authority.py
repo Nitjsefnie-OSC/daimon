@@ -147,7 +147,8 @@ def test_resolution_requires_exact_human_approval_even_when_safety_disabled(enab
         == "deny"
     )
     prompt = prompt_for_tool_call(call, requester_platform_user_id="7", now=datetime.now(UTC))
-    assert "Company id: 200" in prompt.detail_lines
-    assert "Contact id: 201" in prompt.detail_lines
-    assert "Deal id: 202" in prompt.detail_lines
-    assert any("Verified original identity" in line for line in prompt.detail_lines)
+    assert "Company: 200" in prompt.visible_lines
+    assert "Contact: 201" in prompt.visible_lines
+    assert "Deal: 202" in prompt.visible_lines
+    assert prompt.detail_lines == ()
+    assert "Verified original identity" not in prompt.model_dump_json()
