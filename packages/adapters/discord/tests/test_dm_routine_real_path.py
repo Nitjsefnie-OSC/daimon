@@ -391,8 +391,7 @@ class Harness:
     async def routine(self, owner: str = OWNER_A, **overrides: Any) -> Any:
         row = await _routine_row(self, owner=owner)
         await self.fire(row)
-        async with self.factory() as db:
-            after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+        after = await self.reload(row)
         assert after is not None
         if after.last_error:
             raise RuntimeError(after.last_error)
@@ -421,6 +420,26 @@ class Harness:
             dispatch_timeout_s=120,
             dispatcher=self.dispatcher,
             wait_for_completion=True,
+        )
+
+    async def reload(self, row: RoutineRow) -> RoutineRow | None:
+        async with self.factory() as db:
+            return await get_routine(db, row.id, tenant_id=row.tenant_id)
+
+    async def deliver(
+        self, *, fetch_channel: Callable[..., Any], open_dm: Callable[..., Any], files: bool = True
+    ) -> None:
+        """One Discord delivery poll through the real owner-DM poster."""
+        poster = make_discord_routine_poster(
+            self.factory,
+            fetch_channel=fetch_channel,
+            open_dm=open_dm,
+            dm_policy=lambda _: DirectMessagePolicy(),
+            membership_resolver=self.resolver,
+            output_client=self.upstream.client if files else None,
+        )
+        await poll_deliveries_once(
+            self.factory, platform="discord", post=poster, now=datetime.now(UTC)
         )
 
     async def live_dm(self, text: str, message_id: str, *, start: bool = True) -> str:
@@ -729,6 +748,25 @@ async def _routine_row(harness: Harness, *, owner: str = OWNER_A) -> RoutineRow:
         )
 
 
+async def _reclassify(db: AsyncSession, row: RoutineRow, change: str, **back: Any) -> None:
+    """Move `row` to agent "b", or retarget it to the budget channel and, for "aba", back."""
+    from daimon.core.stores.routines import update_routine
+
+    if change == "agent":
+        await update_routine(db, row.id, tenant_id=row.tenant_id, agent_id="ag_b", agent_name="b")
+        return
+    await update_routine(
+        db,
+        row.id,
+        tenant_id=row.tenant_id,
+        destination_kind="channel",
+        destination_id=BUDGET,
+        channel_id=BUDGET,
+    )
+    if change == "aba":
+        await update_routine(db, row.id, tenant_id=row.tenant_id, **back)
+
+
 async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(harness: Harness):
     row = await _routine_row(harness)
     await harness.fire(row)
@@ -744,16 +782,7 @@ async def test_routine_answer_reaches_only_the_owners_dm_and_bills_its_budget(ha
     async def no_channel(channel_id: int) -> object:
         raise AssertionError("a DM routine never posts to a channel")
 
-    poster = make_discord_routine_poster(
-        harness.factory,
-        fetch_channel=no_channel,
-        open_dm=open_dm,
-        dm_policy=lambda _: DirectMessagePolicy(),
-        membership_resolver=harness.resolver,
-    )
-    await poll_deliveries_once(
-        harness.factory, platform="discord", post=poster, now=datetime.now(UTC)
-    )
+    await harness.deliver(fetch_channel=no_channel, open_dm=open_dm, files=False)
 
     assert [(guild, user) for guild, user, _ in sent] == [(GUILD, int(OWNER_A))]
     assert "private answer" in sent[0][2]
@@ -769,8 +798,7 @@ async def test_revoked_owner_gets_no_run_and_no_delivery(harness: Harness):
     harness.members[OWNER_A] = False
     await harness.fire(row)
     assert not harness.upstream.sent, "nothing reached the model"
-    async with harness.factory() as session:
-        after = await get_routine(session, row.id, tenant_id=harness.tenant.id)
+    after = await harness.reload(row)
     assert after is not None and after.last_error and after.delivery_status is None
 
 
@@ -788,8 +816,7 @@ async def test_a_provider_native_agent_is_refused_before_any_session(
     row = await _routine_row(harness)
     await harness.fire(row)
     assert not harness.upstream.state.sessions, "no session was created"
-    async with harness.factory() as session:
-        after = await get_routine(session, row.id, tenant_id=harness.tenant.id)
+    after = await harness.reload(row)
     assert after is not None
     assert after.last_error == "DM routines need a Managed Agents agent"
     assert after.delivery_status is None
@@ -977,8 +1004,7 @@ async def test_replacement_endpoint_cannot_reuse_predecessor_allow(
     upstream.scripts = [pause_on_public_send, pause_on_public_send]
     row = await _routine_row(harness)
     await harness.fire(row)
-    async with harness.factory() as db:
-        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    after = await harness.reload(row)
     assert after is not None and after.last_error is None
     assert after.delivery_payload is not None
     assert len(upstream.state.sessions) == 2
@@ -1101,8 +1127,7 @@ async def test_private_failure_after_destination_change_does_not_publish_error(
         )
     release.set()
     await asyncio.wait_for(task, 20)
-    async with harness.factory() as db:
-        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    after = await harness.reload(row)
     assert after is not None and after.last_error is None
     assert after.last_result_tail is None and after.delivery_payload is None
     from daimon.adapters.discord.routines_panel.subviews import build_last_output_container
@@ -1223,17 +1248,7 @@ async def test_owner_and_destination_are_rechecked_during_real_delivery(
 
     if stage == "file":
         harness.upstream.download_hook = changed
-    poster = make_discord_routine_poster(
-        harness.factory,
-        fetch_channel=no_channel,
-        open_dm=open_dm,
-        dm_policy=lambda _: DirectMessagePolicy(),
-        membership_resolver=harness.resolver,
-        output_client=harness.upstream.client,
-    )
-    await poll_deliveries_once(
-        harness.factory, platform="discord", post=poster, now=datetime.now(UTC)
-    )
+    await harness.deliver(fetch_channel=no_channel, open_dm=open_dm)
     assert len(sent) == 1
     assert not files, (
         "revocation/retarget during text or file delivery prevents later private output"
@@ -1256,8 +1271,7 @@ async def test_busy_live_owner_skips_slot_without_touching_c8(harness: Harness):
     before = await harness.conversation()
     row = await _routine_row(harness)
     await harness.fire(row)
-    async with harness.factory() as db:
-        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    after = await harness.reload(row)
     assert after is not None and after.last_error == "owner_busy"
     assert after.delivery_payload is None and after.next_fire_at is not None
     assert len(harness.upstream.state.sessions) == 1
@@ -1273,8 +1287,6 @@ async def test_busy_live_owner_skips_slot_without_touching_c8(harness: Harness):
 async def test_private_result_cannot_survive_reclassification(
     harness: Harness, change: str, stage: str
 ):
-    from daimon.core.stores.routines import update_routine
-
     entered, release = asyncio.Event(), asyncio.Event()
     secret = "old-agent-private-result"
 
@@ -1293,33 +1305,12 @@ async def test_private_result_cannot_survive_reclassification(
     if stage == "pending":
         release.set()
         await task
-        async with harness.factory() as db:
-            pending = await get_routine(db, row.id, tenant_id=row.tenant_id)
+        pending = await harness.reload(row)
         assert (
             pending is not None and pending.delivery_payload and secret in pending.delivery_payload
         )
     async with harness.factory.begin() as db:
-        if change == "agent":
-            await update_routine(
-                db, row.id, tenant_id=row.tenant_id, agent_id="ag_b", agent_name="b"
-            )
-        else:
-            await update_routine(
-                db,
-                row.id,
-                tenant_id=row.tenant_id,
-                destination_kind="channel",
-                destination_id=BUDGET,
-                channel_id=BUDGET,
-            )
-            if change == "aba":
-                await update_routine(
-                    db,
-                    row.id,
-                    tenant_id=row.tenant_id,
-                    destination_kind="dm",
-                    destination_id=OWNER_A,
-                )
+        await _reclassify(db, row, change, destination_kind="dm", destination_id=OWNER_A)
     release.set()
     await task
     sent = []
@@ -1328,19 +1319,8 @@ async def test_private_result_cannot_survive_reclassification(
         sent.append(args)
         raise AssertionError("invalidated content must never open any destination")
 
-    poster = make_discord_routine_poster(
-        harness.factory,
-        fetch_channel=forbidden,
-        open_dm=forbidden,
-        dm_policy=lambda _: DirectMessagePolicy(),
-        membership_resolver=harness.resolver,
-        output_client=harness.upstream.client,
-    )
-    await poll_deliveries_once(
-        harness.factory, platform="discord", post=poster, now=datetime.now(UTC)
-    )
-    async with harness.factory() as db:
-        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    await harness.deliver(fetch_channel=forbidden, open_dm=forbidden)
+    after = await harness.reload(row)
     assert after is not None
     assert after.last_result_tail is None and after.last_error is None
     assert after.delivery_payload is None and after.delivery_status != "pending"
@@ -1495,8 +1475,7 @@ async def test_current_authority_refuses_before_session_allocation(harness: Harn
         await set_access_policy(db, tenant_id=row.tenant_id, policy=policy)
     await harness.fire(row)
     assert not harness.upstream.state.sessions
-    async with harness.factory() as db:
-        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    after = await harness.reload(row)
     assert after is not None and after.last_error and after.delivery_payload is None
 
 
@@ -1517,8 +1496,7 @@ async def test_shutdown_uses_live_dm_best_effort_on_actual_scope(
     with pytest.raises(asyncio.CancelledError):
         await task
     assert harness.upstream.events(sid, "user.interrupt")
-    async with harness.factory() as db:
-        after = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    after = await harness.reload(row)
     assert after is not None and after.delivery_payload is None
 
 
@@ -1677,17 +1655,7 @@ async def test_stale_public_edit_cannot_reclassify_concurrent_private_fire(
     async def forbidden(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("reclassified private text/files must not open any destination")
 
-    poster = make_discord_routine_poster(
-        harness.factory,
-        fetch_channel=forbidden,
-        open_dm=forbidden,
-        dm_policy=lambda _: DirectMessagePolicy(),
-        membership_resolver=harness.resolver,
-        output_client=harness.upstream.client,
-    )
-    await poll_deliveries_once(
-        harness.factory, platform="discord", post=poster, now=datetime.now(UTC)
-    )
+    await harness.deliver(fetch_channel=forbidden, open_dm=forbidden)
 
 
 @pytest.mark.parametrize("origin", ["cleared_dm", "legacy"])
@@ -1772,50 +1740,20 @@ async def test_destination_free_fire_has_no_personal_memory_or_reclassified_resu
     if stage == "pending":
         release.set()
         await task
-        async with harness.factory() as db:
-            completed = await get_routine(db, row.id, tenant_id=row.tenant_id)
+        completed = await harness.reload(row)
         assert completed is not None and completed.last_result_tail == "shared-only result"
     async with harness.factory.begin() as db:
-        if change == "agent":
-            await routines.update_routine(
-                db, row.id, tenant_id=row.tenant_id, agent_id="ag_b", agent_name="b"
-            )
-        else:
-            await routines.update_routine(
-                db,
-                row.id,
-                tenant_id=row.tenant_id,
-                destination_kind="channel",
-                destination_id=BUDGET,
-                channel_id=BUDGET,
-            )
-            if change == "aba":
-                await routines.update_routine(
-                    db, row.id, tenant_id=row.tenant_id, clear_destination=True
-                )
+        await _reclassify(db, row, change, clear_destination=True)
     release.set()
     await task
-    async with harness.factory() as db:
-        final = await get_routine(db, row.id, tenant_id=row.tenant_id)
+    final = await harness.reload(row)
     assert final is not None and final.last_result_tail is None and final.last_error is None
     assert final.delivery_payload is None and final.delivery_status != "pending"
 
     async def forbidden(*args: Any, **kwargs: Any) -> Any:
         raise AssertionError("old output must not open an agent or destination")
 
-    await poll_deliveries_once(
-        harness.factory,
-        platform="discord",
-        now=datetime.now(UTC),
-        post=make_discord_routine_poster(
-            harness.factory,
-            fetch_channel=forbidden,
-            open_dm=forbidden,
-            dm_policy=lambda _: DirectMessagePolicy(),
-            membership_resolver=harness.resolver,
-            output_client=harness.upstream.client,
-        ),
-    )
+    await harness.deliver(fetch_channel=forbidden, open_dm=forbidden)
 
 
 @pytest.mark.parametrize("safety_on", [False, True])
@@ -1871,7 +1809,6 @@ async def test_dm_routine_refuses_unreviewed_session_before_first_send(
     upstream.state.sessions[sid] = BetaManagedAgentsSession.model_validate(snapshot)
     upstream.create_gate.set()
     await task
-    async with harness.factory() as session:
-        after = await get_routine(session, row.id, tenant_id=row.tenant_id)
+    after = await harness.reload(row)
     assert after is not None and after.last_error == "backend_unsupported"
     assert upstream.sent == [], "the actual DM session must be checked before its first send"
