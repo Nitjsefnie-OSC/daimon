@@ -761,6 +761,71 @@ async def test_apply_invalidates_cached_tools_before_mutating(
     assert order == [f"invalidate:{session.id}", "commit", "update"]
 
 
+async def test_a_restore_registered_between_invalidation_and_send_survives_a_failed_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The watches flow: invalidate, register the restore, then send."""
+    order: list[str] = []
+
+    async def invalidate(_db: Any, *, ma_session_id: str) -> None:
+        order.append("invalidate")
+
+    class _Begin:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_exc: object) -> None:
+            order.append("commit")
+
+    async def update(*_args: Any, **kwargs: Any) -> None:
+        if kwargs["agent"]["tools"] == original.tools:
+            order.append("restore")
+            return
+        order.append("send")
+        raise RuntimeError("provider down")
+
+    factory = MagicMock()
+    factory.begin = _Begin
+    monkeypatch.setattr(caps, "invalidate_session_tools", invalidate)
+    monkeypatch.setattr(caps, "update_session_record", update)
+    session = _root_session()
+    original = caps.SessionToolConfig.of(session)
+    constrained = await constrain_capabilities(
+        session,
+        ToolSafetyPolicy(enabled=True),
+        public_url=None,
+        session_factory=None,
+        tenant_id=None,
+    )
+    await caps.invalidate_cached_tools(session, constrained, session_factory=factory)
+    order.append("register_restore")
+    try:
+        with pytest.raises(RuntimeError, match="provider down"):
+            await caps.send_capabilities(MagicMock(), session, constrained, scope=_scope())
+    finally:
+        await restore_capabilities(MagicMock(), session, constrained.original, scope=_scope())
+    assert order == ["invalidate", "commit", "register_restore", "send", "restore"]
+
+
+async def test_split_apply_does_nothing_when_nothing_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidate = AsyncMock()
+    update = AsyncMock()
+    monkeypatch.setattr(caps, "invalidate_session_tools", invalidate)
+    monkeypatch.setattr(caps, "update_session_record", update)
+    session = _root_session()
+    unchanged = caps.ConstrainedSession(
+        send=caps.SessionToolConfig.of(session),
+        original=caps.SessionToolConfig.of(session),
+        changed=False,
+    )
+    await caps.invalidate_cached_tools(session, unchanged, session_factory=MagicMock())
+    await caps.send_capabilities(MagicMock(), session, unchanged, scope=_scope())
+    invalidate.assert_not_awaited()
+    update.assert_not_awaited()
+
+
 async def test_restore_finishes_through_repeated_cancellation(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:

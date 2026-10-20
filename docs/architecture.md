@@ -1095,8 +1095,10 @@ and custom tools removed for every unattended entry point, with no opt-in,
 an optional `server/tool` allowlist, and every retained
 MCP toolset's default and per-tool configs on `always_ask`, trusted
 `daimon-mcp` and safety off included, so every MCP call reaches the
-unattended decider); `apply_capabilities` clears the thread session's cached tool hashes
-before it sends them, and `restore_capabilities` puts the session's own arrays
+unattended decider); `invalidate_cached_tools` clears and commits the thread
+session's cached tool hashes and `send_capabilities` then sends the arrays
+(`apply_capabilities` runs both; a caller that restores registers its restore
+between them), and `restore_capabilities` puts the session's own arrays
 back, finishing through repeated cancellation. `capability_posture` makes the
 decider refuse what the session no longer carries, including every built-in
 or custom call. Unattended runs cannot generate files with sandbox tools;

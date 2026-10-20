@@ -12,6 +12,10 @@ the capability surface of a turn nobody watches is decided in one place:
 - `constrain_capabilities` works out the tools and servers to send: built-in
   sandbox and custom tools always disabled, an optional explicit tool
   allowlist, and every MCP toolset gated for the unattended decider.
+- `invalidate_cached_tools` then `send_capabilities` put it on the session
+  (`apply_capabilities` runs both); a caller that restores the session's own
+  tools afterwards registers that restore between the two.
+  `restore_capabilities` puts them back.
 - `capability_posture` makes the decider agree: a built-in call is refused
   for every unattended turn, and a call outside the allowlist is refused.
 
@@ -686,6 +690,43 @@ async def constrain_capabilities(
     return ConstrainedSession(send=send, original=original, changed=send != original)
 
 
+async def invalidate_cached_tools(
+    snapshot: BetaManagedAgentsSession,
+    constrained: ConstrainedSession,
+    *,
+    session_factory: async_sessionmaker[AsyncSession] | None,
+) -> None:
+    """Clear and commit the thread session's cached tool hashes, if `constrained` changes anything.
+
+    `invalidate_session_tools` keeps the session's identity, workspace and
+    credential metadata, so the next ordinary bind reapplies its own tools
+    even if this turn never gets to restore them. No provider call; without
+    a `session_factory` it does nothing.
+    """
+    if not constrained.changed or session_factory is None:
+        return
+    async with session_factory.begin() as db:
+        await invalidate_session_tools(db, ma_session_id=snapshot.id)
+
+
+async def send_capabilities(
+    client: AsyncAnthropic,
+    snapshot: BetaManagedAgentsSession,
+    constrained: ConstrainedSession,
+    *,
+    scope: Scope,
+) -> None:
+    """Send `constrained` to the session, when it changes anything. A failure raises.
+
+    Call `invalidate_cached_tools` first. A caller that restores the
+    session's own tools afterwards registers that restore between the two,
+    so a send that fails, or is cancelled, part-way is still restored.
+    """
+    if not constrained.changed:
+        return
+    await _update(client, snapshot, constrained.send, scope=scope)
+
+
 async def apply_capabilities(
     client: AsyncAnthropic,
     snapshot: BetaManagedAgentsSession,
@@ -694,19 +735,13 @@ async def apply_capabilities(
     scope: Scope,
     session_factory: async_sessionmaker[AsyncSession] | None = None,
 ) -> None:
-    """Send `constrained` to the session, when it changes anything. A failure raises.
+    """`invalidate_cached_tools`, then `send_capabilities`, with nothing between.
 
-    With a `session_factory`, the thread session's cached tool hashes are
-    cleared and committed first (`invalidate_session_tools`, keeping its
-    identity, workspace and credential metadata), so the next ordinary bind
-    reapplies its own tools even if this turn never gets to restore them.
+    For a caller that never restores the session's own tools; one that does
+    calls the two itself.
     """
-    if not constrained.changed:
-        return
-    if session_factory is not None:
-        async with session_factory.begin() as db:
-            await invalidate_session_tools(db, ma_session_id=snapshot.id)
-    await _update(client, snapshot, constrained.send, scope=scope)
+    await invalidate_cached_tools(snapshot, constrained, session_factory=session_factory)
+    await send_capabilities(client, snapshot, constrained, scope=scope)
 
 
 async def restore_capabilities(
