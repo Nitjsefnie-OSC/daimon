@@ -1467,3 +1467,27 @@ def test_a_later_sdk_parsing_the_reviewed_fields_is_admitted() -> None:
     with pytest.raises(AdmissionDenied) as refused:
         require_allowed_capabilities(_later_sdk_session(identity="user"))
     assert refused.value.detail == "unreviewed value at session.agent.execution_identity.type"
+
+
+def test_builtin_tool_names_match_the_sdk_toolset() -> None:
+    """Tripwire: a built-in the SDK adds stays refused until it is reviewed here."""
+    from anthropic.types.beta.beta_managed_agents_agent_tool_config import (
+        BetaManagedAgentsAgentToolConfig,
+    )
+
+    sdk = set(get_args(BetaManagedAgentsAgentToolConfig.model_fields["name"].annotation))
+    assert sdk == caps.BUILTIN_TOOL_NAMES
+
+
+@pytest.mark.parametrize("name", ["local_fn", "custom_writer", "bash2"])
+async def test_an_opted_in_routine_still_refuses_a_call_that_is_not_a_builtin(name: str) -> None:
+    """The second lock: with built-ins on, a custom tool's call is still refused."""
+    inner = AsyncMock(return_value=caps.ToolConfirmationResult(allow=True))
+    posture = caps.capability_posture(PolicyApproval(decide=inner), allow_builtins=True)
+
+    decision = await posture.decide(
+        ToolCall(tool_use_id="tu_custom", server_name=None, tool_name=name)
+    )
+
+    assert decision.allow is False
+    inner.assert_not_awaited()

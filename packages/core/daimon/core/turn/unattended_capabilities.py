@@ -82,6 +82,12 @@ UnattendedEntryPoint = Literal[
 log = structlog.get_logger(__name__)
 
 BUILTIN_TOOLSET: Final[str] = "agent_toolset_20260401"
+#: The tools `BUILTIN_TOOLSET` offers, frozen here like the reviewed fields: a
+#: built-in a later SDK adds is refused even for an opted-in routine until it
+#: is reviewed and listed.
+BUILTIN_TOOL_NAMES: Final[frozenset[str]] = frozenset(
+    {"bash", "edit", "read", "write", "glob", "grep", "web_fetch", "web_search"}
+)
 MCP_TOOLSET: Final[str] = "mcp_toolset"
 CUSTOM_TOOL: Final[str] = "custom"
 
@@ -998,13 +1004,16 @@ def capability_posture(
 
     A disabled tool should never pause, so this is the second lock: a
     built-in or custom call (`server_name=None`) is refused unless
-    `allow_builtins` (a routine an admin opted in), and with a
-    `tool_allowlist` so is every unlisted call.
+    `allow_builtins` (a routine an admin opted in) and it names a reviewed
+    built-in (`BUILTIN_TOOL_NAMES`), so a custom tool's call is refused even
+    then. With a `tool_allowlist` so is every unlisted call.
     """
     decide = posture.decide
 
     async def constrained(call: ToolCall) -> ToolConfirmationResult:
-        if call.server_name is None and not allow_builtins:
+        if call.server_name is None and (
+            not allow_builtins or call.tool_name not in BUILTIN_TOOL_NAMES
+        ):
             return ToolConfirmationResult(
                 allow=False,
                 deny_message=(
