@@ -138,7 +138,6 @@ from daimon.core.github_request_expiry import run_request_expiry_poller
 from daimon.core.ma import ORPHAN_INTERRUPT_TIMEOUT_S, interrupt_orphaned_session
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
 from daimon.core.ma_resolver import MAResolverMissError
-from daimon.core.membership import Membership
 from daimon.core.ops_alerts import alert_ops
 from daimon.core.output_delivery import NoticedFiles
 from daimon.core.participation_gates import BATCH_MAX_MESSAGES, BATCH_MAX_QUIET_PERIODS
@@ -2869,13 +2868,7 @@ class DaimonBot(commands.Bot):
                 derive_tenant_uuid(platform="discord", workspace_id=guild_id),
                 guild_id,
                 str(message.author.id),
-                Membership(
-                    is_member=True,
-                    role_ids=tuple(member_role_ids(message.author)),
-                    is_admin=is_member_guild_admin(
-                        message.author, guild_owner_id=message.guild.owner_id
-                    ),
-                ),
+                member_facts(message.author),
             )
         is_webhook_post = isinstance(message.webhook_id, int)
         if not bot_mentioned and is_plain_text_mention_candidate(
