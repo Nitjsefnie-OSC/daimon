@@ -15,6 +15,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, cast
+from urllib.parse import urlsplit
 from uuid import UUID
 
 from daimon.core.mcp_server_url import canonical_mcp_url
@@ -1570,15 +1571,43 @@ class PrivacySettings(BaseModel):
 class ArtifactsSettings(BaseModel):
     """Optional private object storage for hosted-client artifacts."""
 
+    backend: Literal["s3", "azure_blob"] = Field(
+        default="s3",
+        description="Artifact storage backend: s3 (default) or azure_blob.",
+    )
     endpoint_url: HttpUrl = Field(
-        description="S3-compatible bucket endpoint; used for uploads and presigned GET URLs.",
+        description=(
+            "S3-compatible endpoint or Azure Blob account URL "
+            "(https://<account>.blob.core.windows.net); used for uploads and signed GET URLs."
+        ),
     )
     bucket: str = Field(
         min_length=1,
-        description="Private bucket name. Daimon never applies a public-read ACL.",
+        description="Private S3 bucket or Azure Blob container name; provision it before startup.",
     )
-    access_key_id: SecretStr = Field(description="S3-compatible access key id.")
-    secret_access_key: SecretStr = Field(description="S3-compatible secret access key.")
+    access_key_id: SecretStr = Field(
+        default=SecretStr(""), description="S3 access key id; required only for the s3 backend."
+    )
+    secret_access_key: SecretStr = Field(
+        default=SecretStr(""), description="S3 secret access key; required only for the s3 backend."
+    )
+    azure_connection_string: SecretStr | None = Field(
+        default=None,
+        description=(
+            "Local Azurite connection string only; BlobEndpoint must match the loopback "
+            "endpoint_url. Leave unset on Azure; managed identity signs user-delegation SAS "
+            "without account keys."
+        ),
+    )
+    azure_client_id: str | None = Field(
+        default=None,
+        min_length=1,
+        description=(
+            "User-assigned managed identity client id; required for azure_blob except local "
+            "Azurite. ManagedIdentityCredential uses only this identity, with no environment "
+            "service-principal or developer-login fallback."
+        ),
+    )
     region: str = Field(
         default="us-east-1",
         min_length=1,
@@ -1597,6 +1626,56 @@ class ArtifactsSettings(BaseModel):
             "when a hosted client cannot accept image content."
         ),
     )
+
+    @model_validator(mode="after")
+    def validate_backend(self) -> ArtifactsSettings:
+        if self.backend == "azure_blob":
+            if self.access_key_id.get_secret_value() or self.secret_access_key.get_secret_value():
+                raise ValueError(
+                    "azure_blob artifacts reject S3 access_key_id and secret_access_key"
+                )
+            if (
+                self.endpoint_url.query is not None
+                or self.endpoint_url.fragment is not None
+                or self.endpoint_url.username is not None
+                or self.endpoint_url.password is not None
+                or (
+                    self.azure_connection_string is None
+                    and self.endpoint_url.path not in {None, "/"}
+                )
+            ):
+                raise ValueError(
+                    "Azure endpoint_url must be an account URL without path, query or userinfo"
+                )
+        if self.backend == "s3":
+            if (
+                not self.access_key_id.get_secret_value()
+                or not self.secret_access_key.get_secret_value()
+            ):
+                raise ValueError("s3 artifacts require access_key_id and secret_access_key")
+            if self.azure_connection_string is not None:
+                raise ValueError("azure_connection_string requires the azure_blob backend")
+        elif self.azure_connection_string is not None:
+            parts = {
+                key.upper(): value
+                for part in self.azure_connection_string.get_secret_value().split(";")
+                if "=" in part
+                for key, value in [part.split("=", 1)]
+            }
+            endpoint = parts.get("BLOBENDPOINT", "")
+            parsed = urlsplit(endpoint)
+            if (
+                parsed.hostname not in {"localhost", "127.0.0.1", "::1"}
+                or endpoint.rstrip("/") != str(self.endpoint_url).rstrip("/")
+                or "BLOBSECONDARYENDPOINT" in parts
+                or "USEDEVELOPMENTSTORAGE" in parts
+            ):
+                raise ValueError("Azurite BlobEndpoint must match the loopback endpoint_url")
+        elif self.endpoint_url.scheme != "https":
+            raise ValueError("Azure Blob managed identity requires an HTTPS endpoint_url")
+        elif not self.azure_client_id:
+            raise ValueError("azure_blob artifacts require DAIMON_ARTIFACTS__AZURE_CLIENT_ID")
+        return self
 
 
 class DirectMessagePolicy(BaseModel):
@@ -1842,7 +1921,7 @@ class Settings(BaseSettings):
     artifacts: ArtifactsSettings | None = Field(
         default=None,
         description=(
-            "Optional private S3-compatible store for presigned chart links. "
+            "Optional private S3-compatible or Azure Blob store for signed chart links. "
             "Bounded image embeds still run when this is unset."
         ),
     )
