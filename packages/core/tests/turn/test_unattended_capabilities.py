@@ -1312,6 +1312,21 @@ def test_every_field_the_sdk_declares_has_been_reviewed() -> None:
             id="identity_as_a_string",
         ),
         pytest.param(
+            _set("agent.execution_identity", {}),
+            "missing provider field session.agent.execution_identity.type",
+            id="identity_empty",
+        ),
+        pytest.param(
+            _set("budget", {}),
+            "missing provider field session.budget.type",
+            id="budget_empty",
+        ),
+        pytest.param(
+            _set("budget", {"max_list_cost": {"amount": "2500", "currency": "USD"}}),
+            "missing provider field session.budget.type",
+            id="budget_without_type",
+        ),
+        pytest.param(
             _set("budget", {"type": "unlimited"}),
             "unreviewed value at session.budget.type",
             id="budget_of_another_kind",

@@ -412,6 +412,20 @@ def _object(**fields: _Shape) -> _Shape:
     return check
 
 
+def _requiring(key: str, shape: _Shape) -> _Shape:
+    """`shape`, refusing an object without `key` (an object's other keys may be absent)."""
+
+    def check(value: object, path: str) -> str | None:
+        if isinstance(value, dict):
+            entries = cast("dict[str, object]", value)
+            if key not in entries:
+                return f"missing provider field {path}.{key}"
+            return shape(entries, path)
+        return shape(value, path)
+
+    return check
+
+
 def _nullable(shape: _Shape) -> _Shape:
     return lambda value, path: None if value is None else shape(value, path)
 
@@ -463,7 +477,9 @@ _SESSION_SHAPE = _object(
     id=_TEXT,
     type=_TEXT,
     archived_at=_TEXT,
-    budget=_nullable(_object(type=_exactly("limit"), max_list_cost=_MONEY_SHAPE)),
+    budget=_nullable(
+        _requiring("type", _object(type=_exactly("limit"), max_list_cost=_MONEY_SHAPE))
+    ),
     created_at=_TEXT,
     updated_at=_TEXT,
     deployment_id=_TEXT,
@@ -538,7 +554,9 @@ _SESSION_SHAPE = _object(
         description=_TEXT,
         system=_TEXT,
         multiagent=_scalar(),
-        execution_identity=_nullable(_object(type=_exactly(*_EXECUTION_IDENTITY_TYPES))),
+        execution_identity=_nullable(
+            _requiring("type", _object(type=_exactly(*_EXECUTION_IDENTITY_TYPES)))
+        ),
         model=_object(
             id=_TEXT,
             speed=_one_of("standard", "fast"),
