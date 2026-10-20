@@ -645,7 +645,11 @@ async def test_resume_batch_skips_old_or_unreadable_captures_before_its_window(
     draft = template.model_copy(
         update={
             "source": template.source.model_copy(update={"message_id": "eligible-new"}),
+            "evidence": template.evidence.model_copy(
+                update={"original_text": "NEW ELIGIBLE EVIDENCE"}
+            ),
             "thread_title": "NEW ELIGIBLE LEAD",
+            "thread_content": "NEW ELIGIBLE CONTENT",
         }
     )
     eligible = await world.store.accept(config, draft, member)
