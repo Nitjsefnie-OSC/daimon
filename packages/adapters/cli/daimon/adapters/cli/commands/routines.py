@@ -35,6 +35,7 @@ from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.identity import get_or_create_cli_principal
@@ -98,6 +99,7 @@ async def run_backfill_agent_names(
     fallback = 0
 
     for row in rows:
+        row = routine_for_reader(row, user_id=None)
         resolved: str
         try:
             agent = await retrieve_agent(

@@ -40,9 +40,10 @@ from daimon.core.stores.domain import (
     RoutineRow,
     UnattendedRequester,
 )
-from sqlalchemy import and_, delete, false, func, or_, select, update
+from sqlalchemy import and_, delete, false, func, or_, select, true, update
 from sqlalchemy.engine import CursorResult
 from sqlalchemy.ext.asyncio import AsyncSession
+from sqlalchemy.sql.elements import ColumnElement
 
 log = structlog.get_logger(__name__)
 
@@ -54,6 +55,19 @@ FAILURE_NOTICE = "failure_notice"
 
 The poster renders such a payload as a failure notice instead of a result.
 Settling replaces the note as for any post."""
+
+
+def _captured_routine(row: RoutineRow) -> ColumnElement[bool]:
+    """The same producer, destination and configuration revision as the fire."""
+    return and_(
+        Routine.tenant_id == row.tenant_id,
+        Routine.created_by_user_id.is_not_distinct_from(row.created_by_user_id),
+        Routine.agent_id == row.agent_id,
+        Routine.agent_name.is_not_distinct_from(row.agent_name),
+        Routine.updated_at == row.updated_at,
+        Routine.destination_kind.is_not_distinct_from(row.destination_kind),
+        Routine.destination_id.is_not_distinct_from(row.destination_id),
+    )
 
 
 async def create_routine(
@@ -244,17 +258,27 @@ async def update_routine(
     destination_id: str | None = None,
     clear_destination: bool = False,
     channel_id: str | None = None,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
     """PATCH: `None` leaves a field alone. A destination is set as a pair, with
     the `channel_id` it resolves to; `clear_destination=True` removes the pair
     (and any pending delivery) but keeps the source channel/thread provenance
-    and `channel_id`, so the routine's spend still counts toward the same budget."""
+    and `channel_id`, so the routine's spend still counts toward the same budget.
+    A concurrent edit raises StoreError; callers can also supply the revision
+    used for authorization so a stale authorized view cannot be applied.
+    """
+    # Read exactly once: validation, erasure and the write share this revision.
+    # A concurrent edit must fail the CAS rather than reuse stale classification.
+    current = await get_routine(session, routine_id, tenant_id=tenant_id)
+    if current is None:
+        return None
+    if expected_updated_at is not None and current.updated_at != expected_updated_at:
+        raise StoreError("Routine changed while being edited; reload it and try again.")
     values: dict[str, str | bool | datetime | None] = {}
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
             raise StoreError("clear_destination cannot be combined with a new destination")
-        current = await get_routine(session, routine_id, tenant_id=tenant_id)
-        if current is not None and current.destination_kind == "dm":
+        if current.destination_kind == "dm":
             values.update(last_result_tail=None, last_error=None)
         values.update(
             destination_kind=None,
@@ -264,9 +288,6 @@ async def update_routine(
             delivery_note=None,
         )
     elif destination_kind is not None or destination_id is not None:
-        current = await get_routine(session, routine_id, tenant_id=tenant_id)
-        if current is None:
-            return None
         destination_id = await _resolve_destination(
             session, tenant_id, destination_kind, destination_id, current.created_by_user_id
         )
@@ -298,13 +319,7 @@ async def update_routine(
                 delivery_payload=None,
             )
     # Metadata-only edits must also respect a seal added after conversion.
-    current = await get_routine(session, routine_id, tenant_id=tenant_id)
-    if (
-        current is not None
-        and current.destination_kind == "dm"
-        and not clear_destination
-        and destination_kind is None
-    ):
+    if current.destination_kind == "dm" and not clear_destination and destination_kind is None:
         await validate_dm_source(
             session,
             tenant_id,
@@ -330,19 +345,73 @@ async def update_routine(
     if next_fire_at is not None:
         values["next_fire_at"] = next_fire_at
     if not values:
-        return await get_routine(session, routine_id, tenant_id=tenant_id)
+        return current
+
+    return await _save_routine_edit(session, current, values)
+
+
+async def _save_routine_edit(
+    session: AsyncSession,
+    current: RoutineRow,
+    values: dict[str, str | bool | datetime | None],
+    *,
+    expected_updated_at: datetime | None = None,
+) -> RoutineRow:
+    """All configuration writers share CAS, monotone revisions and erasure."""
+    if expected_updated_at is not None and current.updated_at != expected_updated_at:
+        raise StoreError("Routine changed while being edited; reload it and try again.")
+    if current.destination_kind == "dm" or (
+        "agent_id" in values
+        or "agent_name" in values
+        or "destination_kind" in values
+        or "destination_id" in values
+    ):
+        # Any private edit or producer/destination change invalidates content.
+        # This also erases retained previews from legacy owner-only routines.
+        # Agent reassignment and destination ABA cannot reclassify old content.
+        cleared_public = (
+            current.destination_kind != "dm"
+            and "destination_kind" in values
+            and values["destination_kind"] is None
+        )
+        values.update(
+            last_result_tail=None,
+            last_error=None,
+            delivery_payload=None,
+            delivery_status=None if cleared_public else "skipped",
+            delivery_note=(
+                None
+                if cleared_public
+                else "private_revision_changed"
+                if current.destination_kind == "dm"
+                else "destination_changed"
+                if "destination_kind" in values
+                else "agent_changed"
+            ),
+            delivery_lease_owner=None,
+            delivery_lease_expires_at=None,
+        )
 
     stmt = (
         update(Routine)
-        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(**values, updated_at=func.now())
+        .where(
+            Routine.id == current.id,
+            Routine.tenant_id == current.tenant_id,
+            Routine.updated_at == current.updated_at,
+        )
+        .values(
+            **values,
+            updated_at=func.greatest(
+                func.clock_timestamp(), Routine.updated_at + timedelta(microseconds=1)
+            ),
+        )
         .returning(Routine)
         .execution_options(synchronize_session=False)
     )
     result = await session.execute(stmt)
     orm = result.scalar_one_or_none()
     if orm is None:
-        return None
+        raise StoreError("Routine changed while being edited; reload it and try again.")
     await session.flush()
     return RoutineRow.model_validate(orm)
 
@@ -351,6 +420,8 @@ async def update_routine_agent_id(
     session: AsyncSession,
     routine_id: _uuid.UUID,
     new_agent_id: str,
+    *,
+    expected_updated_at: datetime | None = None,
 ) -> bool:
     """Update only ``routines.agent_id``. Used by the scheduler resolver path
     when the resolver heals a stale id. Does NOT touch
@@ -358,9 +429,10 @@ async def update_routine_agent_id(
 
     Returns True if a row was updated, False otherwise.
     """
-    result = await session.execute(
-        update(Routine).where(Routine.id == routine_id).values(agent_id=new_agent_id)
-    )
+    statement = update(Routine).where(Routine.id == routine_id)
+    if expected_updated_at is not None:
+        statement = statement.where(Routine.updated_at == expected_updated_at)
+    result = await session.execute(statement.values(agent_id=new_agent_id))
     return cast(CursorResult[Any], result).rowcount > 0
 
 
@@ -519,25 +591,26 @@ async def sandbox_tools_history(
 
 
 async def pause_routine(
-    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
-    """Set ``enabled=False`` and ``next_fire_at=NULL`` atomically.
+    """Pause the captured revision, erase private output and clear its next slot.
 
-    Returns the updated row, or ``None`` if no row matched ``routine_id``
-    (including a routine_id that exists under a different tenant_id).
+    Missing/cross-tenant rows return None. A stale authorized revision or a
+    concurrent configuration edit raises StoreError rather than overwriting it.
     """
-    stmt = (
-        update(Routine)
-        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(enabled=False, next_fire_at=None, updated_at=func.now())
-        .returning(Routine)
-        .execution_options(synchronize_session=False)
-    )
-    orm = (await session.execute(stmt)).scalar_one_or_none()
-    if orm is None:
+    row = await get_routine(session, routine_id, tenant_id=tenant_id)
+    if row is None:
         return None
-    await session.flush()
-    return RoutineRow.model_validate(orm)
+    return await _save_routine_edit(
+        session,
+        row,
+        {"enabled": False, "next_fire_at": None},
+        expected_updated_at=expected_updated_at,
+    )
 
 
 async def resume_routine(
@@ -546,29 +619,23 @@ async def resume_routine(
     *,
     tenant_id: _uuid.UUID,
     now: datetime,
+    expected_updated_at: datetime | None = None,
 ) -> RoutineRow | None:
-    """Set ``enabled=True`` and ``next_fire_at`` to the next cron slot at-or-after ``now``.
+    """Resume only the revision whose cron/timezone supplied the next slot.
 
-    Caller injects ``now`` so this helper stays clock-free. Returns the
-    updated row, or ``None`` if no row matched ``routine_id``
-    (including a routine_id that exists under a different tenant_id).
+    Missing/cross-tenant rows return None. A concurrent edit raises StoreError;
+    callers must reload/revalidate instead of saving an obsolete computed slot.
     """
     row = await get_routine(session, routine_id, tenant_id=tenant_id)
     if row is None:
         return None
     nxt = next_slot_at_or_after(row.cron_expr, row.timezone, now)
-    stmt = (
-        update(Routine)
-        .where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
-        .values(enabled=True, next_fire_at=nxt, updated_at=func.now())
-        .returning(Routine)
-        .execution_options(synchronize_session=False)
+    return await _save_routine_edit(
+        session,
+        row,
+        {"enabled": True, "next_fire_at": nxt},
+        expected_updated_at=expected_updated_at,
     )
-    orm = (await session.execute(stmt)).scalar_one_or_none()
-    if orm is None:
-        return None
-    await session.flush()
-    return RoutineRow.model_validate(orm)
 
 
 async def record_result(
@@ -581,6 +648,9 @@ async def record_result(
     delivery_note: str | None = None,
     delivery_payload: str | None = None,
     expected_destination: tuple[str | None, str | None] | None = None,
+    expected_private: RoutineRow | None = None,
+    expected_row: RoutineRow | None = None,
+    producing_agent_id: str | None = None,
 ) -> None:
     """Set `last_result_tail` and `last_error` in a single UPDATE.
 
@@ -635,12 +705,32 @@ async def record_result(
             Routine.destination_kind.is_not_distinct_from(kind),
             Routine.destination_id.is_not_distinct_from(recipient),
         )
+    if expected_row is not None:
+        statement = statement.where(_captured_routine(expected_row))
+    if expected_private is not None:
+        statement = statement.where(
+            Routine.tenant_id == expected_private.tenant_id,
+            Routine.created_by_user_id == expected_private.created_by_user_id,
+            Routine.agent_id == expected_private.agent_id,
+            Routine.agent_name == expected_private.agent_name,
+            Routine.updated_at == expected_private.updated_at,
+            Routine.destination_kind == "dm",
+            Routine.destination_id == expected_private.destination_id,
+        )
+        if producing_agent_id is not None:
+            # Persist the actual producer, including resolver self-healing, in
+            # the same fenced write as its content. Delivery verifies THIS ID.
+            values["agent_id"] = producing_agent_id
     await session.execute(statement.values(**values))
     await session.flush()
 
 
 async def queue_failure_notice(
-    session: AsyncSession, routine_id: _uuid.UUID, *, notice: str
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    notice: str,
+    expected_row: RoutineRow | None = None,
 ) -> bool:
     """Queue `notice` for the destination if this failure starts a failing streak.
 
@@ -657,6 +747,7 @@ async def queue_failure_notice(
             update(Routine)
             .where(
                 Routine.id == routine_id,
+                _captured_routine(expected_row) if expected_row is not None else true(),
                 Routine.destination_kind.is_not(None),
                 Routine.last_error.is_(None),
                 or_(

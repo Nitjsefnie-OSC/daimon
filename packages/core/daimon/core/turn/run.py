@@ -1094,6 +1094,10 @@ async def run_prepared_turn_impl(
         )
         tool_confirmation = capability_posture(tool_confirmation)
 
+    unattended_dm = (
+        unattended and prepared.admission.grant is not None and prepared.admission.grant.is_dm
+    )
+
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery
     # recreates -- so a ceiling breach mid-recovery marks the NEW mapping dead,
@@ -1200,7 +1204,21 @@ async def run_prepared_turn_impl(
                         # a coordinator, or a tool that never pauses, would run
                         # on its first message. Refuse before anything is sent.
                         raise AdmissionDenied(reason="backend_unsupported")
-                    if gateable:
+                    if unattended_dm:
+                        if not gateable:
+                            raise AdmissionDenied(reason="backend_unsupported")
+                        from daimon.core.turn.unattended import dm_session_authority
+
+                        posture, dm_gate = await dm_session_authority(
+                            deps,
+                            admission,
+                            session_id,
+                            tenant_id=tenant_id,
+                            read_session=read_session,
+                            entry_point=unattended_entry_point(origin),
+                        )
+                        stack.enter_context(unattended_sends(dm_gate))
+                    elif gateable:
                         stack.enter_context(
                             unattended_sends(
                                 session_gate(

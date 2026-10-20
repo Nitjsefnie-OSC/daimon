@@ -144,3 +144,38 @@ def test_owner_dm_failed_delivery_is_visible_in_routine_status() -> None:
         delivery_note="DM blocked",
     )
     assert derive_glyph(row) == "❌"
+
+
+def test_private_output_reader_fails_closed_without_an_identified_owner() -> None:
+    from daimon.core.routines import routine_for_reader
+
+    for owner in (None, "owner"):
+        row = _make_row(
+            created_by_user_id=owner,
+            last_result_tail="private-tail",
+            last_error="private-error",
+            delivery_payload="private-payload",
+            delivery_note="private-note",
+        )
+        for reader in (None, "admin", "owner"):
+            view = routine_for_reader(row, user_id=reader)
+            if reader == owner and reader is not None:
+                assert view == row
+            else:
+                assert view.last_result_tail is None and view.delivery_payload is None
+                assert view.delivery_note is None
+                assert "private-error" not in view.model_dump_json()
+        assert row.last_result_tail == "private-tail", (
+            "redaction must not mutate the stored snapshot"
+        )
+
+
+def test_channel_routine_output_remains_shared() -> None:
+    from daimon.core.routines import routine_for_reader
+
+    for destination in (
+        {"channel_id": "123"},
+        {"destination_kind": "channel", "destination_id": "123"},
+    ):
+        row = _make_row(last_result_tail="shared", last_error="shared error", **destination)
+        assert routine_for_reader(row, user_id=None) == row

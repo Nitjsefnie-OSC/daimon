@@ -504,9 +504,19 @@ deleting or transferring the bound agent to another tenant, or an unreadable
 private access policy, suppresses replies without choosing a different tenant.
 Billing and operational notices remain separate from these silent access denials.
 
-DM routine delivery derives the recipient from the owner but grants no extra
-private tool authority: these runs use the same tool permissions as channel
-routines and mount no personal memory. Tenant memory is read-only. A source
+DM routines are scheduled owner messages through normal live-DM admission,
+binding and execution, using the owner's ordinary credentials and memory policy
+in a fresh private scope. Each run rechecks current membership, H1 role policy,
+the H1b admin bypass switch, tenant DM controls, recipient policy, agent access
+and creation provenance. Execution is unattended (`attended=False`), Managed
+Agents only, with actual-session S1 gating before every send batch. Rules and
+trusted annotations follow the actual agent and endpoints, including replacement;
+the saved budget channel grants no channel tool allowance. Protected actions
+requiring a card are refused. Nobody watches intermediate actions; permitted
+tools retain the ordinary DM side-effect risk. Crash and stop behaviour matches
+live DMs. A busy owner's scheduled slot is skipped. Private results and diagnostics
+are fenced by producer, destination and revision; agent/destination edits erase
+old content and invalidate deliveries. A source
 thread and its parent are captured at creation and never changed by an edit;
 Daimon checks both at save, fire and before each delivery chunk. Operator source
 IDs must resolve to supported channels or threads in the selected tenant's guild,

@@ -7,8 +7,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0117_routine_sandbox_tools"
-down_revision: str | None = "0116_thread_model_settings"
+revision: str = "0118_routine_sandbox_tools"
+down_revision: str | None = "0117_clear_legacy_routine_output"
 branch_labels: str | None = None
 depends_on: str | None = None
 

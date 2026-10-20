@@ -24,6 +24,7 @@ from daimon.core.billing import BillingConfig
 from daimon.core.channel_budget_notice import BudgetNotifier
 from daimon.core.channel_skills import PlatformSkillMemory
 from daimon.core.config import (
+    DirectMessagePolicy,
     DiscordSettings,
     GithubAppSettings,
     McpSettings,
@@ -82,6 +83,9 @@ class TurnDeps:
     github_app_private_key: str | None
     public_url: str | None
     membership_resolver: MembershipResolver | None = None
+    direct_message_policies: Mapping[uuid.UUID, DirectMessagePolicy] = field(
+        default_factory=dict[uuid.UUID, DirectMessagePolicy]
+    )
     agent_github_app: GithubAppSettings | None = None
     # Required: safety off is the explicit `enabled=False` policy from settings.
     tool_safety: ToolSafetyPolicy = field(kw_only=True)
@@ -182,6 +186,7 @@ def build_turn_deps(
             if isinstance(settings.discord, DiscordSettings)
             else None
         ),
+        direct_message_policies=settings.direct_message_policies,
         anthropic=anthropic,
         messages=anthropic,
         turn_runtime_factory=build_channel_runtime,
