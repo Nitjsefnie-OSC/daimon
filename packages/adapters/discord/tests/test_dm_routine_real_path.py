@@ -494,6 +494,28 @@ class Harness:
                     for config in tool.get("configs", [])
                     if config["name"] not in protected_tools(self.deps.tool_safety)
                 ]
+        # Preview now isolates each native session's identity grant, while
+        # personal OAuth credentials remain in the owner's shared agent vault.
+        chat_session = session.metadata["daimon_chat_session_id"]
+        servers = [server.model_dump(mode="json") for server in session.agent.mcp_servers]
+        for server in servers:
+            if server["name"] == "daimon-mcp":
+                assert server["url"] == f"https://mcp.example/mcp?daimon_session={chat_session}"
+                server["url"] = "https://mcp.example/mcp"
+        vaults = []
+        for vid in session.vault_ids:
+            grants = [
+                credential
+                for credential in self.upstream.credentials[vid].values()
+                if credential["metadata"].get("daimon_chat_jti")
+            ]
+            if grants:
+                assert len(grants) == 1
+                assert grants[0]["metadata"]["daimon_chat_session"] == chat_session
+                vaults.append("session identity")
+            else:
+                vaults.append(vid)
+        assert vaults.count("session identity") == 1
         return {
             "resources": sorted(
                 (
@@ -503,8 +525,8 @@ class Harness:
                 key=json.dumps,
             ),
             "tools": tools,
-            "mcp_servers": [s.model_dump(mode="json") for s in session.agent.mcp_servers],
-            "vault_ids": sorted(session.vault_ids),
+            "mcp_servers": servers,
+            "vault_ids": sorted(vaults),
             "agent": session.agent.id,
             "environment": session.environment_id,
         }
@@ -785,18 +807,21 @@ async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checke
     a = await harness.routine(OWNER_A)
     b = await harness.routine(OWNER_B)
     sessions = harness.upstream.state.sessions
-    (vault_a,) = sessions[a.session_id].vault_ids
-    (vault_b,) = sessions[b.session_id].vault_ids
-    assert vault_a != vault_b
+    vaults_a = sessions[a.session_id].vault_ids
+    vaults_b = sessions[b.session_id].vault_ids
+    assert len(vaults_a) == len(vaults_b) == 2
+    assert set(vaults_a).isdisjoint(vaults_b)
     upstream = harness.upstream
     credential_a = next(
         c
-        for c in upstream.credentials[vault_a].values()
+        for vault in vaults_a
+        for c in upstream.credentials[vault].values()
         if c["auth"].get("mcp_server_url") == "https://a.example/mcp"
     )
     credential_b = next(
         c
-        for c in upstream.credentials[vault_b].values()
+        for vault in vaults_b
+        for c in upstream.credentials[vault].values()
         if c["auth"].get("mcp_server_url") == "https://b.example/mcp"
     )
     assert (
@@ -816,9 +841,16 @@ async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checke
     assert "private_a" in servers_a and "private_b" not in servers_a
     assert "private_b" in servers_b and "private_a" not in servers_b
     agent_uuid = derive_agent_uuid(tenant_id=harness.tenant.id, ma_agent_id="ag_daimon")
-    for owner, vault in ((OWNER_A, vault_a), (OWNER_B, vault_b)):
+    for owner, sid in ((OWNER_A, a.session_id), (OWNER_B, b.session_id)):
         chat = next(
-            c for c in upstream.credentials[vault].values() if c["metadata"].get("daimon_chat_jti")
+            credential
+            for vault in sessions[sid].vault_ids
+            for credential in upstream.credentials[vault].values()
+            if credential["metadata"].get("daimon_chat_jti")
+        )
+        assert (
+            chat["metadata"]["daimon_chat_session"]
+            == sessions[sid].metadata["daimon_chat_session_id"]
         )
         token = upstream.crypto.decrypt(upstream.encrypted_tokens[chat["id"]]).decode()
         scope = resource_scope(
@@ -830,6 +862,7 @@ async def test_attached_owner_credentials_are_nonempty_distinct_and_scope_checke
         access = await verifier.verify_token(token)
         assert access is not None and access.claims["sub"] == scope.account_id
         assert access.claims["chat_agent_id"] == str(agent_uuid)
+        assert access.claims["chat_session_id"] == sessions[sid].metadata["daimon_chat_session_id"]
         assert access.claims["tenant_id"] == str(harness.tenant.id)
         auth = AuthIdentity(
             account_id=uuid.UUID(access.claims["sub"]),
