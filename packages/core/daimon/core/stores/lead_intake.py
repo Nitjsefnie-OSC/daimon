@@ -29,6 +29,7 @@ from daimon.core.lead_intake import (
     LeadDestination,
     LeadEffectState,
     LeadSubmission,
+    normalize_project,
 )
 from daimon.core.lead_intake_access import LeadReadDenied, LeadReadTarget, read_target
 from daimon.core.lead_intake_execution import current_intake_execution
@@ -589,9 +590,7 @@ class IntakeStore:
     async def opportunity(
         self, config: IntakeConfig, record: IntakeRecord, company_id: str, description: str
     ) -> str:
-        import re
-
-        normalized = " ".join(re.findall(r"[\w]+", description.casefold()))
+        normalized = normalize_project(description)
         choice = (
             f"selected:{record.progress.selected_deal_id}"
             if record.progress.selected_deal_id

@@ -191,7 +191,7 @@ class LeadOpportunityMatch(BaseModel):
     reason: str | None = None
 
 
-def _normalize_project(value: str) -> str:
+def normalize_project(value: str) -> str:
     return " ".join(re.findall(r"[\w]+", value.casefold()))
 
 
@@ -206,15 +206,15 @@ def get_relevant_deals(
 ) -> list[LeadDealCandidate]:
     """Include associated open deals and plausible missing-association records."""
     relevant: list[LeadDealCandidate] = []
-    company = _normalize_project(company_name)
+    company = normalize_project(company_name)
     domain = company_domain.casefold().strip()
-    description = _normalize_project(opportunity_description)
+    description = normalize_project(opportunity_description)
     for candidate in candidates:
         if candidate.is_closed:
             continue
         associated = company_id in candidate.company_ids or contact_id in candidate.contact_ids
         text = f"{candidate.name} {candidate.description}"
-        normalized = _normalize_project(text)
+        normalized = normalize_project(text)
         plausible_orphan = not candidate.company_ids and (
             (bool(company) and f" {company} " in f" {normalized} ")
             or (bool(domain) and domain in text.casefold())
@@ -242,15 +242,15 @@ def select_matching_opportunity(
         return LeadOpportunityMatch()
     if not candidates:
         return LeadOpportunityMatch()
-    description = _normalize_project(opportunity_description)
+    description = normalize_project(opportunity_description)
     exact = [
         candidate
         for candidate in candidates
         if description
         and description
         in {
-            _normalize_project(candidate.description),
-            _normalize_project(candidate.name),
+            normalize_project(candidate.description),
+            normalize_project(candidate.name),
         }
     ]
     if len(candidates) == 1 and len(exact) == 1:
