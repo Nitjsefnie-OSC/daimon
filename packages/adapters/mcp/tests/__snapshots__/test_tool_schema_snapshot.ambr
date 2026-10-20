@@ -5782,6 +5782,37 @@
         'type': 'object',
       }),
     }),
+    'set_routine_sandbox_tools': dict({
+      'description': '''
+        Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
+        for one routine's own scheduled runs. Admin only.
+        <blank line>
+        They are off for every unattended run by default. Only a current workspace or
+        server admin may change this, and only in person (not an agent key or an agent in
+        a conversation); owning the routine is not enough. Each change records who made it
+        and when, and ``get_routine``/``list_routines`` show it as
+        ``sandbox_tools_enabled``. Setting the value a routine already has changes
+        nothing. Timers, watches, agent chat, fleet workers, ``daimon run`` and
+        checkpoints cannot be opted in.
+      ''',
+      'parameters': dict({
+        'additionalProperties': False,
+        'properties': dict({
+          'enabled': dict({
+            'type': 'boolean',
+          }),
+          'routine_id': dict({
+            'format': 'uuid',
+            'type': 'string',
+          }),
+        }),
+        'required': list([
+          'routine_id',
+          'enabled',
+        ]),
+        'type': 'object',
+      }),
+    }),
     'set_setup_target': dict({
       'description': '''
         Switch this setup conversation to an explicitly selected MA agent identity.

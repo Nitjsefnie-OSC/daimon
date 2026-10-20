@@ -3246,9 +3246,9 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
 
     Only a routine an admin opted in keeps them on the wire at send time.
     """
-    import sqlalchemy as sa
-    from daimon.core._models import Routine as RoutineModel
+    from daimon.core.authz import Subject
     from daimon.core.routine_files import decode_payload
+    from daimon.core.stores.routines import set_sandbox_tools
     from daimon.testing.ma import MARouter, build_fake_anthropic, list_response, sse_response
     from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
 
@@ -3267,12 +3267,17 @@ async def test_fire_has_no_sandbox_file_outputs_from_real_headless_turn(
         destination_id="C123",
     )
     if opted_in:
-        await db_session.execute(
-            sa.update(RoutineModel)
-            .where(RoutineModel.id == row.id)
-            .values(sandbox_tools_enabled=True)
+        result = await set_sandbox_tools(
+            db_session,
+            row.id,
+            tenant_id=tenant.id,
+            enabled=True,
+            set_by="admin",
+            actor=Subject(is_admin=True),
+            via="cli",
         )
-        row = row.model_copy(update={"sandbox_tools_enabled": True})
+        assert result is not None
+        row = result[0]
     await db_session.commit()
     router = MARouter()
     snapshot = ma_session(id="ses_output", agent_id="ag", environment_id="env").model_dump(

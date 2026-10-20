@@ -55,6 +55,7 @@
             "thread_id": null
           },
           "personal_memory": false,
+          "sandbox_tools": false,
           "session_factory": {
             "fixture_type": "async_sessionmaker"
           },
