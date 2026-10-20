@@ -1346,3 +1346,18 @@ MultiFernet ring for tenant evidence and service-owned integration credentials.
 Provision private operator files with `daimon leads configure`; do not put
 Gmail/HubSpot secrets in prompts or agent vaults. Keep the scheduler running so
 raw-source and 90-day evidence expiry happen even when no triage routine fires.
+
+### Clearing retained legacy routine output
+
+Migration `0117_clear_legacy_routine_output` clears `last_result_tail`,
+`last_error`, `delivery_payload`, and `delivery_note` on existing routines whose
+`destination_kind`, `destination_id`, and `channel_id` are all NULL, including
+paused and failed routines. Older runners could save the owner's personal-memory
+output in these rows. The cleanup does not change schedules or destinations.
+Downgrade is a no-op for this erased data; it cannot restore previews or errors.
+
+Stop all old scheduler, adapter, and MCP processes before applying this migration,
+then start the upgraded processes. An old producer left running could repopulate
+private data after the purge. Upgraded readers restrict these rows' previews and
+diagnostics to the identified owner, including when an administrator manages the
+routine. The same owner restriction applies to explicit DM results.

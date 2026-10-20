@@ -31,8 +31,8 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "packages/core/alembic"
 FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
-PREVIOUS_HEAD = "0116_thread_model_settings"
-HEAD = "0117_lead_intake"
+PREVIOUS_HEAD = "0117_clear_legacy_routine_output"
+HEAD = "0118_lead_intake"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
@@ -40,6 +40,7 @@ CHAIN = [
     "0113_unattended_turn_provenance",
     "0114_turn_attendance",
     "0115_origin_session_grants",
+    "0116_thread_model_settings",
     PREVIOUS_HEAD,
     HEAD,
 ]

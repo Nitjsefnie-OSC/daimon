@@ -1078,7 +1078,21 @@ async def run_prepared_turn_impl(
                         # a coordinator, or a tool that never pauses, would run
                         # on its first message. Refuse before anything is sent.
                         raise AdmissionDenied(reason="backend_unsupported")
-                    if gateable:
+                    if admission.grant is not None and admission.grant.is_dm:
+                        if not gateable:
+                            raise AdmissionDenied(reason="backend_unsupported")
+                        from daimon.core.turn.unattended import dm_session_authority
+
+                        posture, dm_gate = await dm_session_authority(
+                            deps,
+                            admission,
+                            session_id,
+                            tenant_id=tenant_id,
+                            read_session=read_session,
+                            entry_point=unattended_entry_point(origin),
+                        )
+                        stack.enter_context(unattended_sends(dm_gate))
+                    elif gateable:
                         stack.enter_context(
                             unattended_sends(
                                 session_gate(

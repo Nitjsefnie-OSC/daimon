@@ -345,6 +345,7 @@ async def record_failure(
     *,
     error: str,
     reason: TerminationReason | None,
+    expected_row: RoutineRow | None = None,
 ) -> None:
     """Record a failed run and, for the first failure in a row, queue a notice.
 
@@ -358,9 +359,11 @@ async def record_failure(
         notice = failure_notice_text(
             reason, platform=await routine_platform(session, routine_id) or ""
         )
-        if await queue_failure_notice(session, routine_id, notice=notice):
+        if await queue_failure_notice(
+            session, routine_id, notice=notice, expected_row=expected_row
+        ):
             log.info("routine.failure_notice_queued", routine_id=str(routine_id))
-    await record_result(session, routine_id, tail=None, error=error)
+    await record_result(session, routine_id, tail=None, error=error, expected_row=expected_row)
 
 
 def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:

@@ -31,6 +31,7 @@ from daimon.core.errors import DaimonError, UserFacingError
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_agent_rules
 from daimon.core.posted_controls.routines import apply_routine_action
+from daimon.core.routines import can_read_routine_output
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import get_routine, update_routine
@@ -166,6 +167,7 @@ class _DestinationPicker(discord.ui.Select["RoutinesPanelView"]):
                     session,
                     row.id,
                     tenant_id=row.tenant_id,
+                    expected_updated_at=row.updated_at,
                     destination_kind="dm" if self.values[0] == "dm" else None,
                     clear_destination=self.values[0] == "none",
                 )
@@ -263,8 +265,7 @@ class _ViewOutputButton(discord.ui.Button["RoutinesPanelView"]):
             async with self.view.runtime.sessionmaker() as session:
                 current = await get_routine(session, row.id, tenant_id=row.tenant_id)
             if current is None or (
-                current.destination_kind == "dm"
-                and current.created_by_user_id != str(interaction.user.id)
+                not can_read_routine_output(current, user_id=str(interaction.user.id))
             ):
                 await interaction.response.send_message(
                     "Only the owner can read a private routine result.", ephemeral=True
@@ -376,6 +377,7 @@ async def _rerender(interaction: discord.Interaction, view: RoutinesPanelView) -
             session,
             runtime.anthropic,
             tenant_id=tenant_id,
+            viewer_user_id=str(view.allowed_user_id),
         )
     new_state = RoutinesPanelState.initial(
         rows=entries,

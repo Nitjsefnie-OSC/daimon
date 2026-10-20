@@ -481,7 +481,10 @@ async def test_claims_are_per_platform(db_session: AsyncSession) -> None:
     )
 
 
-async def test_clearing_the_destination_drops_a_pending_post(db_session: AsyncSession) -> None:
+@pytest.mark.parametrize("claimed", [False, True])
+async def test_clearing_the_destination_drops_a_pending_post(
+    db_session: AsyncSession, claimed: bool
+) -> None:
     row = await _routine(db_session)
     from daimon.core.routine_files import PREFIX, RoutineFile, RoutinePayload
 
@@ -497,12 +500,24 @@ async def test_clearing_the_destination_drops_a_pending_post(db_session: AsyncSe
         ).model_dump_json()
     )
     await record_result(
-        db_session, row.id, tail="t", error=None, delivery="pending", delivery_payload=payload
+        db_session,
+        row.id,
+        tail="t",
+        error="old diagnostic",
+        delivery="pending",
+        delivery_payload=payload,
     )
+    if claimed:
+        claims = await claim_routine_deliveries(
+            db_session, platform="discord", owner="a", now=_NOW, lease=timedelta(minutes=2)
+        )
+        assert len(claims) == 1 and claims[0].delivery_status == "claimed"
     await update_routine(db_session, row.id, tenant_id=row.tenant_id, clear_destination=True)
     after = await get_routine(db_session, row.id, tenant_id=row.tenant_id)
     assert after is not None
-    assert after.delivery_payload is None
+    assert after.delivery_payload is None and after.delivery_note is None
+    assert after.last_result_tail is None and after.last_error is None
+    assert after.delivery_lease_owner is None and after.delivery_lease_expires_at is None
     assert (after.destination_kind, after.destination_id, after.delivery_status) == (
         None,
         None,

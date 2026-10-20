@@ -1483,13 +1483,11 @@ async def test_headless_result_callback_only_receives_completed_turns(reason):
     assert seen == ([state] if reason == "completed" else [])
 
 
-@pytest.mark.parametrize("destination_kind", [None, "channel", "dm"])
-async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
-    destination_kind,
+async def test_headless_routines_never_mount_owner_memory(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """A DM routine mounts only tenant memory, even when the owner has a store."""
+    """The headless API cannot request personal memory, even for a known owner."""
     from daimon.core.stores.agent_memory_stores import (
         insert_memory_store,
         insert_personal_memory_store,
@@ -1510,22 +1508,6 @@ async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
         memory_store_id="memstore_owner",
     )
     await db_session.commit()
-    from daimon.core.rule_views import routine_mounts_personal_memory
-    from daimon.core.stores.routines import create_routine
-
-    async with db_session_factory.begin() as session:
-        row = await create_routine(
-            session,
-            tenant_id=tenant.id,
-            created_by_user_id="123",
-            agent_id="agent_x",
-            agent_name="daimon",
-            cron_expr="0 9 * * *",
-            timezone_="UTC",
-            trigger_message="hi",
-            destination_kind=destination_kind,
-            destination_id="456" if destination_kind == "channel" else None,
-        )
     bodies: list[dict[str, Any]] = []
     client = _build_client(_idle_events(), session_create_capture=bodies)
     await run_turn(
@@ -1538,7 +1520,6 @@ async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
         agent_uuid=agent_id,
         session_factory=db_session_factory,
         origin="routine",
-        personal_memory=routine_mounts_personal_memory(row),
         tool_safety=OPEN_TOOL_SAFETY,
     )
     mounts = {
@@ -1546,7 +1527,4 @@ async def test_a_routines_owner_memory_is_mounted_read_only_only_when_asked(
         for r in bodies[0]["resources"]
         if r["type"] == "memory_store"
     }
-    expected = {"memstore_shared": "read_only"}
-    if destination_kind is None:
-        expected["memstore_owner"] = "read_only"
-    assert mounts == expected
+    assert mounts == {"memstore_shared": "read_only"}

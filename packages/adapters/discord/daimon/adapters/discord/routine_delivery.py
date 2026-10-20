@@ -201,6 +201,12 @@ def make_discord_routine_poster(
                 row.destination_id,
             ):
                 return DeliveryOutcome(status="skipped", note="destination_changed")
+            if row.destination_kind == "dm" and (
+                current.agent_id != row.agent_id
+                or current.agent_name != row.agent_name
+                or current.updated_at != row.updated_at
+            ):
+                return DeliveryOutcome(status="skipped", note="private_revision_changed")
             if row.delivery_status == "claimed" and (
                 current.delivery_status != "claimed"
                 or current.delivery_lease_owner != row.delivery_lease_owner
