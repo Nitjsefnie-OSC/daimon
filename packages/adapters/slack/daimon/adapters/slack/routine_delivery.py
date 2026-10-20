@@ -35,6 +35,7 @@ from daimon.core.message_split import split_fenced
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
     DeliveryTarget,
+    claim_still_current,
     clear_creator,
     delivery_target,
     render_fallback_dm,
@@ -214,12 +215,7 @@ def make_slack_routine_poster(
                 row.destination_id,
             ):
                 return False
-            if row.delivery_status == "claimed" and (
-                current.delivery_status != "claimed"
-                or current.delivery_lease_owner != row.delivery_lease_owner
-                or current.delivery_lease_expires_at is None
-                or current.delivery_lease_expires_at <= datetime.now(UTC)
-            ):
+            if not claim_still_current(current, row, datetime.now(UTC)):
                 return False
             return isinstance(
                 await clear_creator(runtime.sessionmaker, row, platform="slack"), TenantAccessPolicy

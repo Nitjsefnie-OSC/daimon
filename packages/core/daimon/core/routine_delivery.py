@@ -78,6 +78,7 @@ __all__ = [
     "DeliveryTarget",
     "RoutinePoster",
     "agent_posted_to",
+    "claim_still_current",
     "destination_shape_error",
     "failure_notice_text",
     "record_failure",
@@ -691,6 +692,20 @@ def placement_unknown_is_unsafe(
     if kind == "thread":
         return any_writers_none(policy)
     return any_writers_none(policy, categories_only=True)
+
+
+def claim_still_current(current: RoutineRow, row: RoutineRow, now: datetime) -> bool:
+    """Whether the delivery lease `row` was claimed with is still held and unexpired.
+
+    `current` is the routine as read now. A row that was not claimed has no
+    lease to lose.
+    """
+    return row.delivery_status != "claimed" or (
+        current.delivery_status == "claimed"
+        and current.delivery_lease_owner == row.delivery_lease_owner
+        and current.delivery_lease_expires_at is not None
+        and current.delivery_lease_expires_at > now
+    )
 
 
 @dataclass(frozen=True)

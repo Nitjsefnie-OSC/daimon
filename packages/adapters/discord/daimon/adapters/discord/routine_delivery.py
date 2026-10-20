@@ -48,6 +48,7 @@ from daimon.core.output_delivery import DeliverableFile
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
+    claim_still_current,
     clear_creator,
     delivery_target,
     discord_creator_may_post,
@@ -207,12 +208,7 @@ def make_discord_routine_poster(
                 or current.updated_at != row.updated_at
             ):
                 return DeliveryOutcome(status="skipped", note="private_revision_changed")
-            if row.delivery_status == "claimed" and (
-                current.delivery_status != "claimed"
-                or current.delivery_lease_owner != row.delivery_lease_owner
-                or current.delivery_lease_expires_at is None
-                or current.delivery_lease_expires_at <= datetime.now(UTC)
-            ):
+            if not claim_still_current(current, row, datetime.now(UTC)):
                 return DeliveryOutcome(
                     status="skipped", note="Delivery was interrupted; it will not be retried."
                 )
