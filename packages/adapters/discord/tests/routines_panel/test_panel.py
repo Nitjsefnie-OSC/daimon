@@ -887,3 +887,55 @@ async def test_panel_thread_dm_conversion_retains_and_checks_thread(
         )
         == 0
     )
+
+
+@pytest.mark.parametrize("clicker", [123, 999])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_legacy_private_output_button_checks_owner(
+    db_session_factory, monkeypatch, clicker, failed
+):
+    from daimon.core.stores.routines import create_routine, get_routine, record_result
+    from daimon.testing.factories import make_tenant
+
+    async with db_session_factory.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="legacy",
+            enabled=False,
+        )
+        await record_result(
+            session,
+            row.id,
+            tail="personal-memory-sentinel",
+            error="private-error" if failed else None,
+        )
+        row = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert row is not None
+    entry = RoutineEntry(routine=row, agent_name="daimon", glyph="⏸", color=0, label="legacy")
+    runtime = _make_runtime()
+    runtime.sessionmaker = db_session_factory
+    view = RoutinesPanelView(_make_state([entry]), runtime=runtime, allowed_user_id=clicker)
+    button = next(child for child in view.walk_children() if isinstance(child, _ViewOutputButton))
+    interaction = MagicMock(spec=discord.Interaction)
+    interaction.user.id = clicker
+    interaction.user.guild_permissions.manage_guild = True
+    interaction.response.send_message = AsyncMock()
+    await button.callback(interaction)
+    call = interaction.response.send_message.await_args
+    if clicker == 123:
+        texts = [
+            child.content
+            for child in call.kwargs["view"].walk_children()
+            if isinstance(child, discord.ui.TextDisplay)
+        ]
+        assert any(("private-error" if failed else "personal-memory-sentinel") in t for t in texts)
+    else:
+        assert "Only the owner" in call.args[0]
+        assert "view" not in call.kwargs

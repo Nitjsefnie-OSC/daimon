@@ -318,7 +318,7 @@ Routines tools: create / list / get / update / delete.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `create_routine` | all callers | Create a recurring routine with optional channel, thread or owner-DM delivery. |
+| `create_routine` | all callers | Create a recurring routine; owner DMs run as unattended live-DM turns. |
 | `delete_routine` | all callers | Delete a routine (hard delete, tenant-scoped). |
 | `get_routine` | all callers | Get a routine by id. |
 | `list_routines` | all callers | List the routines you created (an admin sees every routine in the workspace). |

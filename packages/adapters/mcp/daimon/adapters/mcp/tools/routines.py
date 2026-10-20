@@ -66,6 +66,7 @@ from daimon.core.permissions import (
     limiting_ids_at,
 )
 from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.routines import routine_for_reader
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import ScopeContext
 from daimon.core.security_audit import record_authz_denial
@@ -89,15 +90,7 @@ class DeleteResult(BaseModel):
 
 def _routine_for_reader(auth: AuthIdentity, row: RoutineRow) -> RoutineRow:
     """Admins can manage metadata without reading a personal-memory result."""
-    if row.destination_kind == "dm" and row.created_by_user_id != auth.platform_user_id:
-        return row.model_copy(
-            update={
-                "last_result_tail": None,
-                "delivery_payload": None,
-                "last_error": "Private routine run failed." if row.last_error is not None else None,
-            }
-        )
-    return row
+    return routine_for_reader(row, user_id=auth.platform_user_id)
 
 
 def _require_platform_user_id(auth: AuthIdentity) -> str:
@@ -819,6 +812,7 @@ async def _update_routine_impl(
             session,
             routine_id,
             tenant_id=tenant_id,
+            expected_updated_at=row.updated_at,
             cron_expr=cron_expr,
             timezone_=timezone,
             trigger_message=trigger_message,
@@ -870,18 +864,26 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         destination_id: str | None = None,
         origin_context_id: str | None = None,
     ) -> RoutineRow:
-        """Create a recurring routine with optional channel, thread or owner-DM delivery.
+        """Create a recurring routine; owner DMs run as unattended live-DM turns.
 
-        DM runs mount no personal memory and retain ordinary channel-routine tool
-        authority. Sources must be supported channels/threads in this tenant's guild;
-        the original thread and parent remain subject to reader restrictions.
+        Owner-DM routines are scheduled live-DM turns, using the owner's normal
+        personal/shared memory, credentials and DM tool authority in a fresh private
+        scope. They support Managed Agents only and run unattended: calls needing
+        a person are refused, and nobody watches intermediate actions. Permitted
+        tools retain ordinary DM side-effect risk. Crash and stop guarantees are
+        exactly those of live DMs. A slot skips if the owner has a DM turn running.
+        All other routines, including destination-free rows, mount shared memory
+        only. Sources must be supported
+        channels/threads in this tenant's guild; the original thread and parent
+        remain subject to reader restrictions.
 
         ``catch_up_policy`` is ``skip`` (default) or ``run-once`` after downtime.
 
         ``destination_kind`` (``channel``, ``thread`` or ``dm``) and ``destination_id``
-        optionally name where each run's result goes. The run is told where,
-        and if the agent does not post there itself, daimon posts the end of
-        its final reply there. On Slack a thread is ``<channel id>:<thread
+        optionally name where each run's result goes. Channel/thread runs are
+        told where; if the agent does not post there itself, daimon posts the end
+        of its final reply there. Owner-DM runs queue their successful final reply
+        privately for the owner. On Slack a thread is ``<channel id>:<thread
         ts>``; on Teams ``<channel id>;messageid=<root id>``, in a channel you
         are in. Discord ``dm`` delivers only to the authenticated owner; omit
         ``destination_id`` to derive their user ID. Slack and Teams reject DM

@@ -12,6 +12,7 @@ real ``AsyncAnthropic`` over ``MARouter`` (transport-level fake — never
 
 from __future__ import annotations
 
+import asyncio
 import dataclasses
 import re
 import uuid
@@ -2666,3 +2667,197 @@ async def test_authenticated_retarget_never_rewrites_creation_source(
         )
     finally:
         await client.close()
+
+
+@pytest.mark.parametrize("change", ["agent", "retarget"])
+async def test_concurrent_public_edit_cannot_expose_private_metadata(
+    committing_sessionmaker, monkeypatch, change
+):
+    from daimon.adapters.mcp.tools._rule_view import CallerView
+    from daimon.core.errors import StoreError
+    from daimon.core.stores import routines
+    from sqlalchemy.sql.dml import Update
+
+    async with committing_sessionmaker.begin() as db:
+        tenant = await make_tenant(db, platform="discord")
+        public = await create_routine(
+            db,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="ag_a",
+            agent_name="a",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="work",
+            destination_kind="channel",
+            destination_id="444",
+            channel_id="444",
+            source_provenance_known=True,
+        )
+    runtime = _runtime(committing_sessionmaker)
+    admin = _auth_identity(tenant_id=tenant.id, platform_user_id="999", is_admin=True)
+    owner = dataclasses.replace(admin, platform_user_id="123")
+    only_b = CallerView(
+        TenantAccessPolicy(), restrict_to_location=True, routed_agent_names=frozenset({"b"})
+    )
+    open_view = CallerView(TenantAccessPolicy())
+
+    async def view(_runtime, auth):
+        return only_b if auth.platform_user_id == "123" else open_view
+
+    monkeypatch.setattr(_routines_mod, "load_isolation_view", view)
+    read, release = asyncio.Event(), asyncio.Event()
+    edits = (
+        {"agent_id": "ag_b", "agent_name": "b"}
+        if change == "agent"
+        else {"destination_kind": "channel", "destination_id": "555", "channel_id": "555"}
+    )
+
+    async def stale_edit():
+        async with committing_sessionmaker.begin() as db:
+            execute = db.execute
+
+            async def paused_execute(statement, *args, **kwargs):
+                if isinstance(statement, Update) and statement.table.name == "routines":
+                    read.set()
+                    await release.wait()
+                return await execute(statement, *args, **kwargs)
+
+            monkeypatch.setattr(db, "execute", paused_execute)
+            await routines.update_routine(db, public.id, tenant_id=tenant.id, **edits)
+
+    task = asyncio.create_task(stale_edit())
+    await asyncio.wait_for(read.wait(), 15)
+    async with committing_sessionmaker.begin() as db:
+        private = await routines.update_routine(
+            db, public.id, tenant_id=tenant.id, destination_kind="dm"
+        )
+        assert private is not None
+        await routines.record_result(
+            db,
+            public.id,
+            tail="private A text",
+            error="private A diagnostic",
+            delivery="pending",
+            expected_private=private,
+        )
+    release.set()
+    with pytest.raises(StoreError, match="changed while being edited"):
+        await task
+    hidden = await _get_routine_impl(runtime, admin, routine_id=public.id)
+    assert hidden.last_result_tail is None and hidden.delivery_payload is None
+    assert hidden.last_error == "Private routine run failed."
+    with pytest.raises(ToolError, match="not found"):
+        await _get_routine_impl(runtime, owner, routine_id=public.id)
+    assert await _list_routines_impl(runtime, owner) == []
+
+    async with committing_sessionmaker.begin() as db:
+        await routines.update_routine(db, public.id, tenant_id=tenant.id, **edits)
+    readers = (admin, owner) if change == "agent" else (admin,)
+    for reader in readers:
+        fetched = await _get_routine_impl(runtime, reader, routine_id=public.id)
+        listed = await _list_routines_impl(runtime, reader)
+        assert len(listed) == 1
+        for row in (fetched, listed[0]):
+            assert row.last_result_tail is None and row.last_error is None
+            assert row.delivery_payload is None
+
+
+async def test_update_rejects_a_revision_changed_after_mcp_authorization(
+    committing_sessionmaker, monkeypatch
+):
+    from daimon.core.errors import StoreError
+    from daimon.core.stores import routines
+
+    async with committing_sessionmaker.begin() as db:
+        tenant = await make_tenant(db, platform="discord")
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_resolved", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    auth = _auth_identity(tenant_id=tenant.id, platform_user_id="123")
+    try:
+        row = await _create_routine_impl(
+            runtime,
+            auth,
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone="UTC",
+            trigger_message="work",
+        )
+        original_update = routines.update_routine
+
+        async def intervening_edit(db, routine_id, **kwargs):
+            async with committing_sessionmaker.begin() as other:
+                await original_update(other, routine_id, tenant_id=tenant.id, destination_kind="dm")
+            return await original_update(db, routine_id, **kwargs)
+
+        monkeypatch.setattr(routines, "update_routine", intervening_edit)
+        with pytest.raises(StoreError, match="changed while being edited"):
+            await _update_routine_impl(runtime, auth, routine_id=row.id, trigger_message="stale")
+        async with committing_sessionmaker() as db:
+            current = await get_routine(db, row.id, tenant_id=tenant.id)
+        assert current is not None and current.destination_kind == "dm"
+        assert current.trigger_message == "work"
+    finally:
+        await client.close()
+
+
+@pytest.mark.parametrize("enabled", [False, True])
+@pytest.mark.parametrize("failed", [False, True])
+async def test_legacy_private_output_on_all_mcp_reads(
+    committing_sessionmaker, db_session, enabled, failed
+):
+    from sqlalchemy import text
+
+    tenant = await make_tenant(db_session, platform="discord")
+    await db_session.commit()
+    client = _ma_client_with_agents(
+        [_ma_agent(agent_id="ag_legacy", name="daimon", tenant_id=tenant.id)]
+    )
+    runtime = _runtime(committing_sessionmaker, client=client)
+    async with committing_sessionmaker.begin() as session:
+        row = await create_routine(
+            session,
+            tenant_id=tenant.id,
+            created_by_user_id="123",
+            agent_id="ag_legacy",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="legacy",
+            enabled=enabled,
+        )
+        await session.execute(
+            text(
+                "UPDATE routines SET last_result_tail = 'personal-memory-sentinel', "
+                "last_error = :error, delivery_payload = 'private-payload', "
+                "delivery_note = 'private-diagnostic' WHERE id = :id"
+            ),
+            {"id": row.id, "error": "private-error" if failed else None},
+        )
+    owner = _auth_identity(tenant_id=tenant.id, platform_user_id="123", talking_to="ag_legacy")
+    admin = dataclasses.replace(owner, platform_user_id="999", is_admin=True)
+    for reader in (owner, admin, dataclasses.replace(admin, platform_user_id=None)):
+        results = [
+            await _get_routine_impl(runtime, reader, routine_id=row.id),
+            *(await _list_routines_impl(runtime, reader)),
+            await _update_routine_impl(runtime, reader, routine_id=row.id),
+        ]
+        assert len(results) == 3
+        for result in results:
+            if reader == owner:
+                assert result.last_result_tail == "personal-memory-sentinel"
+                assert result.delivery_payload == "private-payload"
+                assert result.delivery_note == "private-diagnostic"
+                assert result.last_error == ("private-error" if failed else None)
+            else:
+                assert result.last_result_tail is None
+                assert result.delivery_payload is None and result.delivery_note is None
+                assert "private-error" not in result.model_dump_json()
+                assert "personal-memory-sentinel" not in result.model_dump_json()
+    outsider = dataclasses.replace(admin, is_admin=False)
+    assert await _list_routines_impl(runtime, outsider) == []
+    with pytest.raises(ToolError, match="routine not found"):
+        await _get_routine_impl(runtime, outsider, routine_id=row.id)
+    await client.close()
