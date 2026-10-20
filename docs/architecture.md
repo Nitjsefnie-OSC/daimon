@@ -2463,7 +2463,13 @@ bound session grant; missing or mismatched grants refuse the send. The common ga
 including confirmation sends. Watches require a gateable Managed Agents session;
 unsupported backends and implicit session replacement are refused. Deployment and
 agent unattended-write allowances cannot widen watch authority. Watch admission
-validates an explicit snapshot-field allowlist before any provider mutation.
+validates an explicit snapshot-field allowlist before any provider mutation. It uses
+`core.turn.unattended_capabilities` with the `watch` policy: built-ins and skills
+are off. A thin watch wrapper also freezes telemetry fields, rejects unreviewed
+instance attributes, derives the allowlist from enabled named reads, and omits
+disabled native toolsets. The shared helper
+projects and applies the tool config and restores it through repeated cancellation.
+Cache invalidation commits before either the apply or restore can mutate a session.
 Sessions carrying skills, multiagent coordinators or unreviewed fields are refused,
 including fields recognized by a newer provider SDK. Tools are rebuilt in one
 update: only explicitly named, enabled third-party MCP read configs are retained,

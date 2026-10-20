@@ -483,6 +483,7 @@ async def test_database_rate_and_row_quotas_are_independent_of_wake_coalescing(
             for capability in ("unknown_capability", "multiagent")
         ],
         ("discord", "gate_error"),
+        ("discord", "cache_error"),
         ("discord", "driver_error"),
         ("discord", "cancelled"),
         ("discord", "restore_error"),
@@ -501,7 +502,6 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     from unittest.mock import AsyncMock, MagicMock
 
     from daimon.core import session_ports_compat
-    from daimon.core.continuity import watch_turn
     from daimon.core.scope import ResolvedConfig
     from daimon.core.session_snapshot import (
         fingerprint_identity,
@@ -512,6 +512,7 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
     from daimon.core.tool_safety import ToolSafetyPolicy
     from daimon.core.turn import driver
     from daimon.core.turn import run as run_module
+    from daimon.core.turn import unattended_capabilities as capabilities
     from daimon.core.turn.admission import Admission
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.prepare import PreparedTurn
@@ -550,6 +551,19 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         deps_for(client=build_fake_anthropic(router.dispatch), sm=db_session_factory),
         turn_path="legacy",
         tool_safety=ToolSafetyPolicy(enabled=False, unattended_writes=("*",)),
+    )
+    from anthropic.types.beta.beta_managed_agents_agent_toolset20260401 import (
+        BetaManagedAgentsAgentToolset20260401,
+    )
+
+    agent.tools.append(
+        BetaManagedAgentsAgentToolset20260401.model_validate(
+            {
+                "type": "agent_toolset_20260401",
+                "configs": [],
+                "default_config": {"enabled": True, "permission_policy": {"type": "always_allow"}},
+            }
+        )
     )
     grant = str(uuid.uuid4())
     snapshot = ma_session(
@@ -595,14 +609,36 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
         side_effect=AssertionError("watch must not recreate an unbound session")
     )
     monkeypatch.setattr(run_module, "_replace_dead_session", replacement)
-    constrain = AsyncMock(
-        side_effect=RuntimeError("gate failed") if ending == "gate_error" else None
-    )
+
+    async def apply_after_cache_invalidation(*args, **kwargs):
+        async with db_session_factory() as db:
+            invalidated = await get_live_thread_session(
+                db,
+                tenant_id=registered.tenant_id,
+                platform=platform,
+                thread_id=registered.thread_id,
+                account_id=registered.owner_account_id,
+            )
+        assert invalidated.mutable_fingerprint is None
+        assert invalidated.effective_config.tools_sha256 == ""
+        assert invalidated.effective_config.mcp_servers_sha256 == ""
+        if ending == "gate_error":
+            raise RuntimeError("gate failed")
+
+    constrain = AsyncMock(side_effect=apply_after_cache_invalidation)
     restore = AsyncMock(
         side_effect=RuntimeError("restore failed") if ending == "restore_error" else None
     )
-    monkeypatch.setattr(watch_turn, "constrain_session", constrain)
-    monkeypatch.setattr(watch_turn, "restore_session_tools", restore)
+    if ending == "cache_error":
+        from daimon.core.stores import thread_sessions
+
+        monkeypatch.setattr(
+            thread_sessions,
+            "invalidate_session_tools",
+            AsyncMock(side_effect=RuntimeError("cache failed")),
+        )
+    monkeypatch.setattr(capabilities, "apply_capabilities", constrain)
+    monkeypatch.setattr(capabilities, "restore_capabilities", restore)
     monkeypatch.setattr(
         session_ports_compat,
         "retrieve_session_record",
@@ -736,7 +772,7 @@ async def test_common_presend_gate_rechecks_revocation_on_every_adapter(
                 now=datetime.now(UTC),
             )
         assert cleared is not None and not cleared.attended and cleared.chat_session_id is None
-    if unsupported:
+    if unsupported or ending == "cache_error":
         constrain.assert_not_awaited()
         restore.assert_not_awaited()
         replacement.assert_not_awaited()

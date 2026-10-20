@@ -213,4 +213,9 @@ must enumerate read names in per-tool configs; default-only toolsets grant nothi
 Shell, built-ins, custom tools, management endpoints and writes are unavailable.
 Mounted data and credential vaults remain attached but grant no native execution
 or delegation. Original tool arrays restore before the turn releases its session.
+The shared `core.turn.unattended_capabilities` helper supplies the `watch` policy
+with built-ins and skills off. Watch preparation adds a frozen telemetry check,
+rejects unreviewed instance attributes, derives enabled named reads and omits
+disabled native toolsets. Shared apply/restore handles provider updates and repeated
+cancellation; cache invalidation commits before either update can run.
 No polling, MCP watch-management tools or live internal migration is included.

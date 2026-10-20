@@ -4,8 +4,19 @@ from unittest.mock import AsyncMock, MagicMock
 import pytest
 from daimon.core.continuity import watch_turn
 from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+from daimon.core.turn import unattended_capabilities as capabilities
 from daimon.testing import ma_agent, ma_session
 from mux.contracts.ids import Scope
+
+
+async def _apply_watch_capabilities(
+    client, snapshot, policy, *, scope, public_url, sessions, tenant_id
+):
+    # Exercise the real shared provider-write helper after watch-specific preparation.
+    constrained = await watch_turn.watch_capabilities(
+        snapshot, policy, public_url=public_url, sessions=None, tenant_id=tenant_id
+    )
+    await capabilities.apply_capabilities(client, snapshot, constrained, scope=scope)
 
 
 @pytest.mark.parametrize(
@@ -43,8 +54,8 @@ async def test_review_management_alias_cannot_survive(query, monkeypatch):
         )
     )
     update = AsyncMock()
-    monkeypatch.setattr(watch_turn, "update_session_record", update)
-    await watch_turn.constrain_session(
+    monkeypatch.setattr(capabilities, "update_session_record", update)
+    await _apply_watch_capabilities(
         MagicMock(),
         snapshot,
         ToolSafetyPolicy(),

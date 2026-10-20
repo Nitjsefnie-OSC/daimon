@@ -1274,11 +1274,13 @@ async def run_prepared_turn_impl(
                         )
                         if watch_row is not None:
                             from daimon.core.continuity.watch_turn import (
-                                constrain_session,
-                                restore_session_tools,
-                                validate_watch_snapshot,
+                                watch_capabilities,
                             )
                             from daimon.core.session_ports_compat import retrieve_session_record
+                            from daimon.core.turn.unattended_capabilities import (
+                                apply_capabilities,
+                                restore_capabilities,
+                            )
 
                             original_snapshot: BetaManagedAgentsSession | None = None
 
@@ -1302,29 +1304,35 @@ async def run_prepared_turn_impl(
                                     from daimon.core.turn.errors import AdmissionDenied
 
                                     raise AdmissionDenied(reason="invoker_not_allowed")
-                                validate_watch_snapshot(snapshot)
-                                if original_snapshot is None:
+                                constrained = await watch_capabilities(
+                                    snapshot,
+                                    deps.tool_safety,
+                                    public_url=deps.public_url,
+                                    sessions=deps.sessionmaker,
+                                    tenant_id=tenant_id,
+                                )
+                                if original_snapshot is None and constrained.changed:
                                     from daimon.core.stores.thread_sessions import (
                                         invalidate_session_tools,
                                     )
 
+                                    # Commit before registering cleanup, which also mutates
+                                    # the provider if applying the restriction fails.
                                     async with deps.sessionmaker.begin() as db:
                                         await invalidate_session_tools(db, ma_session_id=session_id)
                                     original_snapshot = snapshot
                                     stack.push_async_callback(
-                                        restore_session_tools,
+                                        restore_capabilities,
                                         deps.anthropic.with_options(max_retries=0, timeout=30),
                                         original_snapshot,
+                                        constrained.original,
                                         scope=gate_scope,
                                     )
-                                await constrain_session(
+                                await apply_capabilities(
                                     deps.anthropic.with_options(max_retries=0),
                                     snapshot,
-                                    deps.tool_safety,
+                                    constrained,
                                     scope=gate_scope,
-                                    public_url=deps.public_url,
-                                    sessions=deps.sessionmaker,
-                                    tenant_id=tenant_id,
                                 )
 
                             gate = watch_gate

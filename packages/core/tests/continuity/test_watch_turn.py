@@ -6,10 +6,22 @@ import uuid
 from unittest.mock import AsyncMock, MagicMock
 
 import pytest
-from daimon.core.continuity.watch_turn import constrain_session, read_report_policy, watch_posture
+from daimon.core.continuity import watch_turn
+from daimon.core.continuity.watch_turn import read_report_policy, watch_posture
 from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
+from daimon.core.turn import unattended_capabilities as capabilities
 from daimon.testing import ma_agent, ma_session
 from mux.contracts.ids import Scope
+
+
+async def _apply_watch_capabilities(
+    client, snapshot, policy, *, scope, public_url, sessions, tenant_id
+):
+    # Exercise the real shared provider-write helper after watch-specific preparation.
+    constrained = await watch_turn.watch_capabilities(
+        snapshot, policy, public_url=public_url, sessions=None, tenant_id=tenant_id
+    )
+    await capabilities.apply_capabilities(client, snapshot, constrained, scope=scope)
 
 
 @pytest.mark.parametrize(
@@ -47,7 +59,6 @@ async def test_watch_read_report_refuses_writes_shell_and_builtins_even_with_wri
 async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(
     monkeypatch, session_url
 ):
-    from daimon.core.continuity import watch_turn as module
 
     snapshot = ma_session(
         agent=ma_agent(
@@ -106,8 +117,8 @@ async def test_watch_gate_removes_shell_skills_and_builtin_server_before_send(
         )
     )
     update = AsyncMock()
-    monkeypatch.setattr(module, "update_session_record", update)
-    await constrain_session(
+    monkeypatch.setattr(capabilities, "update_session_record", update)
+    await _apply_watch_capabilities(
         MagicMock(),
         snapshot,
         ToolSafetyPolicy(),
@@ -200,8 +211,6 @@ async def test_restore_finishes_before_cancellation_releases_watch_session(
 ):
     import asyncio
 
-    from daimon.core.continuity import watch_turn
-
     started = asyncio.Event()
     finish = asyncio.Event()
     restored = asyncio.Event()
@@ -215,11 +224,12 @@ async def test_restore_finishes_before_cancellation_releases_watch_session(
         ]
         restored.set()
 
-    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    monkeypatch.setattr(capabilities, "update_session_record", update)
     task = asyncio.create_task(
-        watch_turn.restore_session_tools(
+        capabilities.restore_capabilities(
             MagicMock(),
             snapshot,
+            capabilities.SessionToolConfig.of(snapshot),
             scope=Scope(
                 tenant_id=str(uuid.uuid4()),
                 account_id=str(uuid.uuid4()),
@@ -240,13 +250,12 @@ async def test_restore_finishes_before_cancellation_releases_watch_session(
 
 
 async def test_watch_refuses_skill_session_before_any_provider_mutation(monkeypatch):
-    from daimon.core.continuity import watch_turn
     from daimon.core.turn.errors import AdmissionDenied
 
     update = AsyncMock()
-    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    monkeypatch.setattr(capabilities, "update_session_record", update)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        await constrain_session(
+        await _apply_watch_capabilities(
             MagicMock(),
             ma_session(
                 agent=ma_agent(
@@ -271,7 +280,6 @@ async def test_watch_refuses_multiagent_session_whose_subagent_has_shell(monkeyp
     from anthropic.types.beta.beta_managed_agents_session_multiagent_coordinator import (
         BetaManagedAgentsSessionMultiagentCoordinator,
     )
-    from daimon.core.continuity import watch_turn
 
     SHELL = {
         "type": "agent_toolset_20260401",
@@ -281,7 +289,7 @@ async def test_watch_refuses_multiagent_session_whose_subagent_has_shell(monkeyp
     from daimon.core.turn.errors import AdmissionDenied
 
     update = AsyncMock()
-    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    monkeypatch.setattr(capabilities, "update_session_record", update)
     base = ma_session(agent=ma_agent())
     sub = ma_session(agent=ma_agent(id="agent_sub", name="sub", tools=[SHELL])).agent
     coordinator = BetaManagedAgentsSessionMultiagentCoordinator.model_validate(
@@ -291,7 +299,7 @@ async def test_watch_refuses_multiagent_session_whose_subagent_has_shell(monkeyp
         update={"agent": base.agent.model_copy(update={"multiagent": coordinator})}
     )
     with pytest.raises(AdmissionDenied):
-        await constrain_session(
+        await _apply_watch_capabilities(
             MagicMock(),
             snapshot,
             ToolSafetyPolicy(),
@@ -357,7 +365,6 @@ def _explicit_read_snapshot():
 )
 @pytest.mark.parametrize("value", [None, False, [], {"enabled": True}])
 async def test_watch_refuses_unknown_capability_fields_before_mutation(monkeypatch, level, value):
-    from daimon.core.continuity import watch_turn
     from daimon.core.turn.errors import AdmissionDenied
 
     snapshot = _explicit_read_snapshot()
@@ -376,9 +383,9 @@ async def test_watch_refuses_unknown_capability_fields_before_mutation(monkeypat
     # Simulate a new response field, including an empty value: unknown is never safe.
     targets[level].__pydantic_extra__["future_execution_capability"] = value
     update = AsyncMock()
-    monkeypatch.setattr(watch_turn, "update_session_record", update)
+    monkeypatch.setattr(capabilities, "update_session_record", update)
     with pytest.raises(AdmissionDenied, match="backend_unsupported"):
-        await constrain_session(
+        await _apply_watch_capabilities(
             MagicMock(),
             snapshot,
             ToolSafetyPolicy(),
@@ -407,11 +414,10 @@ def test_watch_refuses_capability_newly_recognized_by_sdk():
 
 
 async def test_watch_installs_only_explicit_read_configs_with_disabled_default(monkeypatch):
-    from daimon.core.continuity import watch_turn
 
     update = AsyncMock()
-    monkeypatch.setattr(watch_turn, "update_session_record", update)
-    await constrain_session(
+    monkeypatch.setattr(capabilities, "update_session_record", update)
+    await _apply_watch_capabilities(
         MagicMock(),
         _explicit_read_snapshot(),
         ToolSafetyPolicy(enabled=False, unattended_writes=("*",)),
@@ -435,13 +441,12 @@ async def test_watch_installs_only_explicit_read_configs_with_disabled_default(m
 
 
 async def test_watch_does_not_expand_default_only_toolset(monkeypatch):
-    from daimon.core.continuity import watch_turn
 
     snapshot = _explicit_read_snapshot()
     snapshot.agent.tools[0].configs.clear()
     update = AsyncMock()
-    monkeypatch.setattr(watch_turn, "update_session_record", update)
-    await constrain_session(
+    monkeypatch.setattr(capabilities, "update_session_record", update)
+    await _apply_watch_capabilities(
         MagicMock(),
         snapshot,
         ToolSafetyPolicy(),
@@ -455,15 +460,14 @@ async def test_watch_does_not_expand_default_only_toolset(monkeypatch):
 
 @pytest.mark.parametrize("name", ["get_*", "get_[issue]", "get_?", "get_issue;delete", "*"])
 async def test_watch_tool_allowlist_never_contains_patterns(monkeypatch, name):
-    from daimon.core.continuity import watch_turn
 
     snapshot = _explicit_read_snapshot()
     snapshot.agent.tools[0].configs = [
         snapshot.agent.tools[0].configs[0].model_copy(update={"name": name})
     ]
     update = AsyncMock()
-    monkeypatch.setattr(watch_turn, "update_session_record", update)
-    await constrain_session(
+    monkeypatch.setattr(capabilities, "update_session_record", update)
+    await _apply_watch_capabilities(
         MagicMock(),
         snapshot,
         ToolSafetyPolicy(),
@@ -482,3 +486,88 @@ def test_watch_accepts_sdk_request_id_as_diagnostic_metadata():
     snapshot = _explicit_read_snapshot()
     add_request_id(snapshot, "req_watch_validation")
     validate_watch_snapshot(snapshot)
+
+
+async def test_watch_uses_shared_watch_policy_and_named_read_projection(monkeypatch):
+    projection = AsyncMock(wraps=capabilities.constrain_capabilities)
+    entry_point = MagicMock(wraps=capabilities.capability_policy)
+    monkeypatch.setattr(capabilities, "constrain_capabilities", projection)
+    monkeypatch.setattr(capabilities, "capability_policy", entry_point)
+    constrained = await watch_turn.watch_capabilities(
+        _explicit_read_snapshot(),
+        ToolSafetyPolicy(enabled=False, unattended_writes=("*",)),
+        public_url=None,
+        sessions=None,
+        tenant_id=uuid.uuid4(),
+    )
+    assert entry_point.call_args_list
+    assert all(call.args == ("watch",) for call in entry_point.call_args_list)
+    projection.assert_awaited_once()
+    assert projection.await_args.kwargs["allow_skills"] is False
+    assert projection.await_args.kwargs["tool_allowlist"] == frozenset({"linear/get_issue"})
+    assert constrained.send.tools[0]["default_config"] == {
+        "enabled": False,
+        "permission_policy": {"type": "always_ask"},
+    }
+
+
+@pytest.mark.parametrize("level", ["stats", "usage"])
+def test_watch_keeps_telemetry_closed_when_shared_helper_accepts_it(level):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    snapshot = _explicit_read_snapshot()
+    getattr(snapshot, level).__pydantic_extra__["future_execution_capability"] = False
+    capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        watch_turn.validate_watch_snapshot(snapshot)
+
+
+@pytest.mark.parametrize("level", ["session", "agent", "model", "tool", "config"])
+def test_watch_refuses_unreviewed_private_instance_attributes(level):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    snapshot = _explicit_read_snapshot()
+    target = {
+        "session": snapshot,
+        "agent": snapshot.agent,
+        "model": snapshot.agent.model,
+        "tool": snapshot.agent.tools[0],
+        "config": snapshot.agent.tools[0].configs[0],
+    }[level]
+    object.__setattr__(target, "_future_execution_capability", False)
+    capabilities.require_allowed_capabilities(snapshot, allow_skills=False)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        watch_turn.validate_watch_snapshot(snapshot)
+
+
+async def test_watch_server_names_cannot_alias_shared_allowlist_keys():
+    snapshot = _explicit_read_snapshot()
+    regular = snapshot.agent.tools[0]
+    read = regular.configs[0]
+    regular.configs = [read.model_copy(update={"enabled": False})]
+    snapshot.agent.tools.append(
+        regular.model_copy(
+            update={
+                "mcp_server_name": "linear/bridge",
+                "configs": [read],
+            }
+        )
+    )
+    snapshot.agent.mcp_servers.append(
+        snapshot.agent.mcp_servers[0].model_copy(
+            update={
+                "name": "linear/bridge",
+                "url": "https://bridge.invalid/mcp",
+            }
+        )
+    )
+    constrained = await watch_turn.watch_capabilities(
+        snapshot,
+        ToolSafetyPolicy(),
+        public_url=None,
+        sessions=None,
+        tenant_id=uuid.uuid4(),
+    )
+    # A server name is not a prefix for enabling an absent tool on another server.
+    assert constrained.send.tools == []
+    assert constrained.send.mcp_servers == []
