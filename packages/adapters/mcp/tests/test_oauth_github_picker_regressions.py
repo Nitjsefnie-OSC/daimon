@@ -128,3 +128,47 @@ def test_owner_with_nothing_to_add_says_so(browser_page: object) -> None:
     page.click('.gh-owner-button[data-owner="emptyorg"]')
     sheet = page.inner_text("#repo-owner-sheet").lower()
     assert "no repos" in sheet
+
+
+@pytest.mark.asyncio
+async def test_setup_without_state_still_needs_the_matching_flow_cookie(
+    editor_env: _EditorEnv,  # noqa: F811
+) -> None:
+    """The remembered state only helps the browser that holds the flow cookie too."""
+    env = editor_env
+    env.multi_owners = True
+    state, _hidden = await env.open_editor()
+    params = {"installation_id": "78", "setup_action": "update"}
+
+    flow_cookie = env.browser.cookies.get(oauth_github._COOKIE)
+    env.browser.cookies.delete(oauth_github._COOKIE)
+    assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
+
+    env.browser.cookies.set(oauth_github._COOKIE, "someone-else")
+    assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
+
+    assert flow_cookie is not None
+    env.browser.cookies.set(oauth_github._COOKIE, flow_cookie)
+    env.browser.cookies.delete(oauth_github._STATE_COOKIE)
+    assert (await env.browser.get("/oauth/github/setup", params=params)).status_code == 400
+
+    # A state in the query wins over the remembered one and must still be the flow's.
+    wrong = await env.browser.get("/oauth/github/setup", params={**params, "state": "nope"})
+    assert wrong.status_code == 400
+    right = await env.browser.get("/oauth/github/setup", params={**params, "state": state})
+    assert parse_qs(urlparse(right.headers["location"]).query)["state"] == [state]
+
+
+def test_selected_view_is_not_titled_with_one_owner(browser_page: object) -> None:
+    """ "Selected (n)" lists picks from every owner, so the title can't name just one."""
+    page = browser_page  # type: ignore[assignment]
+    page.click("#open-repo-picker")
+    page.click('.gh-owner-button[data-owner="sam"]')
+    page.check('.gh-picker-choice[data-owner="sam"] .gh-picker-toggle >> nth=0')
+    page.click("#back-repo-owners")
+    page.click('.gh-owner-button[data-owner="northwind"]')
+    page.check('.gh-picker-choice[data-owner="northwind"] .gh-picker-toggle >> nth=0')
+    page.click("#show-selected-repos")
+    assert page.inner_text("#repo-picker-title") == "Selected repos"
+    page.click("#show-selected-repos")
+    assert page.inner_text("#repo-picker-title") == "Add northwind repos"

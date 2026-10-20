@@ -861,6 +861,8 @@ _EDITOR_SCRIPT = """
       selectedOnly = false;
       showSelected.setAttribute("aria-pressed", "false");
     }
+    ownerTitle.textContent = selectedOnly ? "Selected repos" :
+      activeOwner ? "Add " + activeOwner + " repos" : "Add repos";
     const query = search.value.trim().toLowerCase();
     for (const option of options) {
       option.hidden = selectedOnly ? !checkbox(option).checked :
