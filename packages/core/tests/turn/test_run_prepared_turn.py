@@ -3899,7 +3899,7 @@ async def test_prepared_turn_binds_only_its_recorded_session_origin_grant(
 
 @pytest.mark.parametrize(("origin", "entry_point"), [("chat", "wake"), ("worker", "fleet_worker")])
 @pytest.mark.parametrize("unconstrainable", ["with_coordinator", "with_hidden_capability"])
-async def test_unattended_prepared_turn_refuses_a_coordinator_and_keeps_builtins_by_policy(
+async def test_unattended_prepared_turn_refuses_a_coordinator_and_builtins(
     origin: Any,
     entry_point: str,
     unconstrainable: str,
@@ -3910,14 +3910,13 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_keeps_builtins
     """Wakes and fleet workers gate through their own entry point's capability policy.
 
     The gate the driver runs before the message refuses a coordinator session
-    before any update; the decider answers built-in calls by the policy.
+    before any update; the decider always refuses built-in calls.
     """
     from daimon.core.tool_safety import ToolCall, ToolSafetyPolicy
     from daimon.core.turn import driver
     from daimon.core.turn.errors import AdmissionDenied
     from daimon.core.turn.posture import PolicyApproval
     from daimon.core.turn.unattended import session_gate
-    from daimon.core.turn.unattended_capabilities import ENTRY_POINT_POLICY
     from daimon.testing.ma_models import ma_session
 
     tenant = await make_tenant(db_session)
@@ -4007,7 +4006,7 @@ async def test_unattended_prepared_turn_refuses_a_coordinator_and_keeps_builtins
     (posture,) = postures
     assert isinstance(posture, PolicyApproval)
     bash = await posture.decide(ToolCall(tool_use_id="tu", server_name=None, tool_name="bash"))
-    assert bash.allow is ENTRY_POINT_POLICY[entry_point].allow_builtins
+    assert bash.allow is False
 
 
 @pytest.mark.parametrize("origin", ["chat", "worker"], ids=["wake", "fleet_worker"])

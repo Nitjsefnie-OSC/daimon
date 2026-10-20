@@ -10,15 +10,13 @@ the capability surface of a turn nobody watches is decided in one place:
   change it mid-session, so a coordinator session is never repaired, only
   refused.
 - `constrain_capabilities` works out the tools and servers to send: built-in
-  sandbox and custom tools disabled unless the entry point's
-  `CapabilityPolicy` allows them, an optional explicit tool allowlist, and
-  every MCP toolset gated for the unattended decider.
+  sandbox and custom tools always disabled, an optional explicit tool
+  allowlist, and every MCP toolset gated for the unattended decider.
 - `capability_posture` makes the decider agree: a built-in call is refused
-  when built-ins are off, and a call outside the allowlist is refused.
+  for every unattended turn, and a call outside the allowlist is refused.
 
-`ENTRY_POINT_POLICY` is the per-entry-point switch. Only watches turn the
-sandbox off today; the others keep the behaviour they had, so flipping one
-of them is a one-line change here.
+`ENTRY_POINT_POLICY` records each entry point's skills policy. Built-in
+sandbox and custom tools are off everywhere, with no opt-in.
 """
 
 from __future__ import annotations
@@ -77,21 +75,20 @@ class CapabilityPolicy:
     """What one unattended entry point may keep beyond gated MCP tools."""
 
     #: The sandbox toolset (bash, read, write, edit, …) and custom tools.
-    allow_builtins: bool
+    allow_builtins: Literal[False]
     #: Skills, which cannot be removed from a session once it exists.
     allow_skills: bool
 
 
-#: The switch. A routine that writes files needs the sandbox, and so does a
-#: checkpoint archive; the rest keep today's behaviour until decided.
+#: Built-ins are off for every unattended entry point, without an opt-in.
 ENTRY_POINT_POLICY: Final[Mapping[UnattendedEntryPoint, CapabilityPolicy]] = {
     "watch": CapabilityPolicy(allow_builtins=False, allow_skills=False),
-    "routine": CapabilityPolicy(allow_builtins=True, allow_skills=True),
-    "wake": CapabilityPolicy(allow_builtins=True, allow_skills=True),
-    "mcp_chat": CapabilityPolicy(allow_builtins=True, allow_skills=True),
-    "fleet_worker": CapabilityPolicy(allow_builtins=True, allow_skills=True),
-    "cli_run": CapabilityPolicy(allow_builtins=True, allow_skills=True),
-    "checkpoint": CapabilityPolicy(allow_builtins=True, allow_skills=True),
+    "routine": CapabilityPolicy(allow_builtins=False, allow_skills=True),
+    "wake": CapabilityPolicy(allow_builtins=False, allow_skills=True),
+    "mcp_chat": CapabilityPolicy(allow_builtins=False, allow_skills=True),
+    "fleet_worker": CapabilityPolicy(allow_builtins=False, allow_skills=True),
+    "cli_run": CapabilityPolicy(allow_builtins=False, allow_skills=True),
+    "checkpoint": CapabilityPolicy(allow_builtins=False, allow_skills=True),
 }
 
 _CLOSED: Final[CapabilityPolicy] = CapabilityPolicy(allow_builtins=False, allow_skills=False)
@@ -556,14 +553,13 @@ async def constrain_capabilities(
     public_url: str | None,
     session_factory: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID | None,
-    allow_builtins: bool = False,
     allow_skills: bool = False,
     tool_allowlist: frozenset[str] | None = None,
 ) -> ConstrainedSession:
     """The tools and servers `snapshot` may run with unattended. No provider call.
 
     Refuses first (`require_allowed_capabilities`). Built-in and custom tools
-    are disabled unless `allow_builtins`; with a `tool_allowlist` of
+    are always disabled; with a `tool_allowlist` of
     `server/tool` keys only those MCP tools stay, and every server no kept
     toolset names is dropped. Every MCP toolset left, Daimon's own included and
     with tool safety on or off, asks on its default and on every per-tool
@@ -575,12 +571,11 @@ async def constrain_capabilities(
     original = SessionToolConfig.of(snapshot)
     tools = [dict(tool) for tool in original.tools]
     servers = [dict(server) for server in original.mcp_servers]
-    if not allow_builtins:
-        tools = [
-            _disabled_builtins(tool) if tool.get("type") == BUILTIN_TOOLSET else tool
-            for tool in tools
-            if tool.get("type") != CUSTOM_TOOL
-        ]
+    tools = [
+        _disabled_builtins(tool) if tool.get("type") == BUILTIN_TOOLSET else tool
+        for tool in tools
+        if tool.get("type") != CUSTOM_TOOL
+    ]
     if tool_allowlist is not None:
         tools, servers = _allowlisted(tools, servers, tool_allowlist, public_url=public_url)
     rules = (
@@ -676,21 +671,18 @@ async def _update(
 def capability_posture(
     posture: PolicyApproval,
     *,
-    allow_builtins: bool = False,
     tool_allowlist: frozenset[str] | None = None,
 ) -> PolicyApproval:
     """`posture`, refusing what `constrain_capabilities` took out of the session.
 
     A disabled tool should never pause, so this is the second lock: a
-    built-in or custom call (`server_name=None`) is refused unless
-    `allow_builtins`, and with a `tool_allowlist` so is every unlisted call.
+    built-in or custom call (`server_name=None`) is always refused, and with
+    a `tool_allowlist` so is every unlisted call.
     """
-    if allow_builtins and tool_allowlist is None:
-        return posture
     decide = posture.decide
 
     async def constrained(call: ToolCall) -> ToolConfirmationResult:
-        if call.server_name is None and not allow_builtins:
+        if call.server_name is None:
             return ToolConfirmationResult(
                 allow=False,
                 deny_message=(
@@ -698,11 +690,7 @@ def capability_posture(
                     "unattended turn. The tool call did not run."
                 ),
             )
-        if (
-            call.server_name is not None
-            and tool_allowlist is not None
-            and call.key not in tool_allowlist
-        ):
+        if tool_allowlist is not None and call.key not in tool_allowlist:
             return ToolConfirmationResult(
                 allow=False,
                 deny_message=(

@@ -172,19 +172,21 @@ tool safety off, included. Each call therefore reaches the unattended decider,
 which answers as described above, with the agent's and the channel's rules:
 Daimon's ordinary tools and, with tool safety off, ordinary third-party calls
 are still allowed. Built-in sandbox tools (bash, file
-reads and edits, web fetch and the rest) and custom tools follow a policy set
-per entry point:
+reads and edits, web fetch and the rest) and custom tools are disabled for
+every unattended entry point, with no opt-in. These runs cannot generate
+files using sandbox tools:
 
 | Entry point | Built-in tools | Skills |
 | --- | --- | --- |
-| Scheduled routines | on | allowed |
-| Timers and worker-finished wakes | on | allowed |
-| Fleet workers | on | allowed |
-| Agent chat | on | allowed |
-| `daimon run` | on | allowed |
-| Workspace checkpoints | on | allowed |
+| Watches | off | denied |
+| Scheduled routines | off | allowed |
+| Timers and worker-finished wakes | off | allowed |
+| Fleet workers | off | allowed |
+| Agent chat | off | allowed |
+| `daimon run` | off | allowed |
+| Workspace checkpoints | off | allowed |
 
-When an entry point's built-ins are off, the session's built-in toolset is
+The session's built-in toolset is
 disabled (every tool `enabled: false`), custom tools are removed, and the
 decider refuses any built-in call that still pauses.
 

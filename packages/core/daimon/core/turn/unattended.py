@@ -90,9 +90,9 @@ async def gate_session_snapshot(
     Works from the session's own frozen arrays, so hidden servers and the
     caller's resources stay as they are; nothing is restored from the
     agent's deployment-wide definition. `constrain_capabilities` refuses a
-    session it cannot constrain (a coordinator, skills or built-ins the
-    `entry_point` does not allow, an unknown field) before any update, turns
-    built-ins off when the entry point's `CapabilityPolicy` says so, rewrites
+    session it cannot constrain (a coordinator, skills the `entry_point`
+    does not allow, an unknown field) before any update, always turns
+    built-ins off, rewrites
     both the toolset defaults and every per-tool config, makes Daimon's
     `protected_tools` ask, and heals a foreign `daimon-mcp` URL, policy on or
     off. A refusal or a failed update raises, so the send never happens on an
@@ -105,7 +105,6 @@ async def gate_session_snapshot(
         public_url=public_url,
         session_factory=session_factory,
         tenant_id=tenant_id,
-        allow_builtins=allowed.allow_builtins,
         allow_skills=allowed.allow_skills,
     )
     await apply_capabilities(
@@ -162,9 +161,8 @@ def unattended_posture(
     for a DM or no channel); with no database or tenant there are no rules to
     read. `protected_tools` are refused. `annotations_for`
     is the seam for operator-trusted MCP hints; it must answer only for
-    trusted servers. A built-in call is refused unless the `entry_point`'s
-    `CapabilityPolicy` allows built-ins (`capability_posture`); with no
-    `entry_point` it is always refused.
+    trusted servers. A built-in or custom call is always refused
+    (`capability_posture`), regardless of `entry_point`.
     """
     posture = PolicyApproval(
         decide=unattended_decider(
@@ -193,7 +191,7 @@ def unattended_posture(
             ),
         )
     )
-    return capability_posture(posture, allow_builtins=capability_policy(entry_point).allow_builtins)
+    return capability_posture(posture)
 
 
 def session_gate(

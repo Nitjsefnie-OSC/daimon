@@ -108,7 +108,6 @@ from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn.unattended import refuse_ungated_confirmation, session_gate
 from daimon.core.turn.unattended_capabilities import (
-    capability_policy,
     capability_posture,
     protected_tools,
     unattended_entry_point,
@@ -1093,10 +1092,7 @@ async def run_prepared_turn_impl(
                 ),
             )
         )
-        tool_confirmation = capability_posture(
-            tool_confirmation,
-            allow_builtins=capability_policy(unattended_entry_point(origin)).allow_builtins,
-        )
+        tool_confirmation = capability_posture(tool_confirmation)
 
     # Tracks the session/mapping id (and whether recovery has taken over) the
     # FINAL attempt is running against, updated by `_run` the instant recovery

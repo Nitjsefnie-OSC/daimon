@@ -154,7 +154,7 @@ _HIDDEN_SHAPES: dict[str, Callable[[dict[str, Any]], object]] = {
             "updated_at": "2026-10-01T00:00:00Z",
         }
     ),
-    # Nothing to rewrite (already asking, built-ins allowed): no update would
+    # Nothing to rewrite (already asking, no built-ins): no update would
     # run the native schema, so admission alone must catch it.
     "no_change_enabled_object": lambda s: s["agent"].update(
         tools=[
@@ -304,7 +304,7 @@ async def test_coordinator_session_is_refused_before_any_send(
 
 
 @pytest.mark.parametrize("entry_point", [None, *ENTRY_POINTS])
-async def test_unattended_send_carries_builtins_only_by_policy(
+async def test_unattended_send_always_disables_builtins(
     entry_point: UnattendedEntryPoint | None,
 ) -> None:
     """A real driver send observes the provider's post-gate effective snapshot."""
@@ -315,19 +315,17 @@ async def test_unattended_send_carries_builtins_only_by_policy(
     assert provider.updates, "the unattended gate must run before the message"
     root_mcp = next(t for t in agent["tools"] if t["type"] == "mcp_toolset")
     assert not _can_run_without_decider(root_mcp, "create_issue")
-    allowed = entry_point is not None and ENTRY_POINT_POLICY[entry_point].allow_builtins
-    assert _builtins_runnable(agent["tools"]) is allowed
-    if not allowed:
-        [builtin] = [t for t in agent["tools"] if t["type"] == "agent_toolset_20260401"]
-        assert builtin["default_config"]["enabled"] is False
-        assert all(config["enabled"] is False for config in builtin["configs"])
+    assert not _builtins_runnable(agent["tools"])
+    [builtin] = [t for t in agent["tools"] if t["type"] == "agent_toolset_20260401"]
+    assert builtin["default_config"]["enabled"] is False
+    assert all(config["enabled"] is False for config in builtin["configs"])
 
 
 def test_entry_point_policy_table() -> None:
-    """The switch as built: only watches lose the sandbox and skills today."""
+    """Every unattended entry point disables the sandbox; watches also deny skills."""
     assert set(ENTRY_POINT_POLICY) == set(ENTRY_POINTS)
     off = {name for name, policy in ENTRY_POINT_POLICY.items() if not policy.allow_builtins}
-    assert off == {"watch"}
+    assert off == set(ENTRY_POINTS)
     assert not ENTRY_POINT_POLICY["watch"].allow_skills
     assert caps.capability_policy(None) == caps.CapabilityPolicy(
         allow_builtins=False, allow_skills=False
@@ -344,7 +342,7 @@ def test_prepared_origin_maps_to_entry_point(origin: Any, entry_point: str) -> N
 
 @pytest.mark.parametrize("entry_point", [None, *ENTRY_POINTS])
 @pytest.mark.parametrize("name", BUILTINS)
-async def test_unattended_decider_answers_builtins_by_policy(
+async def test_unattended_decider_always_refuses_builtins(
     entry_point: UnattendedEntryPoint | None, name: str
 ) -> None:
     """Asking is not enough: with built-ins off the decider refuses them too."""
@@ -359,8 +357,7 @@ async def test_unattended_decider_answers_builtins_by_policy(
     decision = await posture.decide(
         ToolCall(tool_use_id="tu_builtin", server_name=None, tool_name=name)
     )
-    allowed = entry_point is not None and ENTRY_POINT_POLICY[entry_point].allow_builtins
-    assert decision.allow is allowed
+    assert decision.allow is False
 
 
 async def test_attended_chat_posture_is_unchanged() -> None:

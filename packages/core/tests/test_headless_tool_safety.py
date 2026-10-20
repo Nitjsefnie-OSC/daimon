@@ -508,8 +508,8 @@ async def test_a_routine_on_a_coordinator_session_is_refused_before_its_message(
     assert sends == []
 
 
-async def test_a_routine_keeps_its_sandbox_by_the_entry_point_policy() -> None:
-    """Routines keep built-ins (file-generating routines need them)."""
+async def test_a_routine_disables_its_sandbox_before_sending() -> None:
+    """Routines cannot generate files using sandbox tools."""
     creates: list[dict[str, Any]] = []
     sends: list[dict[str, Any]] = []
     updates: list[dict[str, Any]] = []
@@ -527,9 +527,10 @@ async def test_a_routine_keeps_its_sandbox_by_the_entry_point_policy() -> None:
     )
 
     assert updates, "the unattended gate rewrites the MCP toolset before the message"
-    for body in [creates[0], *updates]:
+    for body in updates:
         (builtins,) = [t for t in body["agent"]["tools"] if t["type"] == "agent_toolset_20260401"]
-        assert builtins["default_config"]["enabled"] is True
+        assert builtins["default_config"]["enabled"] is False
+        assert all(config["enabled"] is False for config in builtins.get("configs", []))
 
 
 @pytest.mark.parametrize("enabled", [True, False])

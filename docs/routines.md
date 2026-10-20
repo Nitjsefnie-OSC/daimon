@@ -261,8 +261,10 @@ none runs unasked. Daimon's own tools are allowed, apart from an agent's `ask` o
 routine refuses, and its card-only actions: a routine's session asks on a
 backend switch and Microsoft mail and invites, policy on or off, and on
 Microsoft file changes with it on, and the routine refuses them. A routine
-keeps its built-in sandbox tools, which a routine that writes files needs. A
-routine whose agent coordinates other agents (`multiagent`), or whose session
+cannot use built-in sandbox tools (bash, file reads and edits, web fetch
+and the rest) or custom tools. This applies to every unattended run, with
+no opt-in, so routines and other unattended runs cannot generate files
+using sandbox tools. A routine whose agent coordinates other agents (`multiagent`), or whose session
 carries a capability this release does not know, is refused before its
 message and records `AdmissionDenied: backend_unsupported`; see
 [permissions.md](permissions.md#what-an-unattended-session-may-carry). See
@@ -636,7 +638,11 @@ invoker-policy bypass; destination and agent restrictions remain separate.
 
 ### Generated files
 
-After a successful run, Daimon collects its downloadable session outputs with
+Routines cannot generate files with sandbox tools because those tools are
+disabled for every unattended run, with no opt-in. The delivery pipeline
+still supports files already present in a session or queued in an outbox.
+
+After a successful run, Daimon collects any downloadable session outputs with
 the same settled-listing collector used by interactive turns. The delivery
 outbox stores the full reply and file references, never file bytes. Discord
 channels, threads and owner DMs receive attachments; Slack uses its existing

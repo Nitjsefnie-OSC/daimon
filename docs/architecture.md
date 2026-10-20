@@ -1087,14 +1087,17 @@ form is also checked against the reviewed value shapes (`_SESSION_SHAPE`): a
 scalar leaf must be that scalar or null, objects and lists are walked to the
 bottom, and only telemetry, metadata and a custom tool's `input_schema` stay
 opaque, so a field cannot hide in a value that turned into an object.
-`constrain_capabilities` computes the arrays to send (built-ins disabled when
-the policy says so, an optional `server/tool` allowlist, and every retained
+`constrain_capabilities` computes the arrays to send (built-ins always disabled
+and custom tools removed for every unattended entry point, with no opt-in,
+an optional `server/tool` allowlist, and every retained
 MCP toolset's default and per-tool configs on `always_ask`, trusted
 `daimon-mcp` and safety off included, so every MCP call reaches the
 unattended decider); `apply_capabilities` clears the thread session's cached tool hashes
 before it sends them, and `restore_capabilities` puts the session's own arrays
 back, finishing through repeated cancellation. `capability_posture` makes the
-decider refuse what the session no longer carries. Prepared turns map their
+decider refuse what the session no longer carries, including every built-in
+or custom call. Unattended runs cannot generate files with sandbox tools;
+checkpoint turns cannot create sandbox archives. Prepared turns map their
 origin to an entry point (`unattended_entry_point`: `worker` is a fleet worker,
 `routine` a routine, anything else a wake). For `run_prepared_turn` (fleet workers,
 unattended wakes, and future watches or completion turns), this also covers
