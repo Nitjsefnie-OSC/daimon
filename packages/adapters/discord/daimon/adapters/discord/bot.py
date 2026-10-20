@@ -2342,8 +2342,8 @@ class DaimonBot(commands.Bot):
         self._spawn(self._seed_tenant_defaults(tenant_id=tenant_id, guild=guild, was_ready=False))
 
     async def on_guild_remove(self, guild: discord.Guild) -> None:
-        self.membership_resolver.invalidate_guild(str(guild.id))
         """Soft-archive: stamp archived_at=now(). NO row delete."""
+        self.membership_resolver.invalidate_guild(str(guild.id))
         if not self._allows_guild(guild.id):
             return
         guild_id = str(guild.id)
