@@ -61,7 +61,9 @@ from daimon.core.credential_requests import (
     mcp_permission_message,
     mint_request_token,
 )
-from daimon.core.defaults.mcp_merge import get_reserved_mcp_rejection
+from daimon.core.defaults.mcp_merge import (
+    get_reserved_mcp_rejection,
+)
 from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.env_file import (
     MEMBER_SECRET_SUFFIX_HINT,
@@ -87,6 +89,7 @@ from daimon.core.stores.credential_requests import (
 )
 from daimon.core.stores.domain import CredentialRequestRow, TurnOriginRow
 from daimon.core.stores.turn_origins import get_active_origin
+from daimon.core.tool_safety import get_mcp_server_name_rejection
 from daimon.core.turn_keys import list_turn_key_names
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
@@ -646,7 +649,7 @@ def _reject_reserved_server(runtime: McpRuntime, *, server_name: str, url: str) 
     would 409 on every session create with nothing to heal it.
     """
     public_url = runtime.settings.mcp.public_url
-    rejection = get_reserved_mcp_rejection(
+    rejection = get_mcp_server_name_rejection(server_name) or get_reserved_mcp_rejection(
         server_name=server_name,
         url=url,
         public_url=str(public_url) if public_url is not None else None,

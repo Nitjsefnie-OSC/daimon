@@ -303,15 +303,18 @@ class IdentityMiddleware(Middleware):
         pu_claim = _token.claims.get("platform_user_id") if _token else None
         platform_user_id: str | None = pu_claim if isinstance(pu_claim, str) else None
         raw_agent_id = await self._agent_id_resolver(context)
+
+        def signed_uuid(name: str) -> uuid.UUID | None:
+            # A missing or malformed claim is absent: its gates fail closed.
+            value = _token.claims.get(name) if _token else None
+            try:
+                return uuid.UUID(value) if isinstance(value, str) else None
+            except ValueError:
+                return None
+
         # Keep chat execution identity separate from external agent credentials:
         # agent_id controls tool visibility and several authorization gates.
-        raw_chat_agent_id = _token.claims.get("chat_agent_id") if _token else None
-        chat_agent_id: uuid.UUID | None = None
-        if isinstance(raw_chat_agent_id, str):
-            try:
-                chat_agent_id = uuid.UUID(raw_chat_agent_id)
-            except ValueError:
-                chat_agent_id = None  # Fail closed at the Google broker.
+        chat_agent_id = signed_uuid("chat_agent_id")
         agent_id: uuid.UUID | None
         if raw_agent_id is None:
             agent_id = None
@@ -330,15 +333,14 @@ class IdentityMiddleware(Middleware):
         # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
         # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
         is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
-        slack_turn_context_id: uuid.UUID | None = None
-        raw_slack_context = _token.claims.get("slack_turn_context_id") if _token else None
-        if isinstance(raw_slack_context, str) and not internal_claim and agent_id is None:
-            try:
-                slack_turn_context_id = uuid.UUID(raw_slack_context)
-            except ValueError:
-                slack_turn_context_id = None  # Malformed claims fail closed.
+        slack_turn_context_id = (
+            None if internal_claim or agent_id is not None else signed_uuid("slack_turn_context_id")
+        )
         raw_bound_channel = _token.claims.get("bound_channel_id") if _token else None
+
         identity = AuthIdentity(
+            routine_id=signed_uuid("routine_id"),
+            execution_id=signed_uuid("execution_id"),
             account_id=account_id,
             tenant_id=tenant_id,
             role=role,

@@ -48,11 +48,13 @@ from daimon.core.output_delivery import DeliverableFile
 from daimon.core.permissions import any_agent_rules, any_own_readers
 from daimon.core.routine_delivery import (
     DeliveryOutcome,
+    claim_still_current,
     clear_creator,
     delivery_target,
     discord_creator_may_post,
     render_fallback_dm,
     render_fallback_post,
+    tenant_dm_still_open,
 )
 from daimon.core.routine_files import decode_payload, deliver_routine_files, payload_for
 from daimon.core.rule_views import keeps_routine_inside
@@ -207,35 +209,24 @@ def make_discord_routine_poster(
                 or current.updated_at != row.updated_at
             ):
                 return DeliveryOutcome(status="skipped", note="private_revision_changed")
-            if row.delivery_status == "claimed" and (
-                current.delivery_status != "claimed"
-                or current.delivery_lease_owner != row.delivery_lease_owner
-                or current.delivery_lease_expires_at is None
-                or current.delivery_lease_expires_at <= datetime.now(UTC)
-            ):
+            if not claim_still_current(current, row, datetime.now(UTC)):
                 return DeliveryOutcome(
                     status="skipped", note="Delivery was interrupted; it will not be retried."
                 )
-        if row.destination_kind == "dm":
-            async with sessionmaker() as session:
-                current = await get_routine(session, row.id, tenant_id=row.tenant_id)
-                if current is None or (current.destination_kind, current.destination_id) != (
+            if row.destination_kind == "dm":
+                if (current.destination_kind, current.destination_id) != (
                     "dm",
                     row.created_by_user_id,
                 ):
                     return DeliveryOutcome(status="skipped", note="destination_changed")
-                if row.delivery_status == "claimed" and (current.delivery_status != "claimed"):
-                    return DeliveryOutcome(
-                        status="skipped", note="Delivery was interrupted; it will not be retried."
-                    )
                 if not await dm_enabled(session, tenant_id=row.tenant_id):
                     return DeliveryOutcome(
                         status="skipped", note="Routine DMs are disabled for this server."
                     )
-            if not dm_policy(row).allows(row.created_by_user_id or ""):
-                return DeliveryOutcome(
-                    status="skipped", note="The owner is not allowed to receive DMs."
-                )
+        if row.destination_kind == "dm" and not dm_policy(row).allows(row.created_by_user_id or ""):
+            return DeliveryOutcome(
+                status="skipped", note="The owner is not allowed to receive DMs."
+            )
         cleared = await clear_creator(
             sessionmaker, row, platform="discord", membership_resolver=membership_resolver
         )
@@ -384,15 +375,8 @@ def make_discord_routine_poster(
         async def fallback_guard() -> bool:
             if await creator_still_cleared(row) is not None:
                 return False
-            async with sessionmaker() as session:
-                tenant_now = await get_tenant(session, row.tenant_id)
-                if (
-                    tenant_now is None
-                    or tenant_now.archived_at is not None
-                    or tenant_now.external_id != tenant.external_id
-                    or not await dm_enabled(session, tenant_id=row.tenant_id)
-                ):
-                    return False
+            if not await tenant_dm_still_open(sessionmaker, row, tenant.external_id):
+                return False
             creator = row.created_by_user_id
             if creator is None or not dm_policy(row).allows(creator):
                 return False

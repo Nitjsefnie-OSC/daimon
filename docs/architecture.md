@@ -120,6 +120,7 @@ sandbox makes an authenticated HTTP call back to it mid-turn.
 | `daimon.adapters.slack` | `packages/adapters/slack/` | Slack I/O, Block Kit rendering, per-user OAuth. |
 | `daimon.adapters.teams` | `packages/adapters/teams/` | Teams HTTP ingress, Adaptive Card rendering, text and `/` commands answered privately (`private_replies.py`) and panels, file consent delivery, channel files through SharePoint. |
 | `daimon.adapters.mcp` | `packages/adapters/mcp/` | The MCP server the agent calls, plus the OAuth, webhook and hub HTTP routes. |
+| `daimon.adapters.sidecar` | `packages/adapters/sidecar/` | Capability callback HTTP ingress; no turns or provider credentials. |
 | `daimon.adapters.scheduler` | `packages/adapters/scheduler/` | The routine poll loop. |
 | `daimon.adapters.cli` | `packages/adapters/cli/` | The `daimon` admin binary. |
 | `daimon.testing` | `packages/testing/` | Shared fixtures. |
@@ -1080,12 +1081,15 @@ built-ins and no skills). `require_allowed_capabilities` is a pure check on the
 snapshot that refuses a coordinator (`multiagent`) and disallowed skills, and
 checks every capability-bearing node (session, resources and checkouts,
 agent, model, skills, servers, tools, toolset defaults, per-tool configs,
-permission policies) against a field allowlist frozen in the module rather
+permission policies) and the telemetry (stats, usage and its cache creation,
+outcome evaluations) against a field allowlist frozen in the module rather
 than read from the SDK, before any update: an unknown field, empty or not,
-and an unknown tool, resource or policy type are refused. The snapshot's raw
+and an unknown tool, resource or policy type are refused. A private
+attribute on any model under the snapshot is refused too
+(`_no_private_attributes`); only the SDK's `_request_id` is allowed. The snapshot's raw
 form is also checked against the reviewed value shapes (`_SESSION_SHAPE`): a
 scalar leaf must be that scalar or null, objects and lists are walked to the
-bottom, and only telemetry, metadata and a custom tool's `input_schema` stay
+bottom, and only metadata and a custom tool's `input_schema` stay
 opaque, so a field cannot hide in a value that turned into an object.
 `constrain_capabilities` computes the arrays to send (built-ins disabled
 and custom tools removed for every unattended entry point; the one opt-in is
@@ -1095,16 +1099,18 @@ and custom tools removed for every unattended entry point; the one opt-in is
 an optional `server/tool` allowlist, and every retained
 MCP toolset's default and per-tool configs on `always_ask`, trusted
 `daimon-mcp` and safety off included, so every MCP call reaches the
-unattended decider); `apply_capabilities` clears the thread session's cached tool hashes
-before it sends them, and `restore_capabilities` puts the session's own arrays
+unattended decider); `invalidate_cached_tools` clears and commits the thread
+session's cached tool hashes and `send_capabilities` then sends the arrays
+(`apply_capabilities` runs both; a caller that restores registers its restore
+between them), and `restore_capabilities` puts the session's own arrays
 back, finishing through repeated cancellation. `capability_posture` makes the
 decider refuse what the session no longer carries, including every built-in
 call (unless the routine is opted in) and every custom call. Other unattended
 runs cannot generate files with sandbox tools; checkpoint turns cannot create
 sandbox archives. Prepared turns map their
 origin to an entry point (`unattended_entry_point`: `worker` is a fleet worker,
-`routine` a routine, anything else a wake). For `run_prepared_turn` (fleet workers,
-unattended wakes, and future watches or completion turns), this also covers
+`routine` a routine, anything else a wake). For `run_prepared_turn` (fleet workers
+and unattended wakes), this also covers
 dead-session recovery. Platform queue dispatchers explicitly mark timers and
 worker-completion wakes unattended. User-initiated handoffs and private-input
 continuations retain their attended approval surfaces. Managed Agents runtimes refresh
@@ -1274,8 +1280,9 @@ confirmations and gate updates go out with one attempt (`single_attempt`,
 no SDK retry), so nothing is resent after its gate and decision; a failed or
 ambiguous attempt raises and is left for a new, fully checked call. The
 registry keeps each worker's turn boundary: a worker reads as `running`, and
-a resume reuses it, only for the turn it owns. `annotations_for` is the seam for operator-trusted MCP
-hints; nothing supplies them yet. A read never answers a pause: `get_session`
+a resume reuses it, only for the turn it owns. The worker reads operator-trusted
+MCP hints (`DAIMON_TOOL_SAFETY__TRUSTED_ANNOTATIONS`) through `annotations_for`,
+bound once from the session's own agent and credential. A read never answers a pause: `get_session`
 (both), `get_my_session` and hub `get_session` report `running` while this
 process's worker owns the turn and `paused` with a hint otherwise; list tools
 report the provider's status. Only the session's own account (an agent key,
@@ -2336,7 +2343,7 @@ and discards results invalidated while in flight. `require_fresh=True` bypasses
 completed cache entries. Unknown evidence cannot satisfy a role gate.
 
 
-### Owner-DM routine delivery
+## Owner-DM routine delivery
 
 Discord `/routines` includes an owner-only delivery choice and delivery failure
 reasons. MCP accepts `destination_kind="dm"` with the recipient derived from
@@ -2347,26 +2354,14 @@ destination-free routines are owner-only on every reading surface, including
 administrator panels. The rollout migration clears legacy retained output.
 
 DM routines are scheduled owner messages through core's normal live-DM admission,
-binding and runner, with ordinary owner credentials, tools and personal/shared
-memory policy. Each run gets a fresh private scope and empty history. A shared
+binding and runner; [routines](routines.md) has the rules a user sees. A shared
 PostgreSQL advisory owner guard skips a scheduled slot when a live DM turn is
-running. It does not change C8 selection or conversation history. Unattended
-execution uses S1 (`attended=False`) and only gateable Managed Agents runtimes;
-actual-session agent identity, endpoint rules and trusted annotations are checked
-on every send batch and rebuilt on replacement. Budget channels are accounting
-only and confer no tool-rule scope. Nobody watches intermediate actions; permitted
-tools retain normal DM side-effect risk. Crash and stop guarantees match live DMs,
-with no separate turn lifecycle ledger or durable stop-recovery notice. Source channels and threads
-are verified against the tenant's guild through core Discord REST transport.
-Source channel/thread provenance and its known/unknown marker are written once
-at creation and are immutable through every edit. Delivery and budget targets
-may change independently. Legacy routines with unknown provenance retain ordinary
-channel/thread edits, clearing and firing on all platforms, but cannot select DM;
-they must be recreated from the source to get DM delivery. DM conversion, fire
-and every delivery chunk check the immutable creation-time source pair. Unknown
-provenance never becomes known during an edit. Private-scope origins resolve
-only the caller's current tenant-bound conversation and verify its saved guild
-source; source-free cold conversations require no guild-channel lookup.
+running, without changing the selected cold-DM conversation or its history.
+Execution is unattended (`attended=False`) on gateable Managed Agents runtimes
+only, through the unattended session gate on every send batch. Source channels
+and threads are verified against the tenant's guild through core Discord REST
+transport. The creation-time source pair and its known/unknown marker are
+written once and checked at DM conversion, fire and every delivery chunk.
 
 For an explicit owner DM, the scheduler submits the scheduled message through
 `direct_messages.run_dm_routine`; live and scheduled DMs share
@@ -2387,10 +2382,87 @@ turn and stores a versioned text-and-file-reference envelope in the
 existing outbox payload. Adapters download and upload those references inside
 the claim/settle lease, rechecking destination and owner access before each
 file. Discord and Slack reuse their interactive upload paths; Teams routine
-posts explain that attachments are unsupported. Failure notices remain text
-only, and an uncertain send is settled without replay by later polls. Platform
-SDKs may retry a single send after a server error or connection reset.
-Fallback-DM files recheck current DM controls, isolation (including a resolved
-Discord parent) and recipient eligibility before each file and after download.
+posts explain that attachments are unsupported. [Routines](routines.md#generated-files)
+lists the file limits, the fallback-DM rechecks and the replay guarantee.
 Delivery error logs record the error type without arbitrary exception text,
 which may contain signed upload URLs.
+
+
+### Signed page-event watch entry point
+
+OS page hosts sign events after their own ACL/CSRF checks. The sidecar verifies
+HMAC, binding, freshness and replay before acknowledging a transaction that stores
+evidence and enqueues a `watch_fired` wake. It has no direct table access or turn
+runner; core's durable queue handles dispatch. Discord, Slack and Teams share
+compatible readers; CLI and scheduler do not dispatch continuations. Old readers
+ignore the new reason before batching, preserving unrelated work on rollback.
+
+Migration `0119_watches` follows `0118_lead_intake`. The producer setting
+and durable global gate default off. Watch turns explicitly use `attended=False`
+and require the current origin's exact session grant. Registration, key generation,
+owner access, destination, balance, member caps and channel budget are rechecked
+before model/confirmation sends and report writes. Deleted threads have no fallback;
+unsupported backends and implicit session replacement are refused.
+
+`core.turn.unattended_capabilities` supplies the `watch` policy and shared
+validation (including telemetry and private fields), tool projection, cache
+invalidation, send and restore. The thin watch wrapper refuses duplicate server
+toolsets and retains only enabled, exact-name third-party read configs. Skills, multiagent coordinators and
+unknown fields (including newly parsed SDK fields) refuse before mutation. Built-ins,
+custom tools, management endpoints and writes are unavailable; defaults are disabled
+and every retained tool asks the live read/report decider. Default-only toolsets
+provide no tools. Mounted data/vaults grant no native or delegated execution.
+
+Cache invalidation commits before provider mutation. Original tool/server arrays
+restore before release, including repeated cancellation; origin authority is revoked
+after cleanup. The next bind reconciles tools after interruption. Each platform
+send/edit/upload, chunk and terminal success/error uses a latched output check:
+once refused, cleanup and late tasks cannot publish retained content. Watch turns
+start no detached output-file sweeps after their grant ends.
+
+Stop, key rotation and gate revocation cancel queued wakes; re-enabling requires
+fresh events. Evidence is escaped as untrusted text and expires after seven days.
+Account erasure removes registrations, evidence, pending wakes and owner controls;
+the privacy preview includes them. There are no enrollment tools, polls or internal
+watch migration. See [self-hosting](self-hosting.md#signed-page-event-watch-sidecar)
+for source, storage and request limits.
+
+
+## Lead intake
+
+The [lead intake](lead-intake.md) coordinator and evidence contracts live in
+core; tenant stores own encrypted submissions, effect intents, resolution audit,
+mailbox coverage and short-lived routine execution grants. The MCP service
+implements Gmail, HubSpot and Discord HTTP ports without adapter-to-adapter
+imports. Seven first-party tools expose submit/resume/resolve, attachment-free
+preclassification source reads, and private get/list/health; `daimon leads configure` provisions encrypted operator-owned
+integration configuration. Scheduler dispatch signs execution provenance into
+routine credentials and revokes it when the fire ends; retention maintenance
+erases expired evidence independently of intake activity.
+
+The Discord `/leads` entry point reads that same core tenant store and admission
+contract for an ephemeral queue/review status; decisions continue through the
+first-party resolver tool. It imports no MCP adapter implementation.
+
+Opportunity reservations retain tenant/CRM/portal-scoped normalized project
+identities. Separate mailbox scan history and message dispositions preserve
+page discoveries and failed coverage independently of the accepted intake queue.
+Sensitive opportunity mappings and discovered message IDs are encrypted and
+expire with the retention policy.
+
+Intake authorization carries the actual destination thread through recovery and
+write intents. Both MCP record readback and the private Discord queue evaluate
+that thread’s current policy and native visibility before returning its data.
+Approval cards cache no lead evidence: each Details click authorizes and renders
+from the live record, and removed records are unavailable. Store list traversal
+applies the same live read predicate before counting the visible page limit.
+Automatic resume batches use the current destination and revision and apply live
+read authorization before filling their processing window; deferred captures
+remain available for authorized manual review. Mailbox scan readback independently authorizes the current discovery destination,
+including when a resume batch contains no records.
+
+Routine intake provenance is signed only into the isolated provider-session
+credential. Refresh preserves its routine/execution discriminator and session
+grant; the shared personal-credential vault never receives routine provenance.
+Every unattended confirmation path protects lead resolution, even with general
+tool safety disabled.

@@ -117,16 +117,20 @@ async def test_worker_finished_reason_upgrade_downgrade_upgrade(
                 if check["name"] == "ck_task_continuations_reason"
             )
             assert "worker_finished" in reason_check
-            model_check = next(
-                constraint
-                for constraint in Base.metadata.tables["task_continuations"].constraints
-                if constraint.name == "ck_task_continuations_reason"
+            # This historical revision predates watch_fired; test its own contract.
+            assert re.findall(r"'([^']+)'", reason_check) == [*_LEGACY_REASONS, "worker_finished"]
+            context = MigrationContext.configure(
+                sync,
+                opts={
+                    "include_object": lambda obj, name, kind, reflected, compare_to: (
+                        name == "task_continuations"
+                        if kind == "table"
+                        else getattr(getattr(obj, "table", None), "name", None)
+                        == "task_continuations"
+                    )
+                },
             )
-            assert re.findall(r"'([^']+)'", reason_check) == re.findall(
-                r"'([^']+)'", str(model_check.sqltext)
-            )
-            differences = compare_metadata(MigrationContext.configure(sync), Base.metadata)
-            assert not [diff for diff in differences if "task_continuations" in str(diff)]
+            assert not compare_metadata(context, Base.metadata)
 
     await connection.run_sync(cycle)
 

@@ -599,3 +599,17 @@ def test_dump_agent_spec_excludes_isolated_from_ma_payload() -> None:
         "isolated must be excluded from dump_agent_spec output — an unexcluded "
         "field would be sent to MA as an unknown create/update parameter"
     )
+
+
+def test_load_agent_spec_refuses_a_server_name_with_a_slash(tmp_path: Path) -> None:
+    from daimon.core.errors import SpecError
+    from daimon.core.specs import load_agent_spec
+
+    spec = tmp_path / "bridge.yaml"
+    spec.write_text(
+        "name: x\nmodel: claude-haiku-4-5\n"
+        "mcp_servers:\n  - {name: linear/bridge, type: url, url: https://bridge.example/mcp}\n"
+        "tools:\n  - {type: mcp_toolset, mcp_server_name: linear/bridge}\n"
+    )
+    with pytest.raises(SpecError, match="linear/bridge"):
+        load_agent_spec(spec)

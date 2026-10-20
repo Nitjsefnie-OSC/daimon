@@ -2495,3 +2495,14 @@ async def test_an_admins_dm_turn_posts_a_credential_card_for_a_pinned_agent_into
     body = posts[0].kwargs["json"]
     assert body["channel"] == "D0ADMIN1"
     assert "thread_ts" not in body or body["thread_ts"] is None, "a dm: scope is not a Slack ts"
+
+
+def test_a_credential_request_refuses_a_server_name_with_a_slash() -> None:
+    from fastmcp.exceptions import ToolError
+
+    with pytest.raises(ToolError, match="cannot contain '/'"):
+        _credential_requests_mod._reject_reserved_server(  # pyright: ignore[reportPrivateUsage]
+            _runtime(MagicMock()),
+            server_name="linear/bridge",
+            url="https://bridge.example/mcp",
+        )

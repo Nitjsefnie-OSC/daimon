@@ -67,6 +67,12 @@ async def record_continuation(
     call recognises its own row instead of queueing a second one.
     `available_at` makes it a wake: polled, and not claimable before then.
     """
+    if reason not in get_args(ContinuationReason):
+        raise ValueError("Unknown continuation reason")
+    if reason == "watch_fired":
+        from daimon.core.continuity.continuation import require_writable_reason
+
+        require_writable_reason(reason)
     orm = TaskContinuation(
         tenant_id=tenant_id,
         platform=platform,

@@ -1723,6 +1723,18 @@ class FleetSettings(BaseModel):
     )
 
 
+class WatchesSettings(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description=(
+            "Enable OS-signed page-event watch producers and dispatch. Keep disabled "
+            "until the execution-bound unattended origin grants, non-gateable cleanup "
+            "and watch release are reviewed. "
+            "The database global gate must also be explicitly enabled by an operator."
+        ),
+    )
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -1816,6 +1828,7 @@ class Settings(BaseSettings):
     thread_naming: ThreadNamingSettings = Field(default_factory=ThreadNamingSettings)
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
+    watches: WatchesSettings = Field(default_factory=WatchesSettings)
     private_channel_messages: PrivateChannelMessagesSettings = Field(
         default_factory=PrivateChannelMessagesSettings
     )
@@ -1957,3 +1970,15 @@ def load_turn_settings(*, _env_file: str | None = ".env") -> TurnSettings:
 
         validate_configured_runtime_manifest()
     return turn
+
+
+class _WatchesSettingsSource(BaseSettings):
+    watches: WatchesSettings = Field(default_factory=WatchesSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_", env_nested_delimiter="__", extra="ignore", hide_input_in_errors=True
+    )
+
+
+def load_watches_settings() -> WatchesSettings:
+    """Read the producer gate without loading unrelated credentials or local dotenv files."""
+    return _WatchesSettingsSource().watches

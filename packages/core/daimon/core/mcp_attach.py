@@ -49,6 +49,7 @@ from daimon.core.operation_policy import (
 )
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import agent_mcp_credentials as cred_store
+from daimon.core.tool_safety import get_mcp_server_name_rejection
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -260,7 +261,8 @@ async def attach_mcp_server_to_agent(
     boundary decide how to surface it.
 
     Callers are responsible for any policy gate (reserved-server rejection,
-    admin checks). ``replace_allowed`` is the caller's `mcp_replace` decision:
+    admin checks); a ``server_name`` holding ``/`` raises ``ValueError``
+    before any read. ``replace_allowed`` is the caller's `mcp_replace` decision:
     when it is False and the fresh agent already has ``server_name`` at another
     URL, raise `McpServerReplaceRefusedError` and write nothing. With
     ``shares_token`` (a pasted token that became the agent-wide credential),
@@ -268,6 +270,10 @@ async def attach_mcp_server_to_agent(
     attached after the caller decided, and its users would now run on the
     caller's token. The caller withdraws that token.
     """
+    if (rejection := get_mcp_server_name_rejection(server_name)) is not None:
+        # Every caller refuses this first; a credential request made before
+        # the refusal existed still lands here.
+        raise ValueError(rejection)
     backend_scope = scope or Scope.legacy_host_authorized(
         call_site="daimon.core.mcp_attach:attach_mcp_server_to_agent"
     )

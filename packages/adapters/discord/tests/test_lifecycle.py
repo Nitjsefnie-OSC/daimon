@@ -378,7 +378,7 @@ async def test_terminal_edit_has_an_application_timeout(monkeypatch: pytest.Monk
     assert lc._card_writes.key(_SENTINEL_REF) in lc._card_writes.terminal_ready
 
 
-@pytest.mark.parametrize("held_stage", ["edit", "replacement_send"])
+@pytest.mark.parametrize("held_stage", ["edit", "replacement_send", "confirmation_lookup"])
 async def test_ceiling_render_supersedes_retained_terminal_replacement(
     monkeypatch: pytest.MonkeyPatch, held_stage: str
 ) -> None:
@@ -458,6 +458,13 @@ async def test_ceiling_render_supersedes_retained_terminal_replacement(
         turn_path="legacy",
         backend=None,
     )
+
+    async def no_confirmed_tools(_deps: object, _tenant: uuid.UUID) -> frozenset[str]:
+        if held_stage == "confirmation_lookup":
+            await release.wait()
+        return frozenset()
+
+    monkeypatch.setattr(turn_runner, "confirmed_tools_for_tenant", no_confirmed_tools)
     monkeypatch.setattr(turn_runner, "run_turn", fake_driver)
     monkeypatch.setattr(turn_runner, "chat_tool_confirmation", lambda *args, **kwargs: None)
     monkeypatch.setattr(turn_runner, "trusted_servers_for", lambda *args: ())
@@ -3293,3 +3300,73 @@ async def test_rendered_table_expansion_respects_last_answer_slot(monkeypatch, t
     assert "answer.txt" in edits[-1][1]["content"]
     assert "A compact table." in edits[-1][1]["attachments"][0].fp.read().decode()
     assert file.fp.closed
+
+
+@pytest.mark.parametrize("ending", ["success", "interrupted", "error", "chunks", "attachment"])
+async def test_watch_output_revocation_latches_all_discord_writes(ending):
+    import contextlib
+    import io
+
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization
+
+    lifecycle, sends, edits = _make_lifecycle()
+    await lifecycle.post_initial()
+    allowed = True
+
+    async def authorize():
+        if not allowed:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    allowed = False
+    with pytest.raises(AdmissionDenied):
+        await lifecycle.edit_card(content="retained answer")
+    allowed = True  # A later success/re-enable cannot clear the failed check.
+    before = (len(sends), len(edits))
+    state = TurnState(content=[TextBlock(kind="text", text="retained answer " * 500)])
+    with contextlib.suppress(AdmissionDenied):
+        if ending == "error":
+            await lifecycle.on_terminal_failure(state, RuntimeError("private failure"))
+        elif ending == "attachment":
+            await lifecycle.edit_card(
+                attachments=[discord.File(io.BytesIO(b"private"), "private.txt")]
+            )
+        else:
+            if ending == "interrupted":
+                state = replace(state, termination=TerminationReason.INTERRUPTED)
+            await lifecycle.on_terminal_success(state)
+    assert (len(sends), len(edits)) == before
+    assert guard.failed
+
+
+async def test_watch_revocation_between_chunks_rechecks_each_discord_write():
+    import contextlib
+
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization
+
+    lifecycle, sends, edits = _make_lifecycle()
+    await lifecycle.post_initial()
+
+    def count():
+        return len(sends) + len(edits)
+
+    checks = 0
+
+    async def authorize():
+        nonlocal checks
+        checks += 1
+        if checks > 1:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    lifecycle.set_output_authorization(guard)
+    before = count()
+    with contextlib.suppress(AdmissionDenied):
+        await lifecycle.on_terminal_success(
+            TurnState(content=[TextBlock(kind="text", text="secret " * 4000)])
+        )
+    assert count() - before == 1
+    assert guard.failed

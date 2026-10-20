@@ -25,6 +25,7 @@ from daimon.core.mux_compat import retrieve_agent
 from daimon.core.session_seal import session_facts
 from daimon.core.session_snapshot import hash_tools, session_tools
 from daimon.core.stores.domain import ThreadSessionRow, TurnOriginRow
+from daimon.core.stores.lead_intake import confirmation_tools
 from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.tool_safety import has_confirmation_gate, microsoft_send_tools
 from daimon.core.turn.approvals import daimon_rule_tools_for
@@ -63,6 +64,12 @@ async def session_card_gap(
     """
     if origin is None:
         return "no_origin"
+    if tool_name == "lead_intake_resolve" and (
+        not origin.attended
+        or not auth.chat_session_id
+        or origin.chat_session_id != auth.chat_session_id
+    ):
+        return "no_origin"
     async with runtime.session_factory() as session:
         live = await get_live_thread_session(
             session,
@@ -72,6 +79,11 @@ async def session_card_gap(
             account_id=auth.account_id,
         )
     if live is None:
+        return "no_live_session"
+    if tool_name == "lead_intake_resolve" and (
+        live.effective_config is None
+        or live.effective_config.chat_session_id != auth.chat_session_id
+    ):
         return "no_live_session"
     try:
         ma_session = await retrieve_session(
@@ -179,7 +191,8 @@ async def _recorded_as_gated(
                 | microsoft_send_tools(
                     enabled=runtime.settings.microsoft_accounts.configured,
                     tool_safety_on=runtime.settings.tool_safety.enabled,
-                ),
+                )
+                | await confirmation_tools(runtime.session_factory, auth.tenant_id),
                 daimon_rule_tools=daimon_rule_tools,
             )
             if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(

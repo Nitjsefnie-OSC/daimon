@@ -1,5 +1,9 @@
 # Billing and credits
 
+Page-watch wakes recheck balance, member monthly caps and their attributed channel
+budget before each model or confirmation send and each report write. Admission
+during preparation alone does not authorize later spending or delivery.
+
 Neutral-backend usage revisions can be recorded through the host accounting
 outbox in the caller's database transaction. The first revision retains the
 `turn:{session}:{event}` debit key; later revisions use

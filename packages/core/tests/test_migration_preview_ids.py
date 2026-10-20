@@ -1,6 +1,8 @@
 """Exercise deployed main/preview stamps through real Alembic and PostgreSQL.
 
-The fixture scripts are frozen from 7df20d82c, before the ID repair. Building
+The historical scripts reproduce the preview chain as it stood at 7df20d82c,
+before the ID repair: the canonical migrations under their old revision IDs
+and parents. Building
 those historical schemas proves compatibility without imitating them by merely
 stamping a database that already has the new schema.
 """
@@ -8,7 +10,9 @@ stamping a database that already has the new schema.
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import os
+import re
 import secrets
 import shutil
 import sys
@@ -31,7 +35,10 @@ ROOT = Path(__file__).resolve().parents[3]
 SCRIPTS = ROOT / "packages/core/alembic"
 FORK = "0109_github_tokens_live_index"
 MAIN = "0110_microsoft_accounts"
-HEAD = "0118_routine_sandbox_tools"
+PREVIOUS_HEAD = "0117_clear_legacy_routine_output"
+LEAD_HEAD = "0118_lead_intake"
+WATCHES = "0119_watches"
+HEAD = "0120_routine_sandbox_tools"
 CHAIN = [
     MAIN,
     "0111_cold_dm_agent",
@@ -40,14 +47,53 @@ CHAIN = [
     "0114_turn_attendance",
     "0115_origin_session_grants",
     "0116_thread_model_settings",
-    "0117_clear_legacy_routine_output",
+    PREVIOUS_HEAD,
+    LEAD_HEAD,
+    WATCHES,
     HEAD,
 ]
+# Added by HEAD, so absent from every older revision the chain is checked at.
+SANDBOX_COLUMNS = {"sandbox_tools_enabled", "sandbox_tools_set_by", "sandbox_tools_set_at"}
+# The preview chain before the ID repair: each legacy revision ran the
+# canonical script under its own ID and parent. The sha256 pins the bytes
+# preview databases ran, so an edit to a deployed canonical script fails here
+# instead of silently changing the historical chain.
+PREVIEW_CHAIN = {
+    "0110_cold_dm_agent": (
+        "0111_cold_dm_agent",
+        FORK,
+        "0dd1c622c56c93b5a37aeebd0f1dff4bbdf369f900c84bc82c0eea409b6f32d8",
+    ),
+    "0111_routine_dm_destination": (
+        "0112_routine_dm_destination",
+        "0110_cold_dm_agent",
+        "c6847980363d5509ef1e6d0181796a1c41dd564b3ed304235bff7e36a29cf318",
+    ),
+    "0112_unattended_turn_provenance": (
+        "0113_unattended_turn_provenance",
+        "0111_routine_dm_destination",
+        "c5738445743c6b1d854199720f01b99c341169395a8072633b07bff193f89fe6",
+    ),
+    "0113_microsoft_accounts": (
+        MAIN,
+        "0112_unattended_turn_provenance",
+        "5c531e579a7475a174797ce30fe031e716fc7917aa6e0359de74d416405a50b9",
+    ),
+}
 TABLES = {
     "microsoft_user_tokens",
     "microsoft_sign_ins",
     "direct_message_policies",
     "routines",
+    "lead_intake_configs",
+    "lead_intakes",
+    "lead_intake_effects",
+    "lead_resolution_audit",
+    "lead_mailbox_states",
+    "lead_intake_executions",
+    "lead_opportunities",
+    "lead_mailbox_scans",
+    "lead_mailbox_messages",
 }
 
 
@@ -70,16 +116,36 @@ def _historical_scripts(tmp_path: Path) -> Path:
     for source in (SCRIPTS / "versions").glob("*.py"):
         if source.stem not in CHAIN:
             shutil.copy(source, versions / source.name)
-    for source in (Path(__file__).parent / "fixtures/preview_migrations").glob("*.py"):
-        shutil.copy(source, versions / source.name)
+    for legacy, (canonical, parent, digest) in PREVIEW_CHAIN.items():
+        script = (SCRIPTS / "versions" / f"{canonical}.py").read_text()
+        script, revisions = re.subn(
+            r'^revision: str = ".*"$', f'revision: str = "{legacy}"', script, flags=re.M
+        )
+        script, parents = re.subn(
+            r'^down_revision: str \| None = ".*"$',
+            f'down_revision: str | None = "{parent}"',
+            script,
+            flags=re.M,
+        )
+        assert revisions == parents == 1
+        assert hashlib.sha256(script.encode()).hexdigest() == digest, (
+            f"{canonical} no longer matches what preview ran as {legacy}"
+        )
+        (versions / f"{legacy}.py").write_text(script)
     return scripts
 
 
-def _assert_head(connection: Connection) -> None:
-    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == HEAD
+def _assert_head(connection: Connection, expected: str = HEAD) -> None:
+    assert connection.scalar(text("SELECT version_num FROM alembic_version")) == expected
+
+    compared_tables = (
+        TABLES
+        if expected in (LEAD_HEAD, WATCHES, HEAD)
+        else {name for name in TABLES if not name.startswith("lead_")}
+    )
 
     def include_name(name: str | None, kind: str, _parents: dict[str, str | None]) -> bool:
-        return kind != "table" or name in TABLES
+        return kind != "table" or name in compared_tables
 
     def include_object(
         _obj: object,
@@ -88,7 +154,9 @@ def _assert_head(connection: Connection) -> None:
         _reflected: bool,
         _compare_to: object,
     ) -> bool:
-        return kind != "table" or name in TABLES
+        if kind == "column" and expected != HEAD:
+            return name not in SANDBOX_COLUMNS
+        return kind != "table" or name in compared_tables
 
     migration_context = MigrationContext.configure(
         connection, opts={"include_name": include_name, "include_object": include_object}
@@ -116,6 +184,11 @@ def test_authoritative_chain() -> None:
         assert node is not None and node.down_revision == parent
         assert Path(node.path).stem == revision
         parent = revision
+
+
+def test_historical_scripts_match_what_preview_ran(tmp_path: Path) -> None:
+    versions = _historical_scripts(tmp_path) / "versions"
+    assert {p.stem for p in versions.glob("*.py")} >= set(PREVIEW_CHAIN)
 
 
 @pytest.fixture
@@ -207,8 +280,8 @@ async def test_deployed_upgrade_and_downgrade_paths(
                         )
                     )
                 sync.commit()
-            command.upgrade(config, "head")
-            _assert_head(sync)
+            command.upgrade(config, PREVIOUS_HEAD)
+            _assert_head(sync, PREVIOUS_HEAD)
             if start not in ("fresh", MAIN):
                 assert (
                     sync.scalar(text("SELECT dm_agent_name FROM direct_message_policies"))
@@ -220,8 +293,8 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 ) == bytes.fromhex("cafe")
             sync.commit()
             # A repeat upgrade is a no-op after translation.
-            command.upgrade(config, "head")
-            _assert_head(sync)
+            command.upgrade(config, PREVIOUS_HEAD)
+            _assert_head(sync, PREVIOUS_HEAD)
             if start in (
                 "0111_routine_dm_destination",
                 "0112_unattended_turn_provenance",
@@ -237,11 +310,11 @@ async def test_deployed_upgrade_and_downgrade_paths(
                 with pytest.raises(RuntimeError, match="convert or remove DM routines"):
                     command.downgrade(config, MAIN)
                 # The failed downgrade rolls back the provenance downgrade too.
-                _assert_head(sync)
+                _assert_head(sync, PREVIOUS_HEAD)
                 sync.execute(text("DELETE FROM routines"))
                 sync.commit()
             # Each new revision reverses, including Microsoft's tables.
-            for target in reversed([FORK, *CHAIN[:-1]]):
+            for target in reversed([FORK, *CHAIN[:-3]]):
                 command.downgrade(config, target)
                 assert sync.scalar(text("SELECT version_num FROM alembic_version")) == target
                 inspector = inspect(sync)
@@ -262,6 +335,24 @@ async def test_deployed_upgrade_and_downgrade_paths(
                     assert not inspector.has_table("microsoft_user_tokens")
                     assert not inspector.has_table("microsoft_sign_ins")
                 sync.commit()
+            command.upgrade(config, LEAD_HEAD)
+            _assert_head(sync, LEAD_HEAD)
+            with pytest.raises(NotImplementedError, match="retention/export"):
+                command.downgrade(config, PREVIOUS_HEAD)
+            _assert_head(sync, LEAD_HEAD)
+            command.upgrade(config, "head")
+            _assert_head(sync)
+            assert (
+                sync.scalar(text("SELECT enabled FROM watch_controls WHERE scope = 'global'"))
+                is False
+            )
+            sync.commit()
+            # The sandbox opt-in reverses; the watch evidence below it does not.
+            command.downgrade(config, WATCHES)
+            _assert_head(sync, WATCHES)
+            with pytest.raises(NotImplementedError, match="Watch evidence"):
+                command.downgrade(config, LEAD_HEAD)
+            _assert_head(sync, WATCHES)
             command.upgrade(config, "head")
             _assert_head(sync)
 

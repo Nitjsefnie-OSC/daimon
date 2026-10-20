@@ -7,11 +7,25 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Added
+
 - An admin can turn built-in sandbox tools (bash, file reads and edits and the rest) back on for one routine at a time, for that routine's own scheduled runs: the `set_routine_sandbox_tools` MCP tool (a current human workspace or server admin only; the routine's owner cannot opt their own routine in, and on Discord the admin's rights are re-checked when they call it) or `daimon routines sandbox-tools --tenant TENANT ROUTINE_ID... [--off] [--dry-run]` for the operator, which also opts in a confirmed list of routines at once and leaves any already set alone. Every change records who made it, when and the routine id. `get_routine`, `list_routines` and the Discord `/routines` panel show whether a routine has sandbox tools. Watches, timers and wakes, agent chat, fleet workers, `daimon run` and workspace checkpoints keep them off with no opt-in.
 
-- Protect legacy destination-free routine previews and diagnostics from non-owner
-  readers, including administrators, across MCP and chat panels. Clear retained
-  legacy private output once during upgrade; operator backfill output stays redacted.
+- Native tenant-scoped lead intake with encrypted capture, Gmail qualification,
+  restricted Discord dossiers and draft replies, conservative HubSpot reuse,
+  durable write recovery, authorized human resolution and retention tombstones.
+  CRM recovery refuses conflicts with approved selections and requires another review.
+  Dossier effects/readback honor thread permissions; classification can read new
+  discoveries without service credentials. Nested attachments are excluded,
+  discoveries expire, source tombstones survive connection renames, and actor
+  erasure prevents racing resolution audits from recreating personal data.
+  Intake authority is bound to one attended session grant; routine provenance
+  remains isolated through refresh and resolution is protected unattended.
+  A lead's readers are fixed to the sales channel it was captured for: every
+  reader, including `/leads` and approval-card Details, needs that channel's and
+  its dossier thread's history, and an agent kept to its own channel reads no
+  lead elsewhere. Resolve cards keep the approved IDs visible; adoption refuses
+  a channel change; discoveries survive a mailbox connection rename.
 
 - Turns nobody watches (routines, timers and worker wakes, fleet workers, agent chat, `daimon run` and workspace checkpoints) refuse a session whose agent coordinates other agents, before anything is sent: its roster's agents could run tools and MCP writes the unattended gate cannot reach, and Managed Agents cannot remove the roster from a live session. Such a routine fails with `AdmissionDenied: backend_unsupported`, agent chat answers with a tool error, and a checkpoint carries only the conversation. A session carrying a field this release has not reviewed, at any level from the session and its resources down to a tool's permission policy, is refused the same way (including a field hidden inside a setting that should be a plain value), as is an unattended turn on a Managed Agents runtime that cannot read its session. Every MCP call in these sessions now pauses for the unattended decider, Daimon's own tools and calls with tool safety off included; the decider allows what it allowed before. Built-in sandbox tools (bash, file edits and the rest) and custom tools are disabled for every unattended entry point, including watches, with no opt-in. Routines and other unattended runs cannot generate files with sandbox tools, and workspace checkpoints cannot create sandbox archives.
 
@@ -20,8 +34,18 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Native OpenAI sessions install isolated MCP session grants before creation, bind them to each executing origin on reuse, and revoke origin authority when the turn ends. Child preparation cannot inherit a parent origin grant.
 
 - Agent chat and hub mutations require a session opened on that headless surface. Same-account platform sessions and legacy sessions without proven headless provenance cannot be continued, cancelled or archived through it. Unauthorized callers are refused before waiting on a session mutation fence.
-
 - Preserve the deployed Microsoft accounts migration ID and automatically reconcile earlier preview migration stamps during upgrades. Keep diagnostics read-only on empty and legacy databases, preserve normal explicit Alembic bookkeeping, and explain deployment serialization and legacy preview upgrades.
+
+- Add default-off OS-signed page-event watches with atomic evidence and durable wakes,
+  restricted database identities, replay/retention limits and an optional preview
+  sidecar. Account erasure removes owned watches, evidence and queued wakes. Woken
+  turns require an execution-bound unattended session grant, explicitly allowlisted
+  snapshot fields and named read tools; skills, multiagent coordinators and unknown
+  capabilities refuse before provider mutation. Original tools restore after each
+  turn, including cancellation. Fresh access and spend checks gate every send and
+  output write; a failed check latches delivery off through cleanup. Startup audits
+  resolve the real ingress schema and refuse unsafe effective database privileges.
+  Expired batches never absorb fresh events.
 
 - Scheduled routine results attach generated files on Discord (including owner DMs) and Slack. Upload limits and unsupported Teams file delivery are explained in the result; the outbox does not replay interrupted deliveries across polls. A platform SDK may retry a single send after a server error or connection reset. Fallback-DM files recheck DM controls, recipient eligibility and isolation before upload; delivery failure logs omit sensitive exception text.
 
@@ -35,14 +59,15 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Gate Discord turns and routine owners by configured role IDs, with current membership checks for MCP, scheduled fires, and private delivery. Configure roles with `daimon tenants access-policy set --invoker-role`.
 
-### Fixed
-
-- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
-
-- Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
-
-
 ### Security
+
+- An unattended session with an MCP server whose name contains `/` is refused before anything is sent. A watch's tool allowlist is kept as server and tool pairs, so a server named `linear/bridge` can no longer enable an absent `bridge/get_issue` tool on the `linear` server.
+
+- MCP server names can no longer contain `/`: attaching one (`attach_mcp_server`, `create_agent`, `update_agent`, a credential request, or an agent spec for `daimon agents create`/`update`) is refused, because tool keys use `/` between the server and the tool. A call on a server that already has such a name is never allowed by an operator key or a tool rule: it asks in chat and is refused in unattended runs, unless the operator's deny list refuses it outright.
+
+- An unattended session's telemetry (timing, token usage and cache creation, outcome evaluations) must match its reviewed schema; a new or reshaped field there is refused like one anywhere else in the session.
+
+- An unattended session carrying a private attribute at any level is refused; only the SDK's own request ID is allowed.
 
 - Origin-based MCP actions require the signed grant of the calling session.
   Routines and timers cannot borrow a concurrent human origin, and empty origin
@@ -64,6 +89,20 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. The turn driver applies `ask` and channel rules on them (see Fixed).
 
 ### Fixed
+
+- Protect legacy destination-free routine previews and diagnostics from non-owner
+  readers, including administrators, across MCP and chat panels. Clear retained
+  legacy private output once during upgrade; operator backfill output stays redacted.
+
+- Lead approval Details loads authorized live evidence on each click and shows
+  removed records as no longer available. Cards retain no cached evidence.
+  Batch mailbox readback requires the common lead read check, and hidden leads
+  no longer consume list pages. Automatic resume batches skip old configuration
+  revisions, old destinations and unreadable records before filling their window.
+
+- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
+
+- Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
 
 - Continuing a routine session through the CLI, MCP or a checkpoint retains its conversation channel rules; its private transcript stamp no longer makes it execute as a DM.
 

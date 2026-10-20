@@ -9,12 +9,8 @@ Plain history/heads remain graph-only. Commands entering this env diagnose store
 legacy stamps without repairing; old literal targets and
 offline legacy ranges are unsupported: run ``alembic upgrade head`` online first.
 
-The DEPLOYER serializes migrations; this environment adds no advisory lock or
-retry loop. Lane: .github/workflows/lane.yml:46, group lane-<lane>. Staging/prod:
-.github/workflows/deploy.yml:66, group deploy-gcp-<environment>, with the blocking
-Cloud Run migrate job at :206-210. These callers must run one migrator at a time.
-A concurrent manual run can fail with ordinary PostgreSQL DDL conflicts; after
-the other invocation finishes, retry normally, as on main.
+The deployer serializes migrations; this environment adds no advisory lock or
+retry loop. deploy/lanes/README.md "Migration serialization" names the callers.
 """
 
 from __future__ import annotations

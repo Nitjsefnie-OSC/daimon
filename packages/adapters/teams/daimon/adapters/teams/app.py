@@ -1401,6 +1401,9 @@ class TeamsApp:
                     holder,
                     markers,
                     new_lifecycle,
+                    watch_row=continuation
+                    if continuation and continuation.reason == "watch_fired"
+                    else None,
                     role=role or Role.USER,  # admission's: one read per turn
                     handoff=handoff,
                     reraise=reraise,
@@ -1471,6 +1474,7 @@ class TeamsApp:
         new_lifecycle: LifecycleFactory,
         *,
         role: Role,
+        watch_row: TaskContinuationRow | None = None,
         handoff: HandoffFactory | None,
         reraise: bool,
         attended: bool,
@@ -1597,8 +1601,9 @@ class TeamsApp:
                 platform="teams",
                 thread_id=inbound.thread_id,
                 external_user_id=inbound.user_id,
-                origin="handoff" if notice is not None else "chat",
                 attended=attended,
+                watch_row=watch_row,
+                origin="handoff" if notice is not None else "chat",
                 user_message=message,
                 lifecycle=lifecycle,
                 cancel=cancel,
@@ -1619,21 +1624,22 @@ class TeamsApp:
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
         final = holder[-1]
-        if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-            sweep = self.outputs.sweep(
-                inbound,
-                outcome.ma_session_id,
-                append=final.append_to_answer,
-                quiet_s=final.outputs_quiet_s(),
-            )
-            swept = self.spawn(sweep, name="teams.output-sweep")
-            self._held_controls[inbound.conversation_id] = final
-            controls = self.spawn(_controls_after(swept, final), name="teams.turn-controls")
-            controls.add_done_callback(
-                functools.partial(self._forget_controls, inbound.conversation_id, final)
-            )
-        else:
-            await final.release_controls()
+        if final.output_authorization is None:
+            if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+                sweep = self.outputs.sweep(
+                    inbound,
+                    outcome.ma_session_id,
+                    append=final.append_to_answer,
+                    quiet_s=final.outputs_quiet_s(),
+                )
+                swept = self.spawn(sweep, name="teams.output-sweep")
+                self._held_controls[inbound.conversation_id] = final
+                controls = self.spawn(_controls_after(swept, final), name="teams.turn-controls")
+                controls.add_done_callback(
+                    functools.partial(self._forget_controls, inbound.conversation_id, final)
+                )
+            else:
+                await final.release_controls()
         if outcome.continuity.state == "replaced_after_loss":
             kind: Literal["transcript", "history"] = (
                 "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"

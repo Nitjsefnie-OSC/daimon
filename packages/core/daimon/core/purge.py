@@ -125,6 +125,7 @@ from daimon.core.stores import github_connect as github_connect_store
 from daimon.core.stores import github_issued_tokens as github_issued_tokens_store
 from daimon.core.stores import github_links as github_links_store
 from daimon.core.stores import identity as identity_store
+from daimon.core.stores import lead_intake as lead_intake_store
 from daimon.core.stores import mcp_tokens as mcp_tokens_store
 from daimon.core.stores import message_feedback as message_feedback_store
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens_store
@@ -138,6 +139,7 @@ from daimon.core.stores import support_escalation as support_escalation_store
 from daimon.core.stores import teams_message_admissions as teams_admissions_store
 from daimon.core.stores import tenants as tenants_store
 from daimon.core.stores import user_skills as user_skills_store
+from daimon.core.stores import watches as watches_store
 from daimon.core.stores import wizard_session as wizard_session_store
 from daimon.core.stores.domain import CliPrincipalRow, PlatformPrincipalRow
 from pydantic import BaseModel, ConfigDict, Field
@@ -153,6 +155,7 @@ class PurgeReport(BaseModel):
 
     model_config = ConfigDict(frozen=True)
 
+    watches: int = 0
     routines: int = 0
     principal_links: int = 0
     cli_principals: int = 0
@@ -177,9 +180,12 @@ class PurgeReport(BaseModel):
     platform_user_names: int = 0
     teams_messages: int = 0
     microsoft_user_tokens: int = 0
+    lead_intakes: int = 0
 
     def merge(self, other: PurgeReport) -> PurgeReport:
         return PurgeReport(
+            watches=self.watches + other.watches,
+            lead_intakes=self.lead_intakes + other.lead_intakes,
             routines=self.routines + other.routines,
             principal_links=self.principal_links + other.principal_links,
             cli_principals=self.cli_principals + other.cli_principals,
@@ -235,7 +241,11 @@ async def _purge_principal_in_session(
     platform_user_names_count = 0
     teams_messages_count = 0
     microsoft_user_tokens_count = 0
+    lead_intakes_count = 0
     if isinstance(principal, PlatformPrincipalRow):
+        lead_intakes_count = await lead_intake_store.erase_actor(
+            session, principal.tenant_id, principal.external_id
+        )
         routines_count = await routines_store.delete_for_principal(
             session,
             tenant_id=principal.tenant_id,
@@ -383,6 +393,7 @@ async def _purge_principal_in_session(
             )
 
     return PurgeReport(
+        lead_intakes=lead_intakes_count,
         routines=routines_count,
         principal_links=links_count,
         cli_principals=principal_count if kind == "cli" else 0,
@@ -481,6 +492,7 @@ async def purge_account(
     """
     async with sm() as session, session.begin():
         await privacy_deletes_store.lock_account(session, account_id=account_id)
+        watches_count = await watches_store.delete_for_account(session, account_id=account_id)
         await security_audit_store.erase_account_for_privacy(session, account_id=account_id)
         cli_list = await identity_store.list_cli_principals_for_account(
             session, account_id=account_id
@@ -569,6 +581,7 @@ async def purge_account(
         )
         db_report = report.merge(
             PurgeReport(
+                watches=watches_count,
                 mcp_tokens=mcp_tokens_count,
                 gemini_records=gemini_records_count,
                 github_connect_requests=github_connect_requests_count,

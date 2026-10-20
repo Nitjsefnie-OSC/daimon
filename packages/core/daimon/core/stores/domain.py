@@ -55,7 +55,12 @@ PreparationFailureKind = Literal["skill_unavailable"]
 # into the successor's working files, or leave them in the old checkout.
 UnsavedWorkChoice = Literal["copy", "leave"]
 ContinuationReason = Literal[
-    "task_handoff", "private_input_applied", "timer", "github_access_ready", "worker_finished"
+    "task_handoff",
+    "private_input_applied",
+    "timer",
+    "github_access_ready",
+    "worker_finished",
+    "watch_fired",
 ]
 ContinuationStatus = Literal["pending", "claimed", "delivered", "skipped", "cancelled"]
 UserSkillSource = Literal["repo", "upload"]
@@ -1260,3 +1265,57 @@ class CompatibilityPreview(_BackendConsentFacts):
     allowed: bool
     digest: str
     fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+class WatchRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+    id: uuid.UUID
+    tenant_id: uuid.UUID
+    owner_account_id: uuid.UUID
+    owner_external_id: str
+    platform: str
+    parent_channel_id: str
+    thread_id: str
+    agent_id: str
+    agent_name: str
+    session_id: str
+    instructions: str
+    producer: str
+    page_id: uuid.UUID
+    revision: int
+    source: str
+    status: str
+    expires_at: datetime
+    max_turns_per_day: int
+    max_fires: int | None
+    fire_count: int
+    baseline: dict[str, object]
+    rule: dict[str, object]
+    source_state: dict[str, object]
+    lease_owner: str | None
+    lease_expires_at: datetime | None
+    next_check_at: datetime | None
+    backoff_until: datetime | None
+    consecutive_errors: int
+
+
+class WatchEvidenceRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+    id: uuid.UUID
+    watch_id: uuid.UUID
+    producer: str
+    event_id: str
+    payload: str
+    wake_key: uuid.UUID
+    accepted_at: datetime
+
+
+class WatchFiringRow(BaseModel):
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+    wake_key: uuid.UUID
+    watch_id: uuid.UUID
+    revision: int
+    generation: int
+    events: list[dict[str, str]]
+    omitted: int
+    created_at: datetime

@@ -7,7 +7,10 @@ third-party MCP tool on one agent with `daimon agents tool-rules` or the
 `set_agent_tool_rule` MCP tool. An agent-wide
 rule applies where the agent runs; a channel rule applies in its parent
 channel and threads under it. When both match, `deny` wins over `ask`, which
-wins over `allow`. The key is exactly `server/tool`. A rule is
+wins over `allow`. The key is exactly `server/tool`, and a server name
+never contains `/`: attaching one is refused, and a call on a server
+attached with one before that asks in chat and is refused unattended,
+whatever its keys or rules say. A rule is
 bound to the agent's stable id and the server URL attached under that name;
 changing either makes the rule stop matching. `chat` is the default scope.
 An `allow` rule reaches unattended routines only with `chat_and_routines`.
@@ -156,6 +159,10 @@ the turn, before anything is sent or changed, when the session:
   a capability: the session and its resources (files, repositories, memory
   stores), the agent, its model, skills and MCP servers, each tool, a
   toolset's default and per-tool settings, and their permission policies.
+  The session's telemetry (timing, token usage and its cache creation,
+  outcome evaluations) is held to a reviewed schema the same way.
+  A private attribute on any part of the session is refused too; only the
+  request ID the SDK records on the response it returns is allowed.
   An unknown field is refused even when it is empty, and so is one a newer
   SDK has started to parse. A known field must also hold its reviewed shape:
   a setting that should be a word, number or true/false is refused when it
@@ -163,6 +170,8 @@ the turn, before anything is sent or changed, when the session:
   type, resource type or permission policy type it does not know is refused
   the same way.
 - carries skills on an entry point that does not allow them.
+- has an MCP server whose name contains `/`. Tool keys join a server and a
+  tool with `/`, so such a name could stand for a tool on another server.
 - runs on a Managed Agents runtime that cannot read the live session, so the
   checks above cannot be made. Nothing is sent, not even the first message.
 
@@ -504,27 +513,13 @@ deleting or transferring the bound agent to another tenant, or an unreadable
 private access policy, suppresses replies without choosing a different tenant.
 Billing and operational notices remain separate from these silent access denials.
 
-DM routines are scheduled owner messages through normal live-DM admission,
-binding and execution, using the owner's ordinary credentials and memory policy
-in a fresh private scope. Each run rechecks current membership, H1 role policy,
-the H1b admin bypass switch, tenant DM controls, recipient policy, agent access
-and creation provenance. Execution is unattended (`attended=False`), Managed
-Agents only, with actual-session S1 gating before every send batch. Rules and
-trusted annotations follow the actual agent and endpoints, including replacement;
-the saved budget channel grants no channel tool allowance. Protected actions
-requiring a card are refused. Nobody watches intermediate actions; permitted
-tools retain the ordinary DM side-effect risk. Crash and stop behaviour matches
-live DMs. A busy owner's scheduled slot is skipped. Private results and diagnostics
-are fenced by producer, destination and revision; agent/destination edits erase
-old content and invalidate deliveries. A source
-thread and its parent are captured at creation and never changed by an edit;
-Daimon checks both at save, fire and before each delivery chunk. Operator source
-IDs must resolve to supported channels or threads in the selected tenant's guild,
-including during dry-run. Private-conversation origins inherit their verified
-saved source. Legacy routines with unknown creation-time provenance retain
-ordinary channel/thread edits, clearing and normal firing on every platform,
-but must be recreated from their source to get DM delivery. No edit promotes
-unknown provenance to known.
+DM routines are scheduled owner messages that run through normal live-DM
+admission, binding and execution, unattended and on Managed Agents only. Each
+run rechecks current membership, the invoker role policy and its admin bypass
+switch, tenant DM controls, recipient policy, agent access and creation
+provenance. Protected actions requiring a card are refused, and nobody watches
+intermediate actions. [Routines](routines.md) has the full
+rules, including source provenance and what an edit erases.
 
 
 The platform-neutral `invoker_admin_bypass` defaults to true, including for old
@@ -533,3 +528,43 @@ and Teams to match the same invoker lists as other members; restore the pass
 with `--invoker-admin-bypass`. Both empty lists still mean open. This does not
 change writer rules or agent pin/isolation admin exemptions. Text and JSON
 `access-policy get` output include the switch.
+
+## Lead intake
+
+[Lead intake](lead-intake.md) requires live tenant membership, the configured
+agent and ordinary invoker admission on every call, plus current native sales
+channel access and destination/category/agent policy before effects. The sales
+channel must restrict the default guild role. Manual sources require the
+requester's own explicit registration; isolated source data cannot be exported.
+Only configured user mentions are enabled, with no role or everyone pings.
+
+Resolution requires a configured sales resolver or current core-role membership,
+with immutable completed identities and an encrypted evidence audit. Server
+admin status alone is insufficient. `invoker_admin_bypass` governs ordinary
+admission; disabling it gives admins no exception to the core-role/user gate.
+Agent keys and operator tokens cannot impersonate an interactive resolver.
+Routine calls require the exact configured routine, tenant, executing agent,
+creator and a still-live server-issued execution grant. Routines never resolve.
+
+Lead resolution also requires a live interactive session that held the exact
+resolver tool for the requester's approval. Tenant opt-in adds that native
+approval gate even with third-party tool safety off; a role grant or a routine
+allowlist alone cannot approve selections.
+
+Lead intake rechecks the actual dossier thread, its parent and category before
+recovery and each write. Thread creation requires the caller’s native create
+and thread-send permissions.
+
+Reading a lead follows its destination's history. A record keeps the sales
+channel it was captured for; every reader (MCP tools, `/leads`, an approval
+card's Details) needs native view and history on that channel and on its
+dossier thread, private-thread membership where it applies, and the channel
+rules for both, judged with the executing agent and its origin, so an agent
+kept to its own channel reads no lead elsewhere. Reconfiguring intake never
+widens who reads past records. Unclassified discoveries hold no message content
+and are read under the channel configured now. List results omit inaccessible
+records. Read-only tools do not require send permission.
+
+Lead tools use only the origin bound to the caller’s signed session grant and
+require attended provenance for human actions. Concurrent conversations of the
+same user and agent cannot lend their channel read or approval authority.

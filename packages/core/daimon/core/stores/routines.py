@@ -278,15 +278,7 @@ async def update_routine(
     if clear_destination:
         if destination_kind is not None or destination_id is not None:
             raise StoreError("clear_destination cannot be combined with a new destination")
-        if current.destination_kind == "dm":
-            values.update(last_result_tail=None, last_error=None)
-        values.update(
-            destination_kind=None,
-            destination_id=None,
-            delivery_status=None,
-            delivery_payload=None,
-            delivery_note=None,
-        )
+        values.update(destination_kind=None, destination_id=None)
     elif destination_kind is not None or destination_id is not None:
         destination_id = await _resolve_destination(
             session, tenant_id, destination_kind, destination_id, current.created_by_user_id
@@ -304,20 +296,6 @@ async def update_routine(
             destination_id=destination_id,
             channel_id=current.channel_id if destination_kind == "dm" else channel_id,
         )
-        if current.destination_kind == "dm" and destination_kind != "dm":
-            # A private preview must not survive a move to a shared destination.
-            values.update(last_result_tail=None, last_error=None, delivery_payload=None)
-        if current.delivery_status in ("pending", "claimed") and (
-            current.destination_kind,
-            current.destination_id,
-        ) != (destination_kind, destination_id):
-            # A result queued for the old destination is not posted to the
-            # new one.
-            values.update(
-                delivery_status="skipped",
-                delivery_note="destination_changed",
-                delivery_payload=None,
-            )
     # Metadata-only edits must also respect a seal added after conversion.
     if current.destination_kind == "dm" and not clear_destination and destination_kind is None:
         await validate_dm_source(

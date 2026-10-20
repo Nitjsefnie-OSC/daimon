@@ -78,6 +78,32 @@ async def get_active_origin(
     return TurnOriginRow.model_validate(origin) if origin is not None else None
 
 
+async def get_session_origin(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    account_id: uuid.UUID,
+    platform: str,
+    chat_session_id: str,
+    now: datetime,
+) -> TurnOriginRow | None:
+    """Resolve exactly one live origin bound to the signed execution grant."""
+    rows = list(
+        await session.scalars(
+            select(TurnOrigin)
+            .where(
+                TurnOrigin.tenant_id == tenant_id,
+                TurnOrigin.account_id == account_id,
+                TurnOrigin.platform == platform,
+                TurnOrigin.chat_session_id == chat_session_id,
+                TurnOrigin.expires_at > now,
+            )
+            .limit(2)
+        )
+    )
+    return TurnOriginRow.model_validate(rows[0]) if len(rows) == 1 else None
+
+
 async def list_active_origins(
     session: AsyncSession,
     *,

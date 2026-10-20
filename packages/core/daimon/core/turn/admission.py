@@ -1260,6 +1260,41 @@ async def restrict_inherited_memory(
     return admission if own else replace(admission, memory_read_only=True)
 
 
+async def require_current_spend(
+    deps: TurnDeps,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    external_user_id: str,
+    budget_channel_id: str,
+    now: datetime,
+) -> None:
+    """Fresh balance, member cap and channel budget for a watch send or report."""
+    async with deps.sessionmaker() as session:
+        if await is_over_balance(
+            sessionmaker=deps.sessionmaker, tenant_id=tenant_id, session=session
+        ):
+            raise AdmissionDenied(reason="balance_depleted")
+        if await is_over_cap(
+            billing_config=deps.billing_config,
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            user_id=external_user_id,
+            now=now,
+            session=session,
+        ):
+            raise AdmissionDenied(reason="cap_exceeded")
+        if await is_over_channel_budget(
+            sessionmaker=deps.sessionmaker,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=budget_channel_id,
+            now=now,
+            session=session,
+        ):
+            raise AdmissionDenied(reason="channel_budget_exceeded")
+
+
 def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awaitable[None]]:
     """A last decision to run right before a message is sent into a session.
 

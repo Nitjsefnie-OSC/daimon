@@ -20,10 +20,11 @@ from daimon.core.turn import unattended_capabilities as caps
 from daimon.core.turn.approvals import chat_tool_confirmation
 from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.errors import AdmissionDenied
-from daimon.core.turn.posture import BillingExempt, PolicyApproval
+from daimon.core.turn.posture import BillingExempt, PolicyApproval, ToolConfirmationResult
 from daimon.core.turn.unattended import gate_session_snapshot, session_gate, unattended_posture
 from daimon.core.turn.unattended_capabilities import (
     ENTRY_POINT_POLICY,
+    ServerTool,
     UnattendedEntryPoint,
     capability_posture,
     constrain_capabilities,
@@ -598,7 +599,7 @@ async def test_allowlist_keeps_only_named_tools_and_asks() -> None:
         public_url=None,
         session_factory=None,
         tenant_id=None,
-        tool_allowlist=frozenset({"linear/get_issue"}),
+        tool_allowlist=frozenset({ServerTool("linear", "get_issue")}),
     )
     tools = constrained.send.tools
     assert [t["type"] for t in tools] == ["agent_toolset_20260401", "mcp_toolset"]
@@ -612,7 +613,8 @@ async def test_allowlist_keeps_only_named_tools_and_asks() -> None:
     assert constrained.original.tools == [t.model_dump(mode="json") for t in session.agent.tools]
 
     posture = capability_posture(
-        PolicyApproval(decide=AsyncMock()), tool_allowlist=frozenset({"linear/get_issue"})
+        PolicyApproval(decide=AsyncMock()),
+        tool_allowlist=frozenset({ServerTool("linear", "get_issue")}),
     )
     refused = await posture.decide(
         ToolCall(tool_use_id="x", server_name="linear", tool_name="create_issue")
@@ -657,10 +659,118 @@ async def test_allowlist_drops_management_endpoint_aliases(query: str) -> None:
         public_url="https://daimon.invalid/mcp",
         session_factory=None,
         tenant_id=None,
-        tool_allowlist=frozenset({"renamed/get_agent", "daimon-mcp/get_agent"}),
+        tool_allowlist=frozenset(
+            {ServerTool("renamed", "get_agent"), ServerTool("daimon-mcp", "get_agent")}
+        ),
     )
     assert constrained.send.tools == []
     assert constrained.send.mcp_servers == []
+
+
+def _bridged_session() -> BetaManagedAgentsSession:
+    """Ported from the watches review: `linear/bridge` beside `linear`, both with get_issue.
+
+    `linear` lists get_issue disabled; the second server enables it. Split at
+    the first `/`, the allowlist key `linear/bridge/get_issue` enabled an
+    absent `bridge/get_issue` config on `linear`.
+    """
+    off = {"enabled": False, "permission_policy": {"type": "always_ask"}}
+    return _mutated(
+        lambda s: s["agent"].update(
+            tools=[
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "linear",
+                    "default_config": _ASKING,
+                    "configs": [{"name": "get_issue", **off}],
+                },
+                {
+                    "type": "mcp_toolset",
+                    "mcp_server_name": "linear/bridge",
+                    "default_config": _ASKING,
+                    "configs": [{"name": "get_issue", **_ASKING}],
+                },
+            ],
+            mcp_servers=[
+                *deepcopy(SERVERS),
+                {"name": "linear/bridge", "type": "url", "url": "https://bridge.invalid/mcp"},
+            ],
+        )
+    )
+
+
+@pytest.mark.parametrize(
+    "allowlist",
+    [
+        None,
+        frozenset({ServerTool("linear/bridge", "get_issue")}),
+        frozenset({ServerTool("linear", "bridge/get_issue")}),
+    ],
+    ids=["no_allowlist", "bridge_pair", "split_pair"],
+)
+async def test_a_server_name_with_a_slash_is_refused_before_mutation(
+    allowlist: frozenset[ServerTool] | None, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    update = AsyncMock()
+    monkeypatch.setattr(caps, "update_session_record", update)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await constrain_capabilities(
+            _bridged_session(),
+            ToolSafetyPolicy(),
+            public_url=None,
+            session_factory=None,
+            tenant_id=None,
+            tool_allowlist=allowlist,
+        )
+    update.assert_not_awaited()
+
+
+@pytest.mark.parametrize("where", ["server", "toolset"])
+def test_a_slash_in_either_server_name_is_refused(where: str) -> None:
+    session = _mutated(
+        lambda s: (
+            s["agent"]["mcp_servers"][0] if where == "server" else s["agent"]["tools"][1]
+        ).update(**{"name" if where == "server" else "mcp_server_name": "linear/bridge"})
+    )
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(session)
+
+
+async def test_an_allowlist_pair_never_reaches_another_server() -> None:
+    """A tool name may hold `/`; it stays that tool on that server."""
+    session = _root_session()
+    constrained = await constrain_capabilities(
+        session,
+        ToolSafetyPolicy(),
+        public_url=None,
+        session_factory=None,
+        tenant_id=None,
+        tool_allowlist=frozenset({ServerTool("linear", "bridge/get_issue")}),
+    )
+    [linear] = [t for t in constrained.send.tools if t["type"] == "mcp_toolset"]
+    assert linear["mcp_server_name"] == "linear"
+    assert [c["name"] for c in linear["configs"]] == ["bridge/get_issue"]
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        await constrain_capabilities(
+            session,
+            ToolSafetyPolicy(),
+            public_url=None,
+            session_factory=None,
+            tenant_id=None,
+            tool_allowlist=frozenset({ServerTool("linear/bridge", "get_issue")}),
+        )
+    posture = capability_posture(
+        PolicyApproval(decide=AsyncMock(return_value=ToolConfirmationResult(allow=True))),
+        tool_allowlist=frozenset({ServerTool("linear", "bridge/get_issue")}),
+    )
+    aliased = await posture.decide(
+        ToolCall(tool_use_id="a", server_name="linear/bridge", tool_name="get_issue")
+    )
+    listed = await posture.decide(
+        ToolCall(tool_use_id="l", server_name="linear", tool_name="bridge/get_issue")
+    )
+    assert not aliased.allow
+    assert listed.allow
 
 
 async def test_apply_invalidates_cached_tools_before_mutating(
@@ -709,6 +819,71 @@ async def test_apply_invalidates_cached_tools_before_mutating(
         MagicMock(), session, constrained, scope=_scope(), session_factory=factory
     )
     assert order == [f"invalidate:{session.id}", "commit", "update"]
+
+
+async def test_a_restore_registered_between_invalidation_and_send_survives_a_failed_send(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """The watches flow: invalidate, register the restore, then send."""
+    order: list[str] = []
+
+    async def invalidate(_db: Any, *, ma_session_id: str) -> None:
+        order.append("invalidate")
+
+    class _Begin:
+        async def __aenter__(self) -> object:
+            return object()
+
+        async def __aexit__(self, *_exc: object) -> None:
+            order.append("commit")
+
+    async def update(*_args: Any, **kwargs: Any) -> None:
+        if kwargs["agent"]["tools"] == original.tools:
+            order.append("restore")
+            return
+        order.append("send")
+        raise RuntimeError("provider down")
+
+    factory = MagicMock()
+    factory.begin = _Begin
+    monkeypatch.setattr(caps, "invalidate_session_tools", invalidate)
+    monkeypatch.setattr(caps, "update_session_record", update)
+    session = _root_session()
+    original = caps.SessionToolConfig.of(session)
+    constrained = await constrain_capabilities(
+        session,
+        ToolSafetyPolicy(enabled=True),
+        public_url=None,
+        session_factory=None,
+        tenant_id=None,
+    )
+    await caps.invalidate_cached_tools(session, constrained, session_factory=factory)
+    order.append("register_restore")
+    try:
+        with pytest.raises(RuntimeError, match="provider down"):
+            await caps.send_capabilities(MagicMock(), session, constrained, scope=_scope())
+    finally:
+        await restore_capabilities(MagicMock(), session, constrained.original, scope=_scope())
+    assert order == ["invalidate", "commit", "register_restore", "send", "restore"]
+
+
+async def test_split_apply_does_nothing_when_nothing_changes(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    invalidate = AsyncMock()
+    update = AsyncMock()
+    monkeypatch.setattr(caps, "invalidate_session_tools", invalidate)
+    monkeypatch.setattr(caps, "update_session_record", update)
+    session = _root_session()
+    unchanged = caps.ConstrainedSession(
+        send=caps.SessionToolConfig.of(session),
+        original=caps.SessionToolConfig.of(session),
+        changed=False,
+    )
+    await caps.invalidate_cached_tools(session, unchanged, session_factory=MagicMock())
+    await caps.send_capabilities(MagicMock(), session, unchanged, scope=_scope())
+    invalidate.assert_not_awaited()
+    update.assert_not_awaited()
 
 
 async def test_restore_finishes_through_repeated_cancellation(
@@ -876,3 +1051,109 @@ def test_a_hidden_field_in_a_session_needing_no_update_is_still_refused(
     require_allowed_capabilities(clean)
     with pytest.raises(AdmissionDenied):
         require_allowed_capabilities(_mutated(_HIDDEN_SHAPES["no_change_enabled_object"]))
+
+
+_OUTCOME: dict[str, Any] = {
+    "type": "outcome_evaluation",
+    "outcome_id": "outc_1",
+    "description": "d",
+    "result": "satisfied",
+    "iteration": 1,
+    "explanation": None,
+    "completed_at": "2026-10-01T00:00:00Z",
+}
+
+
+def _with_telemetry(session: dict[str, Any]) -> None:
+    session["stats"] = {"active_seconds": 1.5, "duration_seconds": 3}
+    session["usage"] = {
+        "cache_creation": {"ephemeral_1h_input_tokens": 1, "ephemeral_5m_input_tokens": 2},
+        "cache_read_input_tokens": 3,
+        "input_tokens": 4,
+        "output_tokens": 5,
+    }
+    session["outcome_evaluations"] = [dict(_OUTCOME)]
+
+
+def test_reviewed_telemetry_passes() -> None:
+    require_allowed_capabilities(_mutated(_with_telemetry))
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        ("stats.future_execution_capability", False),
+        ("usage.future_execution_capability", False),
+        ("usage.cache_creation.future_execution_capability", False),
+        ("outcome_evaluations.0.future_execution_capability", False),
+        ("stats.active_seconds", _HIDDEN),
+        ("usage.input_tokens", [_HIDDEN]),
+        ("usage.cache_creation", [_HIDDEN]),
+        ("usage.cache_creation.ephemeral_1h_input_tokens", _HIDDEN),
+        ("outcome_evaluations.0.iteration", _HIDDEN),
+        ("outcome_evaluations.0", [_HIDDEN]),
+    ],
+)
+def test_telemetry_is_frozen_like_every_other_node(path: str, value: object) -> None:
+    """Ported from the watches review: telemetry no longer passes opaquely."""
+    change = _set(path, value)
+    session = _mutated(lambda s: (_with_telemetry(s), change(s)))
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(session)
+
+
+def _private_targets(session: BetaManagedAgentsSession) -> dict[str, object]:
+    toolset = session.agent.tools[1]
+    assert toolset.type == "mcp_toolset"
+    return {
+        "session": session,
+        "agent": session.agent,
+        "model": session.agent.model,
+        "skill": session.agent.skills[0],
+        "server": session.agent.mcp_servers[0],
+        "tool": toolset,
+        "default_config": toolset.default_config,
+        "config": toolset.configs[0],
+        "policy": toolset.configs[0].permission_policy,
+        "resource": session.resources[0],
+        "stats": session.stats,
+        "usage": session.usage,
+        "cache_creation": session.usage.cache_creation,
+        "outcome": session.outcome_evaluations[0],
+    }
+
+
+def _private_session() -> BetaManagedAgentsSession:
+    return _mutated(
+        lambda s: (
+            _with_telemetry(s),
+            s["agent"]["skills"].append({"type": "custom", "skill_id": "skill_1", "version": "1"}),
+            s["resources"].append(dict(_FILE)),
+        )
+    )
+
+
+@pytest.mark.parametrize("name", ["_future_execution_capability", "__future", "_request_ids"])
+@pytest.mark.parametrize("level", list(_private_targets(_private_session())))
+def test_private_instance_attributes_are_refused_at_every_level(level: str, name: str) -> None:
+    """Ported from the watches review: only the SDK's own `_request_id` is allowed."""
+    session = _private_session()
+    require_allowed_capabilities(session, allow_skills=True)
+    object.__setattr__(_private_targets(session)[level], name, False)
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(session, allow_skills=True)
+
+
+def test_the_sdk_request_id_is_the_one_private_attribute_allowed() -> None:
+    from anthropic._models import add_request_id  # pyright: ignore[reportPrivateImportUsage]
+
+    session = _private_session()
+    add_request_id(session, "req_1")
+    require_allowed_capabilities(session, allow_skills=True)
+    object.__setattr__(session, "_request_id", {"tools": True})
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(session, allow_skills=True)
+    pydantic_private = _private_session()
+    object.__setattr__(pydantic_private.agent, "__pydantic_private__", {"_tools": True})
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(pydantic_private, allow_skills=True)

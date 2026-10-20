@@ -974,3 +974,47 @@ async def test_overlapping_turns_in_one_thread_each_attribute_their_own_files() 
     assert alice_notice.startswith("For <@U_ALICE>: `alice_dump.csv`"), (
         "a sweep whose first post is the notice names the person there"
     )
+
+
+@pytest.mark.parametrize("revoke_at", ["before_upload", "before_complete"])
+async def test_watch_attachments_recheck_before_slack_upload_and_publication(
+    fake_slack_web_client, revoke_at
+):
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.output import OutputAuthorization, output_authorization
+
+    allowed = revoke_at != "before_upload"
+
+    async def authorize():
+        if not allowed:
+            raise AdmissionDenied(reason="invoker_not_allowed")
+
+    guard = OutputAuthorization(authorize)
+    mock = fake_slack_web_client.mock
+    mock.post(
+        _GET_URL,
+        payload={
+            "ok": True,
+            "file_id": "F1",
+            "upload_url": "https://files.slack.com/upload/v1/watch",
+        },
+    )
+
+    def uploaded(url, **kwargs):
+        nonlocal allowed
+        allowed = False
+        return CallbackResult(status=200, body="OK", content_type="text/plain")
+
+    mock.post(_UPLOAD, callback=uploaded)
+    mock.post(_COMPLETE, payload={"ok": True, "files": [{"id": "F1"}]})
+    with output_authorization(guard), pytest.raises(AdmissionDenied):
+        await deliver_provider_output(
+            DeliverableFile("watch-file", "private", "text/plain", 7, b"private"),
+            fake_slack_web_client.client,
+            channel_id="C1",
+            thread_ts="1.2",
+        )
+    assert guard.failed
+    assert not any("completeUploadExternal" in str(url) for (_, url) in mock.requests)
+    if revoke_at == "before_upload":
+        assert not mock.requests

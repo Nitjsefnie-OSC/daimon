@@ -46,38 +46,51 @@ def _runtime() -> McpRuntime:
 
 
 @pytest.fixture(autouse=True)
-def _patch(monkeypatch: pytest.MonkeyPatch) -> None:
+def patch_session_gate_collaborators(monkeypatch: pytest.MonkeyPatch) -> None:
     monkeypatch.setattr(_session_gate, "retrieve_agent", AsyncMock(return_value=AGENT))
     monkeypatch.setattr(
-        _session_gate, "resolve_hidden_mcp_server_names", AsyncMock(return_value=frozenset())
+        _session_gate, "resolve_hidden_mcp_server_names", AsyncMock(return_value=frozenset[str]())
     )
-    monkeypatch.setattr(_session_gate, "backend_selection_enabled", lambda _turn: False)
+
+    def backend_off(_turn: object) -> bool:
+        return False
+
+    monkeypatch.setattr(_session_gate, "backend_selection_enabled", backend_off)
+    monkeypatch.setattr(
+        _session_gate, "confirmation_tools", AsyncMock(return_value=frozenset[str]())
+    )
 
 
-def _recorded_sha(rule_tools: frozenset[str]) -> str:
+def _recorded_sha(rule_tools: frozenset[str], confirmed: frozenset[str] = frozenset[str]()) -> str:
     return hash_tools(
         session_tools(
             AGENT,
-            frozenset(),
+            frozenset[str](),
             tool_safety=POLICY,
             public_url="https://mcp.example/mcp",
             asks_before_publishing=True,
             daimon_rule_tools=rule_tools,
+            confirmed_tools=confirmed,
         )
     )
 
 
 async def _gated(
-    monkeypatch: pytest.MonkeyPatch, *, recorded: frozenset[str], now: frozenset[str]
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    recorded: frozenset[str],
+    now: frozenset[str],
+    confirmed: frozenset[str] = frozenset[str](),
+    tool_name: str = "publish_report",
 ) -> bool:
     monkeypatch.setattr(_session_gate, "daimon_rule_tools_for", AsyncMock(return_value=now))
     live = cast(Any, SimpleNamespace())
-    live.effective_config = SimpleNamespace(tools_sha256=_recorded_sha(recorded))
+    live.effective_config = SimpleNamespace(tools_sha256=_recorded_sha(recorded, confirmed))
     return await _session_gate._recorded_as_gated(  # pyright: ignore[reportPrivateUsage]
         _runtime(),
         AUTH,
         live,
-        tool_name="publish_report",
+        tool_name=tool_name,
         ma_agent_id="agent",
         reported_tools_sha256=hash_tools(AGENT.tools),
     )
@@ -86,9 +99,9 @@ async def _gated(
 @pytest.mark.parametrize(
     ("recorded", "now"),
     [
-        (frozenset(), frozenset()),
+        (frozenset[str](), frozenset[str]()),
         (frozenset({"hubspot_update_objects"}), frozenset({"hubspot_update_objects"})),
-        (frozenset(), frozenset({"hubspot_update_objects"})),
+        (frozenset[str](), frozenset({"hubspot_update_objects"})),
     ],
 )
 async def test_the_recorded_hash_proves_the_card_with_or_without_daimon_rules(
@@ -112,5 +125,29 @@ async def test_a_rule_cleared_since_the_bind_reads_as_not_gated_until_the_next_b
 ) -> None:
     """The refusal direction: the recorded hash cannot be matched, so no card is assumed."""
     assert not await _gated(
-        monkeypatch, recorded=frozenset({"hubspot_update_objects"}), now=frozenset()
+        monkeypatch, recorded=frozenset({"hubspot_update_objects"}), now=frozenset[str]()
+    )
+
+
+@pytest.mark.parametrize(
+    "recorded,current,expected", [(True, True, True), (False, True, False), (True, False, False)]
+)
+async def test_lead_resolution_requires_recorded_and_current_confirmation_gate(
+    monkeypatch: pytest.MonkeyPatch, recorded: bool, current: bool, expected: bool
+) -> None:
+    tools = frozenset({"lead_intake_resolve"})
+    monkeypatch.setattr(
+        _session_gate,
+        "confirmation_tools",
+        AsyncMock(return_value=tools if current else frozenset[str]()),
+    )
+    assert (
+        await _gated(
+            monkeypatch,
+            recorded=frozenset[str](),
+            now=frozenset[str](),
+            confirmed=tools if recorded else frozenset[str](),
+            tool_name="lead_intake_resolve",
+        )
+        is expected
     )

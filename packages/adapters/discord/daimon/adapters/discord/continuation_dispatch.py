@@ -80,7 +80,7 @@ async def dispatch_pending_continuations(
         # A timer is never superseded by newer messages, so it needs no history.
         latest = (
             None
-            if row.reason == "timer"
+            if row.reason in ("timer", "watch_fired")
             else await _latest_human_message_at(thread, after=row.created_at)
         )
         async with sessionmaker() as session:

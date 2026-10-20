@@ -11,12 +11,12 @@ from typing import Protocol
 import structlog
 from daimon.core.ids import generate_request_id
 from daimon.core.observability import capture_exception_with_scope
-from daimon.core.routine_delivery import record_failure
+from daimon.core.routine_delivery import record_routine_failure
 from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.lead_intake import configured_routines, routine_execution
 from daimon.core.stores.routines import (
     advance_stale,
     claim_due_fireable,
-    record_result,
     skip_slots_during_fire,
 )
 from daimon.core.turn.outcomes import TurnObservation
@@ -92,33 +92,16 @@ class RoutineDispatcher:
 
 async def _record_fire_error(
     sm: async_sessionmaker[AsyncSession],
-    routine_id: uuid.UUID,
+    row: RoutineRow,
     msg: str,
     reason: TerminationReason | None,
-    *,
-    private: bool = False,
-    expected_destination: tuple[str | None, str | None],
-    expected_private: RoutineRow | None = None,
-    expected_row: RoutineRow | None = None,
 ) -> None:
     """Record a failure on a FRESH session (never reuse fire's session)."""
     try:
         async with asyncio.timeout(1), sm() as s, s.begin():
-            if private:
-                await record_result(
-                    s,
-                    routine_id,
-                    tail=None,
-                    error=msg,
-                    expected_private=expected_private,
-                    expected_destination=expected_destination,
-                )
-            else:
-                await record_failure(
-                    s, routine_id, error=msg, reason=reason, expected_row=expected_row
-                )
+            await record_routine_failure(s, row, error=msg, reason=reason)
     except Exception:
-        log.exception("record_result(error) failed", routine_id=str(routine_id))
+        log.exception("record_result(error) failed", routine_id=str(row.id))
 
 
 async def run_one_tick(
@@ -167,6 +150,9 @@ async def run_one_tick(
             log.exception("claim_due_fireable failed")
             return dispatcher
 
+    async with sm() as intake_session:
+        intake_bindings = await configured_routines(intake_session, {row.tenant_id for row in rows})
+
     # Sequential cap check (cheaper
     # than checking inside the semaphore boundary; keeps the existing cap path).
     fireable: list[RoutineRow] = []
@@ -186,14 +172,7 @@ async def run_one_tick(
                 sm, row.tenant_id, "scheduler", origin="routine", agent_id=row.agent_id
             ).finish(reason=TerminationReason.ADMISSION_CAP_EXCEEDED)
             await _record_fire_error(
-                sm,
-                row.id,
-                "cap_exceeded",
-                TerminationReason.ADMISSION_CAP_EXCEEDED,
-                private=row.destination_kind == "dm",
-                expected_destination=(row.destination_kind, row.destination_id),
-                expected_private=row if row.destination_kind == "dm" else None,
-                expected_row=row,
+                sm, row, "cap_exceeded", TerminationReason.ADMISSION_CAP_EXCEEDED
             )
             continue
         fireable.append(row)
@@ -216,52 +195,36 @@ async def run_one_tick(
             async with sem:
                 try:
                     with observation.activate():
-                        await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
+                        async with routine_execution(
+                            sm,
+                            row.tenant_id,
+                            row.id,
+                            register=(row.tenant_id, row.id) in intake_bindings,
+                        ):
+                            await asyncio.wait_for(fire(row), timeout=dispatch_timeout_s)
                 except TimeoutError as err:
                     observation.finish(error=err, reason=TerminationReason.CEILING)
                     # Capture to Sentry, then keep the existing swallow —
                     # sibling tasks continue and record_result still runs.
                     capture_exception_with_scope(err)
                     timeout = f"timeout: exceeded {dispatch_timeout_s}s"
-                    await _record_fire_error(
-                        sm,
-                        row.id,
-                        timeout,
-                        TerminationReason.CEILING,
-                        private=row.destination_kind == "dm",
-                        expected_destination=(row.destination_kind, row.destination_id),
-                        expected_private=row if row.destination_kind == "dm" else None,
-                        expected_row=row,
-                    )
+                    await _record_fire_error(sm, row, timeout, TerminationReason.CEILING)
                 except Exception as err:
                     reason = termination_reason(err)
                     observation.finish(error=err, reason=reason)
                     capture_exception_with_scope(err)
                     await _record_fire_error(
                         sm,
-                        row.id,
+                        row,
                         "execution_failed"
                         if row.destination_kind == "dm"
                         else f"{type(err).__name__}: {err}"[:500],
                         reason,
-                        private=row.destination_kind == "dm",
-                        expected_destination=(row.destination_kind, row.destination_id),
-                        expected_private=row if row.destination_kind == "dm" else None,
-                        expected_row=row,
                     )
         except asyncio.CancelledError as err:
             observation.finish(error=err)
             # Includes cancellation while waiting for a dispatch slot.
-            await _record_fire_error(
-                sm,
-                row.id,
-                "scheduler_shutdown",
-                None,
-                private=row.destination_kind == "dm",
-                expected_destination=(row.destination_kind, row.destination_id),
-                expected_private=row if row.destination_kind == "dm" else None,
-                expected_row=row,
-            )
+            await _record_fire_error(sm, row, "scheduler_shutdown", None)
             raise
         finally:
             observation.finish(reason=TerminationReason.UNKNOWN)
