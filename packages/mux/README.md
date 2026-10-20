@@ -1120,13 +1120,39 @@ requests. `RetainedSkillDeployments` implements the existing publisher contract
 for independently provisioned immutable GCS directories, verifying the complete
 scope, version and every retained file digest without making storage writes.
 
-The `selfhosted.loop` profile reserves the `selfhosted` provider for the
-`daimon-harness/0` HTTP protocol. It is non-core, uses per-caller threads and
-selects `gpt-5` by default; an environment may use another deployment name.
-The driver namespace is a scaffold. Runtime capabilities remain unknown and
-admission refuses turns until usage observations have driver evidence. Steer,
-multiagent, vaults, memory stores, workspace export/import and native skill
-versions are explicitly unsupported.
+The opt-in `selfhosted.loop` profile uses per-caller threads and selects
+`gpt-5` by default; an environment may use another deployment name. It is
+non-core. Steer, multiagent, vaults, memory stores, workspace export/import and
+native skill versions are explicitly unsupported.
+
+The self-hosted driver's `SelfHostedDriver` takes injected `Agents` and
+`Environments` ports, an authorization callback and an optional durable binding
+lookup. `DirectTransport` calls the harness `/v0` endpoints;
+`FoundryInvocationsTransport` wraps those same calls in `/invocations` and sends
+one deterministic sandbox id on every call. Both submit turns with JSON
+acknowledgements and poll the durable event log. `open_stream` opens the first
+HTTP replay request before returning its iterator. With no cursor it starts at
+the active turn or resumes after the last event delivered by this driver instance. A turn
+that finished before the reader opened is still delivered. Explicit cursors
+control historical replay and recovery after driver recreation. Idle readers
+may wait for the next turn; individual HTTP requests remain bounded. A lost reader can reconnect
+at a sequence cursor without running the turn again.
+
+Usage identities include the session, turn and model request, so replay preserves
+one observation per request. Missing measurements are unknown observations when
+the harness explicitly reports `usage_unavailable`/`usage_missing`; a terminal
+turn with no measured, unavailable or started request is retained as unresolved (errored unless interrupted)
+for operator reconciliation without blocking later turns. Unmatched
+request starts remain unknown observations; measured revision 2 supersedes an
+unknown revision 1 under the same observation id. Tokens are never
+inferred as zero. Agent/environment revision changes require a new binding.
+Artifacts, session listing/deletion and native skill administration refuse
+explicitly. Built-in `auto`/`ask` and multiple pending approvals are supported.
+Narrowed built-in sets deny omitted tools. MCP permissions use `server/tool`
+and `server/*` keys; `allowed_tools` denies unlisted tools. Credentialed MCP
+servers require an injected tools resolver that enforces tenant/origin bindings.
+Pending approval retries submit the same recorded decision; the harness
+deduplicates identical actions.
 
 `mux.drivers.selfhosted.wire` defines the `daimon-harness/0` HTTP boundary:
 turn requests, approval decisions, durable event replay and typed event data.
@@ -1162,3 +1188,33 @@ MCP server/tool components use letters, digits, underscores, hyphens and dots.
 An exact key overrides `<server>/*`, which overrides the default `auto`.
 For example, `{"sample/*": "deny", "sample/search": "ask"}` exposes only
 `sample/search` from that server and requires approval before it runs.
+The driver uses the agent deployment unless `model` is explicitly overridden.
+The host supplies `deployment` for its selected environment; a mismatching
+request refuses before submission. Transport token providers are awaited on
+every HTTP call (use an expiry-aware Entra credential provider). Pass
+`mcp_authorization` per `driver.events.send`, never at transport construction.
+Foundry calls include configurable `api_version` (default `v1`). Authenticated
+HTTP endpoints require HTTPS except on loopback. Replay uses `after_seq` with
+jittered exponential polling and retries 429/502/503/504 with `Retry-After`.
+
+The real harness/driver interop suite must cover:
+
+1. Cancel before the first model request, then a second turn on that session.
+2. MCP or skill setup failure before model I/O.
+3. Harness restart mid-turn and reconcile of unmatched request usage.
+4. Dropped stream reopened at the last sequence across the terminal event, without gaps or duplicates.
+5. Idempotent resend from a fresh driver, one execution, and changed-payload conflict.
+6. Approval that executes a write, denial, and host result substitution.
+7. Per-turn MCP headers absent from journals/logs, with a different token on the second turn.
+8. Foundry invocation envelope with string `query.after_seq`.
+9. Concurrent second send receiving 409.
+10. Two sequential turns on one session.
+
+Session creation uses tenant/account/principal plus the caller's idempotency key,
+independently of renewable authorization grants. The binding retains a separate
+specification digest; a changed specification under that key conflicts, including
+on reconstruction. Durable agent/environment pins retain both local and native
+revisions. Creation replay reuses those pins instead of current resource versions.
+Approval retries reconcile a known call's tool result; an uncertain HTTP reply
+cannot cause another tool execution. Retry-After is capped at 30 seconds and the
+poll deadline; network polling and cancellation observation use bounded backoff.
