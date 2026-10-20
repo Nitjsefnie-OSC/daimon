@@ -6377,17 +6377,18 @@
         Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
         <blank line>
-        They are off for every unattended run by default. The supported path is the
-        operator's ``daimon routines sandbox-tools``. This tool accepts only a current Discord
-        server admin, re-checked against the server on each call; owning the routine is not
-        enough, and agent keys, agents in a conversation, operator tokens, legacy tokens and
-        other platforms are refused. DM routines cannot be opted in. An opt-in covers exactly
-        the routine's current agent version and environment: once either changes, runs go
-        without built-ins and the opt-in is cleared. Each change records who made it and when,
-        and ``get_routine``/``list_routines`` show it as ``sandbox_tools_enabled``. It takes
-        effect from the routine's next run.
-        Setting the value a routine already has changes nothing. Timers, watches, agent
-        chat, fleet workers, ``daimon run`` and checkpoints cannot be opted in.
+        They are off for every unattended run by default. The supported way today is the
+        operator's ``daimon routines sandbox-tools``. This tool accepts only a live Discord
+        server admin's own token, re-checked against the server on each call; no Daimon
+        surface issues such a token yet, and the tool is kept for a future admin surface.
+        Owning the routine is not enough, and agent keys, agents in a conversation, operator
+        tokens, legacy tokens and other platforms are refused. DM routines cannot be opted
+        in. An opt-in covers exactly the routine's current agent version and environment:
+        once either changes, runs go without built-ins and the opt-in is cleared. Each
+        change records who made it and when, and ``get_routine``/``list_routines`` show it
+        as ``sandbox_tools_enabled``. It takes effect from the routine's next run. Setting
+        the value a routine already has changes nothing. Timers, watches, agent chat, fleet
+        workers, ``daimon run`` and checkpoints cannot be opted in.
       ''',
       'parameters': dict({
         'additionalProperties': False,

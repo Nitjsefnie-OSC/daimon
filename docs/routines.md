@@ -707,7 +707,7 @@ routine and turn its sandbox tools off if the change is not wanted under bash.
 The CLI prints the agent version and environment it records for each routine,
 including on `--dry-run`.
 
-- **Operator CLI**, the supported path, for one routine or a confirmed list of
+- **Operator CLI**, the supported way today, for one routine or a confirmed list of
   them:
 
   ```bash
@@ -722,12 +722,12 @@ including on `--dry-run`.
   version and environment, is left alone, so the command can be re-run; one
   whose agent or environment changed is re-approved as it now is. `--dry-run`
   prints what would change and writes nothing.
-- **The `set_routine_sandbox_tools` MCP tool** (`routine_id`, `enabled`) is
-  refused for every caller a deployment issues today; an admin surface for it
-  is pending a decision. It would accept only a person's own token held by a
-  current Discord server admin, re-checked against the server on every call,
-  and it refuses agent keys, agents acting in a conversation, operator
-  tokens, legacy tokens without a token id, and Slack or Teams callers.
+- **The `set_routine_sandbox_tools` MCP tool** (`routine_id`, `enabled`)
+  accepts only a live Discord server admin's own token, re-checked against the
+  server on every call. No Daimon surface issues such a token yet; the tool is
+  kept for a future admin surface. It refuses agent keys, agents acting in a
+  conversation, operator tokens, legacy tokens without a token id, and Slack or
+  Teams callers.
 
 Each change sets `sandbox_tools_set_by` (the account or CLI principal) and
 `sandbox_tools_set_at` on the routine and appends a row to

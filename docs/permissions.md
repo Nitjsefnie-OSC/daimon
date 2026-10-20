@@ -202,12 +202,14 @@ agent defines it; custom tools are still removed.
 
 ### Routine sandbox opt-in
 
-The operator opts a routine in with `daimon routines sandbox-tools`, the
-supported path. The `set_routine_sandbox_tools` MCP tool is refused for every
-caller a deployment issues today (an admin surface is pending a decision): it
-refuses agent keys, agents acting in a conversation on an admin's behalf,
-operator tokens, legacy tokens without a token id, and Slack or Teams callers,
-and owning the routine is not enough. DM routines cannot be opted in.
+The operator CLI, `daimon routines sandbox-tools`, is the supported way to opt
+a routine in today. The `set_routine_sandbox_tools` MCP tool accepts only a
+live Discord server admin's own token, re-checked against the server on every
+call; no Daimon surface issues such a token yet, and the tool is kept for a
+future admin surface. It refuses agent keys, agents acting in a conversation
+on an admin's behalf, operator tokens, legacy tokens without a token id, and
+Slack or Teams callers, and owning the routine is not enough. DM routines
+cannot be opted in.
 
 An opt-in covers exactly what was approved: built-ins are enabled for a run
 only when the run's agent version and environment are exactly the ones
