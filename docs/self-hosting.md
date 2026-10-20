@@ -1373,7 +1373,8 @@ HMAC keys (32–256 bytes, at most 16 keys). Supply matching keys only to author
 OS page hosts and the sidecar, never browser HTML or model context. Registrations
 store hashes, not recoverable keys. Initial enrollment binds an existing Discord
 thread, page and key. Hosts check page ACLs and CSRF before using `sign_page_event`;
-there is no public signing route, outside sender mode or live internal migration.
+there is no public signing route or outside sender mode. Offline file imports are
+described below.
 
 POST signed UTF-8 evidence to `/callbacks/watches/{watch_id}` with `X-Page-ID`,
 `X-Watch-Key-ID`, `X-Timestamp`, `X-Event-ID` and `X-Signature`. The signature binds
@@ -1398,13 +1399,13 @@ with producers off; freshness checks prevent replay after ledger pruning.
 Stop/key rotation cancels queued wakes and fences later sends; accepted provider
 requests cannot be undone. Re-enabling requires fresh events. Turns only read and
 report under current access, spend and execution-origin checks; shell, built-ins,
-skills and management tools are unavailable. See [architecture](architecture.md#signed-page-event-watch-entry-point) for
+skills and management tools are unavailable. See
+[architecture](architecture.md#signed-page-event-watch-entry-point) for
 per-write output checks, tool restoration and cancellation behavior.
-
 
 #### Polling and owner management
 
-Migration `0118_watch_polling` adds leased scheduling and the transactional OS result
+Migration `0120_watch_polling` adds leased scheduling and the transactional OS result
 port. Sidecar gains only `claim_watch_polls()`; it still cannot enumerate tables,
 read credentials/policy, submit source results or enqueue arbitrary wakes. The OS
 MCP database login must own the migrations/result function (or receive an explicit
@@ -1425,10 +1426,6 @@ redirects and ignores proxy environment variables. `DAIMON_SIDECAR__OS_EXECUTOR_
 accepts only `http://watch-executor:8767` (Compose) or `http://127.0.0.1:8767` (local processes).
 Run the separate private listener with
 `uvicorn daimon.adapters.mcp.watch_executor:create_watch_executor_app --factory --host 127.0.0.1 --port 8767 --no-access-log`.
-The public MCP app has no poll route. Set a random 32–256 byte
-`DAIMON_WATCHES__EXECUTOR_SECRET` on that service and the same value as
-`DAIMON_SIDECAR__EXECUTOR_SECRET` on sidecar. Missing secrets disable transport.
-Service authentication and exact lease lookup precede shared rate accounting.
 `DAIMON_SIDECAR__POLL_INTERVAL_S` controls the 1–60 second tick interval. Both producer
 gates must be on before any poll runs. Source errors back off exponentially from
 the registered interval to a maximum of one day. Revoked owner/source/destination
