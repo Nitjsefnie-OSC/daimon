@@ -78,15 +78,18 @@ __all__ = [
     "DeliveryTarget",
     "RoutinePoster",
     "agent_posted_to",
+    "claim_still_current",
     "destination_shape_error",
     "failure_notice_text",
     "record_failure",
+    "record_routine_failure",
     "render_fallback_dm",
     "DirectPost",
     "clear_creator",
     "discord_creator_may_post",
     "slack_creator_may_post",
     "teams_thread_id",
+    "tenant_dm_still_open",
     "creator_refusal_for",
     "placement_unknown_is_unsafe",
     "delivery_refusal",
@@ -364,6 +367,32 @@ async def record_failure(
         ):
             log.info("routine.failure_notice_queued", routine_id=str(routine_id))
     await record_result(session, routine_id, tail=None, error=error, expected_row=expected_row)
+
+
+async def record_routine_failure(
+    session: AsyncSession,
+    row: RoutineRow,
+    *,
+    error: str,
+    reason: TerminationReason | None,
+) -> None:
+    """Record a fire that failed or was refused, fenced on the row it was claimed as.
+
+    An owner-DM routine records only the error, and only while its private
+    revision and destination are unchanged; any other routine goes through
+    `record_failure`.
+    """
+    if row.destination_kind == "dm":
+        await record_result(
+            session,
+            row.id,
+            tail=None,
+            error=error,
+            expected_destination=(row.destination_kind, row.destination_id),
+            expected_private=row,
+        )
+    else:
+        await record_failure(session, row.id, error=error, reason=reason, expected_row=row)
 
 
 def render_fallback_post(row: RoutineRow, *, as_agent: bool = False) -> str:
@@ -666,6 +695,34 @@ def placement_unknown_is_unsafe(
     return any_writers_none(policy, categories_only=True)
 
 
+def claim_still_current(current: RoutineRow, row: RoutineRow, now: datetime) -> bool:
+    """Whether the delivery lease `row` was claimed with is still held and unexpired.
+
+    `current` is the routine as read now. A row that was not claimed has no
+    lease to lose.
+    """
+    return row.delivery_status != "claimed" or (
+        current.delivery_status == "claimed"
+        and current.delivery_lease_owner == row.delivery_lease_owner
+        and current.delivery_lease_expires_at is not None
+        and current.delivery_lease_expires_at > now
+    )
+
+
+async def tenant_dm_still_open(
+    sessionmaker: async_sessionmaker[AsyncSession], row: RoutineRow, external_id: str
+) -> bool:
+    """Whether `row`'s tenant is still the live workspace `external_id` with routine DMs on."""
+    async with sessionmaker() as session:
+        tenant = await get_tenant(session, row.tenant_id)
+        return (
+            tenant is not None
+            and tenant.archived_at is None
+            and tenant.external_id == external_id
+            and await dm_enabled(session, tenant_id=row.tenant_id)
+        )
+
+
 @dataclass(frozen=True)
 class DeliveryOutcome:
     status: Literal["delivered", "skipped"]
@@ -696,9 +753,8 @@ async def poll_deliveries_once(
             session, platform=platform, owner=lease_owner, now=now, lease=DELIVERY_LEASE
         )
     for row in claimed:
-        if not (
-            decode_payload(payload_for(row)).text.strip() or decode_payload(payload_for(row)).files
-        ):
+        payload = decode_payload(payload_for(row))
+        if not (payload.text.strip() or payload.files):
             outcome = DeliveryOutcome(status="skipped", note="no_result")
         else:
             try:
@@ -714,7 +770,7 @@ async def poll_deliveries_once(
                     status="skipped",
                     note=(
                         "File delivery failed or was interrupted; it will not be retried."
-                        if decode_payload(payload_for(row)).files
+                        if payload.files
                         else "post_failed"
                     ),
                 )

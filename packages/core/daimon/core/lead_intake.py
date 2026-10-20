@@ -3,11 +3,11 @@
 from __future__ import annotations
 
 import re
-from datetime import datetime, timedelta
+from datetime import datetime
 from email.utils import getaddresses
 from enum import StrEnum
 from typing import Annotated
-from uuid import NAMESPACE_URL, UUID, uuid5
+from uuid import UUID
 
 from daimon.core.access_policy import TenantAccessPolicy, is_invoker_allowed
 from daimon.core.membership import Membership
@@ -27,14 +27,6 @@ class LeadClassification(StrEnum):
     OTHER = "other"
 
 
-class LeadIntakeStatus(StrEnum):
-    ACCEPTED = "accepted"
-    PENDING = "pending"
-    REVIEW = "review"
-    COMPLETED = "completed"
-    REJECTED = "rejected"
-
-
 class LeadStep(StrEnum):
     COMPANY = "company"
     CONTACT = "contact"
@@ -44,14 +36,6 @@ class LeadStep(StrEnum):
     DISCORD_THREAD = "discord_thread"
     DISCORD_DOSSIER = "discord_dossier"
     ARCHIVE = "archive"
-
-
-class LeadDisposition(StrEnum):
-    DISCOVERED = "discovered"
-    REJECTED = "rejected"
-    ACCEPTED = "accepted"
-    PENDING = "pending"
-    COMPLETED = "completed"
 
 
 class LeadSource(BaseModel):
@@ -128,52 +112,6 @@ class LeadProgress(BaseModel):
     resolution_evidence: str | None = None
 
 
-class LeadIntake(BaseModel):
-    id: UUID
-    submission: LeadSubmission
-    status: LeadIntakeStatus
-    progress: LeadProgress
-    attempts: int
-    last_error: str | None
-    routine_id: UUID | None
-    execution_id: UUID | None
-    created_at: datetime
-    updated_at: datetime
-
-
-class LeadOpportunity(BaseModel):
-    id: UUID
-    company_key: str
-    description: str
-    company_id: str | None = None
-    deal_id: str | None = None
-    created_at: datetime
-
-
-class LeadMailboxScan(BaseModel):
-    id: UUID
-    mailbox: str
-    window_start: datetime
-    window_end: datetime
-    query: str
-    routine_id: UUID | None
-    execution_id: UUID | None
-    discovered_count: int
-    started_at: datetime
-    completed_at: datetime | None = None
-    last_error: str | None = None
-
-
-class LeadMailboxMessage(BaseModel):
-    mailbox: str
-    message_id: str
-    disposition: LeadDisposition
-    intake_id: UUID | None
-    reason: str | None
-    discovered_at: datetime
-    updated_at: datetime
-
-
 # A consumer address is not evidence of a distinct organization to create.
 _PERSONAL_DOMAINS = frozenset(
     {
@@ -238,30 +176,6 @@ def verify_lead_evidence(evidence: LeadEvidence) -> LeadEvidence:
     )
 
 
-def get_company_key(evidence: LeadEvidence) -> str:
-    """Canonical key shared by company creation claims and identity lookup."""
-    if not evidence.identity_verified or not evidence.company_domain:
-        raise ValueError("Company processing requires verified identity")
-    return evidence.company_domain.strip().lower().rstrip(".")
-
-
-DEAL_SOURCE_CHANNEL = "Cold in-mail"
-DEAL_TYPE_NEW_BUSINESS = "newbusiness"
-
-
-def get_discord_message_url(guild_id: str, channel_id: str, message_id: str) -> str:
-    """Permalink to the Discord post that carries the lead's intake thread."""
-    if not (guild_id and channel_id and message_id):
-        raise ValueError("Discord lead thread link requires guild, channel and message")
-    return f"https://discord.com/channels/{guild_id}/{channel_id}/{message_id}"
-
-
-def get_intake_disposition(status: LeadIntakeStatus) -> LeadDisposition:
-    if status == LeadIntakeStatus.REVIEW:
-        return LeadDisposition.PENDING
-    return LeadDisposition(status.value)
-
-
 class LeadDealCandidate(BaseModel):
     id: NonEmptyStr
     name: str
@@ -277,7 +191,7 @@ class LeadOpportunityMatch(BaseModel):
     reason: str | None = None
 
 
-def _normalize_project(value: str) -> str:
+def normalize_project(value: str) -> str:
     return " ".join(re.findall(r"[\w]+", value.casefold()))
 
 
@@ -292,15 +206,15 @@ def get_relevant_deals(
 ) -> list[LeadDealCandidate]:
     """Include associated open deals and plausible missing-association records."""
     relevant: list[LeadDealCandidate] = []
-    company = _normalize_project(company_name)
+    company = normalize_project(company_name)
     domain = company_domain.casefold().strip()
-    description = _normalize_project(opportunity_description)
+    description = normalize_project(opportunity_description)
     for candidate in candidates:
         if candidate.is_closed:
             continue
         associated = company_id in candidate.company_ids or contact_id in candidate.contact_ids
         text = f"{candidate.name} {candidate.description}"
-        normalized = _normalize_project(text)
+        normalized = normalize_project(text)
         plausible_orphan = not candidate.company_ids and (
             (bool(company) and f" {company} " in f" {normalized} ")
             or (bool(domain) and domain in text.casefold())
@@ -328,15 +242,15 @@ def select_matching_opportunity(
         return LeadOpportunityMatch()
     if not candidates:
         return LeadOpportunityMatch()
-    description = _normalize_project(opportunity_description)
+    description = normalize_project(opportunity_description)
     exact = [
         candidate
         for candidate in candidates
         if description
         and description
         in {
-            _normalize_project(candidate.description),
-            _normalize_project(candidate.name),
+            normalize_project(candidate.description),
+            normalize_project(candidate.name),
         }
     ]
     if len(candidates) == 1 and len(exact) == 1:
@@ -344,28 +258,6 @@ def select_matching_opportunity(
     return LeadOpportunityMatch(
         requires_review=True,
         reason="Existing opportunities require selection or confirmation of a separate project",
-    )
-
-
-class LeadIntakeHealth(BaseModel):
-    status_counts: dict[LeadIntakeStatus, int]
-    oldest_pending_at: datetime | None
-    failure_count: int
-    unclassified_count: int
-    last_successful_scan_at: datetime | None
-
-
-def get_opportunity_identity(
-    company_key: str, description: str, intake_id: UUID, progress: LeadProgress
-) -> UUID:
-    """Stable remote identity even if a worker survives losing its DB claim."""
-    if progress.selected_deal_id:
-        return uuid5(NAMESPACE_URL, f"daimon:hubspot:deal:{progress.selected_deal_id}")
-    if progress.separate_opportunity_confirmed:
-        return intake_id
-    return uuid5(
-        NAMESPACE_URL,
-        f"daimon:hubspot:opportunity:{company_key}:{_normalize_project(description)}",
     )
 
 
@@ -454,6 +346,14 @@ class IntakeRecord(BaseModel):
     raw_expires_at: datetime
 
 
+def captured_here(record: IntakeRecord, config: IntakeConfig) -> bool:
+    """Effects land only where the record's readers were fixed at capture."""
+    return record.destination is not None and (
+        record.destination.guild_id,
+        record.destination.channel_id,
+    ) == (config.guild_id, config.channel_id)
+
+
 class IntakeResolution(BaseModel):
     model_config = ConfigDict(extra="forbid")
     company_id: str | None = Field(default=None, pattern=r"^\d+$", max_length=20)
@@ -524,24 +424,10 @@ def authorize_intake_actor(
 
 
 DISCORD_MESSAGE_LIMIT = 2000
-_DISCORD_EPOCH_MS = 1420070400000
-# Recovery starts before durable acceptance to absorb clock skew with Discord.
-_RECOVERY_LEAD = timedelta(seconds=60)
 _FENCE = "```"
 # Room for a reopened fence line before a chunk and a closing fence after it.
 _MAX_REOPENED_FENCE = 40
 _FENCE_RESERVE = 2 * _MAX_REOPENED_FENCE + len("\n") + len("\n" + _FENCE)
-
-
-def get_recovery_cursor(accepted_at: datetime) -> str:
-    """Snowflake just before acceptance: every post for the intake comes after it."""
-    milliseconds = int((accepted_at - _RECOVERY_LEAD).timestamp() * 1000)
-    return str(max(0, (milliseconds - _DISCORD_EPOCH_MS) << 22))
-
-
-def get_starter_content(thread_title: str) -> str:
-    """The whole visible channel post; Discord trims surrounding whitespace itself."""
-    return thread_title.strip()
 
 
 def split_dossier(content: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]:
@@ -588,16 +474,6 @@ def split_dossier(content: str, limit: int = DISCORD_MESSAGE_LIMIT) -> list[str]
             chunks.append(chunk)
         start = end
     return chunks
-
-
-def count_posted_dossier_chunks(posted: list[str], chunks: list[str]) -> int:
-    """Length of the dossier prefix already visible, in order, among posted messages."""
-    count = 0
-    for message, chunk in zip(posted, chunks, strict=False):
-        if message != chunk:
-            break
-        count += 1
-    return count
 
 
 def _split_long_line(line: str, width: int) -> list[str]:

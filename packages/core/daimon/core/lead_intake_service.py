@@ -19,10 +19,16 @@ from daimon.core.lead_intake import (
     LeadSource,
     LeadSourceKind,
     LeadSubmission,
+    captured_here,
     split_dossier,
     verify_lead_evidence,
 )
-from daimon.core.lead_intake_access import LeadReadTarget, discovery_target, read_target
+from daimon.core.lead_intake_access import (
+    LeadReadTarget,
+    actual_thread_id,
+    discovery_target,
+    read_target,
+)
 from daimon.core.stores.lead_intake import IntakeStore
 from pydantic import BaseModel
 
@@ -167,20 +173,20 @@ class IntakeService:
         payload: dict[str, str],
         identity: str | None = None,
     ) -> str:
-        await self.reauthorize(
-            IntakeAccess(
-                source=record.submission.source if record.submission else None,
-                thread_id=payload.get("thread") or record.progress.discord_thread_id,
-                create_thread=step == "thread",
-            )
+        # Checked again immediately before the write.
+        access = IntakeAccess(
+            source=record.submission.source if record.submission else None,
+            thread_id=payload.get("thread") or record.progress.discord_thread_id,
+            create_thread=step == "thread",
         )
+        await self.reauthorize(access)
         live_record = await self.store.get(record.id)
         if live_record.submission is None or record.expires_at <= datetime.now(UTC):
             raise ValueError("intake_erased_or_expired")
         current, _ = await self.store.configuration()
         if current != config:
             raise ValueError("configuration_changed")
-        if not _same_destination(record, config):
+        if not captured_here(record, config):
             raise ValueError("destination_changed")
         key = hashlib.sha256(
             (
@@ -218,26 +224,17 @@ class IntakeService:
             # Empty history is not proof a non-idempotent POST did not happen.
             raise ReviewRequired("uncertain_write")
         await self.store.intent(record.id, step, key)
-        await self.reauthorize(
-            IntakeAccess(
-                source=record.submission.source if record.submission else None,
-                thread_id=payload.get("thread") or record.progress.discord_thread_id,
-                create_thread=step == "thread",
-            )
-        )
+        await self.reauthorize(access)
         remote_id = await self.ports.write(config, request)
         await self.store.finish(record.id, step, remote_id)
         return remote_id
 
     async def _authorize_effects(self, record: IntakeRecord) -> None:
         """Write authority over the record's actual destination and dossier thread."""
-        thread_id = record.progress.discord_thread_id or next(
-            (e.remote_id for e in record.effects if e.step == "thread" and e.remote_id), None
-        )
         await self.reauthorize(
             IntakeAccess(
                 source=record.submission.source if record.submission else None,
-                thread_id=thread_id,
+                thread_id=actual_thread_id(record),
             )
         )
 
@@ -266,7 +263,7 @@ class IntakeService:
             config, _ = await self.store.configuration()
             if record.status in {"completed", "rejected", "expired"} or config.mode == "capture":
                 return record
-            if record.config_revision != config.revision or not _same_destination(record, config):
+            if record.config_revision != config.revision or not captured_here(record, config):
                 # Target/connection changes cannot silently redirect accepted evidence.
                 record.error_code = "config_revision_review"
                 await self.store.save(record)
@@ -410,7 +407,7 @@ class IntakeService:
             if record.status not in {"pending", "review"}:
                 raise ValueError("intake_not_resolvable")
             current_config, _ = await self.store.configuration()
-            if record.config_revision != current_config.revision or not _same_destination(
+            if record.config_revision != current_config.revision or not captured_here(
                 record, current_config
             ):
                 raise ValueError("config_revision_review")
@@ -515,11 +512,3 @@ class IntakeService:
                 caught_up=state.error_code is None and end == now,
                 error_code=state.error_code,
             )
-
-
-def _same_destination(record: IntakeRecord, config: IntakeConfig) -> bool:
-    """Effects land only where the record's readers were fixed at capture."""
-    return record.destination is not None and (
-        record.destination.guild_id,
-        record.destination.channel_id,
-    ) == (config.guild_id, config.channel_id)
