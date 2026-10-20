@@ -1326,7 +1326,7 @@ a restart invalidates them and the person must send a new message.
 
 ### Rolling out routine DM destinations
 
-Migration `0111_routine_dm_destination` expands the routine destination enum
+Migration `0112_routine_dm_destination` expands the routine destination enum
 and constrains DM recipients to the non-null owner. Deploy compatible readers,
 scheduler and Discord posters before creating any `dm` rows; stop older
 writers and posters during a mixed-version rollout. Apply the migration before
