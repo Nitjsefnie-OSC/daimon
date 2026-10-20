@@ -43,8 +43,9 @@ argument names another member. See
 ### Session output files
 
 Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack
-thread after an interactive turn completes (a routine sends its files with
-its result instead; see [routines](routines.md#generated-files)). Delivery runs in the background after the reply is posted — the
+thread after an interactive turn completes (a routine with a destination
+sends its files with its result instead; see
+[routines](routines.md#generated-files)). Delivery runs in the background after the reply is posted — the
 adapter waits for Managed Agents to index newly written files, so files may
 arrive a few seconds after the reply. Every delivery is labelled with the
 person whose turn made the files, in every thread, whether one person uses
