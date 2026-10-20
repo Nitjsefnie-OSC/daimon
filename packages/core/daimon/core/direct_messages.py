@@ -763,12 +763,7 @@ async def reply_to_dm_result(
                 )
             return DirectMessageReply(text=answer, conversation=conversation, grant=grant)
         except (BoundAgentUnavailable, AccessPolicyUnreadable, MAResolverMissError) as error:
-            reason = (
-                "policy_unreadable"
-                if isinstance(error, AccessPolicyUnreadable)
-                else "agent_unavailable"
-            )
-            raise DirectMessageAccessRevoked(reason, message=str(error)) from error
+            raise _revoked(error) from error
         except asyncio.CancelledError:
             if bound and deps.running_turns.is_drain_cancel():
                 await _settle_shutdown_cancelled_dm(deps, conversation)
