@@ -1,8 +1,4 @@
-"""Registration belongs to core; ingress can only invoke a capability function.
-
-The caller owns transactions. No store commits, so accepted evidence and its
-wake either both survive or neither survives. Sidecar has no table grants.
-"""
+"""Caller-owned transactions keep watch evidence and durable wakes atomic."""
 
 from __future__ import annotations
 
@@ -48,11 +44,7 @@ async def register_page_watch(
     max_fires: int | None = None,
     max_turns_per_day: int = 24,
 ) -> WatchRow:
-    """Register an already authorized, exact live binding; never called by ingress.
-
-    Enrollment surfaces must run core admission as the human before calling.
-    Callback watches initially resume existing conversations only.
-    """
+    """Register a human-admitted owner's exact live binding; never called by ingress."""
     if binding.platform != "discord":
         raise ValueError("Page-event enrollment currently requires a Discord thread")
     if not 0 < len(instructions) <= 2000 or not now < expires_at <= now + timedelta(days=30):
@@ -165,11 +157,7 @@ async def rotate_signing_key(
     expires_at: datetime,
     now: datetime | None = None,
 ) -> None:
-    """Bind an OS-host key, retaining only a hash; old queued work is cancelled.
-
-    Key material is generated and stored by the OS host's secret manager. It is
-    supplied only by trusted enrollment code, never a page request or the model.
-    """
+    """Hash an OS-host secret from trusted enrollment and cancel old queued work."""
     from daimon.core.continuity.page_events import KEY_ID
 
     now = now or datetime.now(UTC)
@@ -244,11 +232,7 @@ async def stop_watch(session: AsyncSession, watch_id: uuid.UUID, *, now: datetim
 
 
 async def set_watch_control(session: AsyncSession, *, scope: str, enabled: bool) -> None:
-    """Operator stop port, available even while producers are disabled.
-
-    Scope is global, tenant:<UUID>, or owner:<UUID>. Re-enabling does not replay
-    old cancelled wakes. Sidecar has no grant for this operation.
-    """
+    """Set a global, tenant:<UUID> or owner:<UUID> gate; disabling cancels queued work."""
     from sqlalchemy.dialects.postgresql import insert
 
     await session.execute(text("SELECT pg_advisory_xact_lock(813749201)"))
@@ -427,11 +411,7 @@ async def watch_seed(
 
 
 async def audit_sidecar_identity(session: AsyncSession) -> None:
-    """Refuse unsafe effective privileges, including inherited/PUBLIC rights.
-
-    Checks the actual login, not just the clean group created by migrations.
-    Catalog access reveals privileges, never credential values or policy rows.
-    """
+    """Audit the actual login's effective privileges, including inherited/PUBLIC rights."""
     unsafe = await session.scalar(
         text("""
       WITH RECURSIVE roles AS (

@@ -1,9 +1,4 @@
-"""OS page hosts sign server-authorized events; browsers never receive this key.
-
-Sign the raw UTF-8 bytes, exact page/watch/key identity, source timestamp and
-server-minted event UUID. Receivers reject duplicate signed headers. Recoverable
-keys live only in the OS host/sidecar secret environment, never in watch rows.
-"""
+"""OS hosts sign page events after ACL/CSRF checks; signing keys never reach browsers."""
 
 from __future__ import annotations
 
@@ -75,11 +70,7 @@ def sign_page_event(
     now: datetime,
     event_id: uuid.UUID | None = None,
 ) -> SignedPageEvent:
-    """For authorized server-side page events, after the page host's ACL/CSRF check.
-
-    Registration and key selection belong to the OS host; request bodies never
-    supply routing. No browser route or outside sender enrollment is provided.
-    """
+    """Sign an authorized server-side event using the host's registered binding."""
     if not 0 < len(body) <= MAX_EVENT_BYTES:
         raise ValueError("Page event exceeds evidence bounds")
     stamp, event = int(now.timestamp()), event_id or uuid.uuid4()

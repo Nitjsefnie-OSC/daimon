@@ -29,8 +29,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
 def read_report_policy(policy: ToolSafetyPolicy) -> ToolSafetyPolicy:
-    # Retain denials/write pins, never let agent or deployment write grants
-    # widen a page-event turn. Read classification is conservative by name.
+    # Keep denials and write pins; discard grants that widen watch authority.
     return ToolSafetyPolicy(
         enabled=True,
         agent_rules=policy.agent_rules,
@@ -117,8 +116,7 @@ async def require_watch_send(
 
 
 def _telemetry_fields(value: object, names: str) -> None:
-    # The shared validator deliberately treats telemetry as opaque. Watches
-    # retain their frozen field allowlists there until that check moves upstream.
+    # Shared validation leaves telemetry opaque; watches freeze its fields.
     if not isinstance(value, BaseModel):
         raise AdmissionDenied(reason="backend_unsupported")
     present = set(type(value).model_fields) | set(value.model_extra or {}) | set(vars(value))
@@ -127,8 +125,7 @@ def _telemetry_fields(value: object, names: str) -> None:
 
 
 def _instance_fields(value: object) -> None:
-    # Shared validation ignores private instance attributes. Preserve the watch
-    # rule that only the SDK's explicitly reviewed request ID may bypass fields.
+    # Shared validation ignores private attributes; only the request ID is reviewed.
     if isinstance(value, BaseModel):
         known = set(type(value).model_fields) | set(value.model_extra or {}) | {"_request_id"}
         if set(vars(value)) - known:
@@ -173,12 +170,7 @@ async def watch_capabilities(
     sessions: async_sessionmaker[AsyncSession] | None,
     tenant_id: uuid.UUID,
 ) -> capabilities.ConstrainedSession:
-    """Prepare through the shared watch policy, using only enabled named reads.
-
-    Pure with respect to provider/cache mutation. The shared helper owns schema
-    validation, management-alias exclusion and disabled/default asking policies.
-    Watches supply the read allowlist and omit even disabled native toolsets.
-    """
+    """Prepare enabled named reads through the shared policy, before mutation."""
     validate_watch_snapshot(snapshot)
     strict = read_report_policy(policy)
     servers = {server.name for server in snapshot.agent.mcp_servers}
