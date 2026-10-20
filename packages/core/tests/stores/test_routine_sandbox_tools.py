@@ -13,6 +13,7 @@ from daimon.core.stores.routines import (
     create_routine,
     get_routine,
     pause_routine,
+    record_result,
     sandbox_tools_history,
     set_sandbox_tools,
     update_routine,
@@ -266,3 +267,37 @@ async def test_converting_to_dm_clears_the_opt_in(
     assert dm.sandbox_tools_enabled is False
     history = await sandbox_tools_history(db_session, row.id, tenant_id=tenant_id)
     assert history[-1].via == "edit" and history[-1].after_enabled is False
+
+
+@pytest.mark.parametrize("enabled", [True, False], ids=["turned_on", "turned_off"])
+async def test_a_flip_takes_effect_from_the_next_run_and_drops_the_in_flight_result(
+    db_session: AsyncSession, tenant_id: uuid.UUID, enabled: bool
+) -> None:
+    """A run fires with the flag on its claimed row and keeps it to the end.
+
+    Flipping the flag meanwhile bumps the routine's revision, so the run's
+    fenced result write (`expected_row`) matches nothing: neither the result
+    nor a delivery from the run that started under the old setting is kept.
+    """
+    claimed = await _routine(db_session, tenant_id)
+    if not enabled:
+        claimed = await _opted_in(db_session, tenant_id)
+
+    await set_sandbox_tools(
+        db_session,
+        claimed.id,
+        tenant_id=tenant_id,
+        enabled=enabled,
+        set_by="a",
+        actor=ADMIN,
+        via="cli",
+    )
+    await record_result(
+        db_session, claimed.id, tail="ran under the old setting", error=None, expected_row=claimed
+    )
+
+    after = await get_routine(db_session, claimed.id, tenant_id=tenant_id)
+    assert after is not None
+    assert after.sandbox_tools_enabled is enabled
+    assert after.last_result_tail is None
+    assert after.delivery_payload is None

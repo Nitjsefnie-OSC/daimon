@@ -716,6 +716,10 @@ Discord `/routines` panel shows "Sandbox tools: on (admin opt-in)",
 "Sandbox tools: off", or for a DM routine "off (DM routines can't use sandbox
 tools)".
 
+A change takes effect from the routine's next run. A run already in progress
+keeps the setting it started with, and because the change moves the routine
+to a new revision, that run's result is then neither recorded nor delivered.
+
 The opt-in reaches only the routine entry point. Watches, timers and
 worker-finished wakes, agent chat, fleet workers, `daimon run` and workspace
 checkpoints keep built-ins off with no opt-in.
