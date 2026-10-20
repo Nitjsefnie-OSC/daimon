@@ -72,6 +72,10 @@ async def test_dry_run_reports_and_writes_nothing(db_session_factory) -> None:
     )
 
     assert f"{rows[0].id}: turn on" in output.getvalue()
+    assert (
+        "(agent ag version 3, environment env_1 as of 2026-10-01T00:00:00+00:00)"
+        in output.getvalue()
+    )
     assert "Dry run: 1 routine(s) would change" in output.getvalue()
     assert await _enabled(db_session_factory, tenant_id, rows) == [False, False]
 

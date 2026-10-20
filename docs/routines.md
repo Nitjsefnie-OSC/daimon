@@ -698,6 +698,15 @@ goes ahead without built-ins, the mismatch is logged, and the opt-in is
 cleared with an `edit` history row by `agent_changed`. The operator then
 re-approves the routine as it now is by running the command again.
 
+The record covers only what Managed Agents versions: the agent and its
+environment. It does not cover what Daimon attaches to a run, such as the
+agent's `.env` credentials, its repository binding, vault credentials or the
+channel's skills, so changing one of those does not turn the opt-in off. After
+changing any of them for an opted-in routine's agent or channel, re-review the
+routine and turn its sandbox tools off if the change is not wanted under bash.
+The CLI prints the agent version and environment it records for each routine,
+including on `--dry-run`.
+
 - **Operator CLI**, the supported path, for one routine or a confirmed list of
   them:
 

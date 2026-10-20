@@ -217,6 +217,10 @@ turns the opt-in off at the next run, as does an edit to the routine's agent,
 trigger message, destination or budget channel. Every change is recorded with
 who made it, when, the routine id and the agent version and environment it
 covers (`routine_sandbox_history`). Routine status shows the current setting.
+The record covers the Managed Agents agent version and environment only, not
+Daimon-side attachments (the agent's `.env`, repository binding, vault
+credentials or channel skills); an admin should re-review an opted-in routine
+after changing those.
 The opt-in applies to that routine's own scheduled runs only. See
 [routines.md](routines.md#sandbox-tools).
 

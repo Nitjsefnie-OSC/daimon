@@ -366,6 +366,12 @@ async def run_sandbox_tools(
                 if enabled and row is not None and row.sandbox_tools_enabled
                 else "turn " + state
             )
+            pinned = pins.get(rid)
+            if pinned is not None:
+                label += (
+                    f" (agent {pinned.agent_id} version {pinned.agent_version}, environment "
+                    f"{pinned.environment_id} as of {pinned.environment_updated_at.isoformat()})"
+                )
             console.print(f"{rid}: {label}")
         if dry_run:
             console.print(f"Dry run: {len(pending)} routine(s) would change; nothing written.")
