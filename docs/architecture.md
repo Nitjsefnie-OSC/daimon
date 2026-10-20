@@ -2433,7 +2433,7 @@ start no detached output-file sweeps after their grant ends.
 Revoking a key, stopping a watch or disabling an owner/tenant/global gate cancels
 queued wakes. Re-enabling does not revive them. Evidence expires after seven days;
 independent byte, row and rate quotas prevent a pending batch growing without bound.
-Migration `0117_watch_polling` follows `0116_watches`. Sidecar claims at most four
+Migration `0118_watch_polling` follows `0117_watches`. Sidecar claims at most four
 poll leases through `claim_watch_polls()`, then submits only a watch UUID and opaque
 60-second lease to the separate private `watch-executor:8767` service's
 `/internal/watches/{watch_id}/poll` endpoint. The public MCP app has no poll route.

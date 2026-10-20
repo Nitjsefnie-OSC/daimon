@@ -6,8 +6,8 @@ downgrade: unsupported
 import sqlalchemy as sa
 from alembic import op
 
-revision = "0117_watch_polling"
-down_revision = "0116_watches"
+revision = "0118_watch_polling"
+down_revision = "0117_watches"
 branch_labels = None
 depends_on = None
 

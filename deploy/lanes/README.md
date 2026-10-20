@@ -167,7 +167,7 @@ the compatible-reader rollback floor. Do not enable request/header/body logs.
 
 #### Polling and owner management
 
-Migration `0117_watch_polling` adds leased scheduling and the transactional OS result
+Migration `0118_watch_polling` adds leased scheduling and the transactional OS result
 port. Sidecar gains only `claim_watch_polls()`; it still cannot enumerate tables,
 read credentials/policy, submit source results or enqueue arbitrary wakes. The OS
 MCP database login must own the migrations/result function (or receive an explicit
