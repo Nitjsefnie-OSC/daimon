@@ -19,8 +19,6 @@ from sqlalchemy import text
 from sqlalchemy.exc import DBAPIError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker, create_async_engine
 
-MAX_PAYLOAD = MAX_EVENT_BYTES
-
 
 def create_app(
     sessions: async_sessionmaker[AsyncSession],
@@ -31,7 +29,7 @@ def create_app(
     max_requests_per_minute: int = 1200,
 ) -> web.Application:
     """Only callback POST paths accept input; health is private at the proxy."""
-    app = web.Application(client_max_size=MAX_PAYLOAD)
+    app = web.Application(client_max_size=MAX_EVENT_BYTES)
     active = 0
     recent: deque[float] = deque()
 
@@ -85,7 +83,7 @@ def create_app(
                 body = bytearray()
                 async for chunk in request.content.iter_chunked(4096):
                     body.extend(chunk)
-                    if len(body) > MAX_PAYLOAD:
+                    if len(body) > MAX_EVENT_BYTES:
                         return web.Response(status=413)
                 try:
                     body.decode("utf-8")

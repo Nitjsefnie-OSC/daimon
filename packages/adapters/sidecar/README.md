@@ -1,50 +1,29 @@
 # Daimon page-event sidecar
 
-`daimon-sidecar` is a bounded HTTP event-source adapter. It depends on core and
-runs no turns, model calls, source polls or MCP management tools. Core owns the
-registration, signature/replay checks, evidence, durable wake and stop controls.
-The sidecar has no direct table grants and receives a separate environment.
+`daimon-sidecar` is a bounded callback adapter with no provider client, turn runner,
+polling or MCP management tools. Core owns registration, replay/evidence storage,
+durable wakes and stop controls. The sidecar has no direct table grants.
 
-The application producer flag and durable database gate default off. Keep them
-off until execution-bound origin grants and cleanup safety have passed review.
-See `deploy/lanes/README.md` for the optional preview profile and constrained role
-setup. No internal-watch migration or outside callback sender is included.
+Both producer gates default off pending release review. Migration `0117_watches`
+follows `0116_thread_model_settings`. Enrollment binds an existing Discord thread;
+watch turns need its current unattended execution grant, recheck live access and
+spend, and only read/report. Original tools restore before release, including
+cancellation; cache invalidation forces reconciliation after interruption.
 
-An authorized OS page host uses `daimon.core.continuity.page_events.sign_page_event`
-after its own page ACL and CSRF checks. The HMAC SHA-256 message is UTF-8, with
-newline-separated fields: `daimon-page-v1`, watch UUID, page UUID, key ID, Unix
-seconds, event UUID, and the SHA-256 hex digest of the raw body. UUIDs use Python's
-canonical lowercase spelling. Key IDs contain only ASCII letters, digits, `_`
-and `-`. Random signing keys stay in secret management; only their hashes are
-registered. A signature does not make page-authored text trusted instructions.
+Authorized OS page hosts call `daimon.core.continuity.page_events.sign_page_event`
+after ACL/CSRF checks. HMAC SHA-256 signs newline-separated UTF-8 fields:
+`daimon-page-v1`, watch UUID, page UUID, key ID, Unix seconds, event UUID and the raw
+body's SHA-256 hex digest. UUIDs use canonical lowercase spelling; key IDs use
+ASCII letters, digits, `_` and `-`. Random keys remain in secret management; only
+hashes are registered. Signed page text is still untrusted evidence.
 
-POST the body and signed headers to `/callbacks/watches/{watch_id}`. A 202 means
-durable acceptance; 409 identifies an accepted event replay. Retries use the same
-event UUID with a freshly signed timestamp. Every other path is private or absent.
-Health checks do not enqueue anything. Core's queue is the only delivery queue.
+POST the body and signed headers to `/callbacks/watches/{watch_id}`. A 202 confirms
+durable acceptance; 409 indicates replay. Retries keep the event UUID and refresh
+the signed timestamp. Other paths remain private or absent, and health checks do
+not enqueue work. Evidence expires after seven days; a fresh event after expiry
+starts a new wake rather than joining an unreadable old batch.
 
-Public v1 enrollment binds an existing Discord thread. All continuation adapters
-read the reason, and the common driver gate rechecks watch bindings before sends.
-Migration `0117_watches` follows `0116_thread_model_settings`. A send requires
-the current unattended execution origin and the exact bound session grant;
-missing, attended or mismatched grants fail closed. Both producer gates stay
-default-off until release review.
-Woken turns use a constrained read/report posture and never choose an owner,
-agent, destination or instructions from callback fields. The SDK cannot remove
-skills mid-session, so a session carrying skills is refused. Shell/native tools
-and the Daimon management server are removed before sends. A changed provider
-session requires explicit re-enrollment instead of implicit recovery.
-
-Watch sends and report writes recheck live access and all three spend gates.
-Platform sends, edits, chunks, terminal completions/errors and upload steps share
-a latched delivery check; after a refusal, cleanup cannot publish retained content.
-Detached watch output-file sweeps are disabled after the execution grant ends.
-
-Watch restrictions last only for the watch turn. The runner restores the original
-session tool arrays before releasing it, including on errors and cancellation.
-It also invalidates cached tool hashes before restriction; after a process
-interruption or failed restore, the next bind reapplies its ordinary tools before
-an attended turn, while preserving recorded workspace and credential metadata.
-
-Evidence expires after seven days. A fresh event starts a new wake when an older
-pending batch has already expired, rather than joining a batch the reader will skip.
+See [self-hosting](../../../docs/self-hosting.md#signed-page-event-watch-sidecar) for
+configuration, signing headers, limits and database roles, and the
+[lane guide](../../../deploy/lanes/README.md#signed-page-event-watch-sidecar) for the
+optional preview profile. There are no outside senders or internal-watch migration.
