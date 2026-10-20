@@ -1366,76 +1366,60 @@ routine. The same owner restriction applies to explicit DM results.
 
 ### Signed page-event watch sidecar
 
-The optional `preview-sidecar` Compose profile runs `daimon-sidecar` and a TLS
-proxy, using the lane's immutable commit image and successful migration dependency.
-Only the proxy publishes TLS; database, `/healthz` and other paths stay private.
-Set `DAIMON_SIDECAR_PUBLIC_HOST` to a separate preview hostname. The default
-`localhost` is for local use. `DAIMON_SIDECAR_TLS_PORT` optionally changes the
-published TLS port. The proxy image is pinned by digest; the application uses
-`DAIMON_LANE_IMAGE` with `DAIMON_LANE_SHA`, as for other lane services.
+The optional `preview-sidecar` Compose profile runs the commit-pinned application
+and digest-pinned TLS proxy after migrations. Set `DAIMON_SIDECAR_PUBLIC_HOST`
+(default `localhost` for local use) and optionally `DAIMON_SIDECAR_TLS_PORT`.
+Only callback paths are public; database, `/healthz` and other paths remain private.
+The application uses the lane's `DAIMON_LANE_IMAGE` and `DAIMON_LANE_SHA`.
 
-`DAIMON_WATCHES__ENABLED` defaults to false. Keep it false until the execution-bound
-origin-grant prerequisite and watch release are reviewed. Migration `0117_watches`
-follows `0116_thread_model_settings`. Every watch send requires its current
-unattended execution origin to hold the bound session grant; missing, attended or
-mismatched grants refuse dispatch. The S1 cleanup, driver gates and attendance
-changes do not automatically enable watches. A separate core-owned database
-`global` gate also defaults false. Operators must explicitly enable both after the
-release gate; the sidecar cannot edit that database control. Disabling either
-blocks new events and future sends; disabling the durable gate also cancels queued
-wakes. Stop controls stay available while producers are off.
+Migration `0117_watches` follows `0116_thread_model_settings` and has no downgrade;
+retain compatible readers for rollback. `DAIMON_WATCHES__ENABLED` and the core-owned
+database `global` gate default false. Enable both only after release review.
+Disabling either blocks new events and future sends; disabling the durable gate
+also cancels queued wakes. Stop controls remain available with producers off.
 
-The migration creates `daimon_sidecar` and `daimon_watch_ingress_owner` NOLOGIN
-roles. It refuses unsafe existing role attributes/memberships, pins privileged
-function lookup to `pg_catalog,pg_temp`, qualifies permanent objects and revokes
-PUBLIC execute/schema creation. A narrow non-login function owner has only source
-state and queue privileges. Provision a distinct lane login granted only
-`daimon_sidecar` and no ownership, schema CREATE, policy or credential-table rights.
-Set `DAIMON_SIDECAR__DATABASE_URL` to its local DSN; require TLS across hosts. The
-service checks the actual login's effective privileges at startup and refuses
-unsafe inherited/PUBLIC table or column access across all accessible application
-schemas. It resolves the installed ingress functions independently of the first
-search-path schema, validates their exact signatures, owner and security settings,
-and refuses missing, shadowed or indeterminate identities. Schema CREATE rights
-and unexpected executable privileged functions also refuse startup. Its environment
-is explicitly allowlisted.
+The migration creates NOLOGIN roles `daimon_sidecar` and
+`daimon_watch_ingress_owner`, rejects unsafe role attributes/memberships, pins
+privileged functions to `pg_catalog,pg_temp`, qualifies permanent objects and
+revokes PUBLIC execute/schema creation. Provision a distinct login granted only
+`daimon_sidecar`, without ownership, schema CREATE, policy or credential-table
+rights. Set `DAIMON_SIDECAR__DATABASE_URL`; require TLS across hosts. Startup checks
+the actual login's inherited/PUBLIC table and column access across accessible
+application schemas, resolves installed ingress functions independently of search
+path order, and validates signatures, owner and security settings. Missing/shadowed
+identities, schema CREATE and unexpected privileged executable functions refuse
+startup. The service receives an explicitly allowlisted environment.
 
-`DAIMON_SIDECAR__SIGNING_KEYS` is a secret JSON map from key IDs to random OS-host
-HMAC keys, each at least 32 bytes. Supply the same authorized key to the relevant
-OS page host through secret management, outside browser HTML/model context. Only
-hashes are stored with registrations. Raw signing keys are not persisted in the
-database and do not use the sidecar's credential stores. Initial enrollment binds an existing Discord thread,
-page and key; OS page hosts must check page ACLs and CSRF before signing. The core
-`sign_page_event` port signs watch/page/key ID, Unix timestamp, server-minted UUID
-event ID and raw UTF-8 body digest. Existing page-host enrollment and migration are
-separate work; this service provides no public signing route or external sender mode.
+`DAIMON_SIDECAR__SIGNING_KEYS` is a secret JSON map of key IDs to random OS-host
+HMAC keys (32–256 bytes, at most 16 keys). Supply matching keys only to authorized
+OS page hosts and the sidecar, never browser HTML or model context. Registrations
+store hashes, not recoverable keys. Initial enrollment binds an existing Discord
+thread, page and key. Hosts check page ACLs and CSRF before using `sign_page_event`;
+there is no public signing route, outside sender mode or live internal migration.
 
-POST signed evidence to `/callbacks/watches/{watch_id}` using `X-Page-ID`,
-`X-Watch-Key-ID`, `X-Timestamp`, `X-Event-ID` and `X-Signature`. Duplicate/missing
-signed headers, altered bytes, wrong bindings, expired/revoked keys, compressed
-bodies and timestamps outside five minutes in either direction are refused.
-A 202 means acceptance committed; a 409 means that event ID was already accepted.
-Retry transport failures with the same event UUID and a fresh signature. Payloads
-are limited to 4 KiB and cannot select instructions, owner, agent or destination.
+POST signed UTF-8 evidence to `/callbacks/watches/{watch_id}` with `X-Page-ID`,
+`X-Watch-Key-ID`, `X-Timestamp`, `X-Event-ID` and `X-Signature`. The signature binds
+watch/page/key identity, Unix timestamp, server-minted event UUID and raw body digest.
+Duplicate/missing headers, altered bytes, wrong bindings, expired/revoked keys,
+compressed bodies and timestamps outside five minutes are refused. A 202 means
+committed acceptance; 409 means replay. Retry with the same event UUID and a fresh
+signature. The 4 KiB body cannot choose instructions, owner, agent or destination.
 Access logging is disabled; do not enable proxy/body/header debug logging.
 
-The service allows eight active callback requests with a ten-second deadline;
-excess work receives 429. A per-process 1,200-request/minute limit also bounds invalid
-callbacks before body/database work. Database-enforced accepted-event limits span replicas: 60 events/watch,
-120/owner, 300/tenant and 600 globally per minute; 24 queued turns/watch and 100/owner
-per rolling day. Registrations allow 25 live watches per owner and at most thirty
-days lifetime. Pending batches retain the latest twenty events and an omitted count.
-Retained inbox payload quotas are 128 KiB/watch, 1 MiB/owner, 4 MiB/tenant and
-16 MiB globally, with 1,000 replay rows/watch and 100,000 globally. Both inbox and
-batch content expire after seven days; bounded hourly cleanup runs even with the
-producer gate off. Freshness checks prevent old signatures from replaying after
-ledger pruning. Quota/rate failures receive 429; temporary database/timeouts 503.
+Defaults allow eight active requests, a ten-second deadline and 1,200 requests per
+minute per process, including invalid callbacks. Excess work and quota failures
+receive 429; temporary database/timeouts receive 503. Database limits span replicas:
+60 accepted events/watch, 120/owner, 300/tenant and 600 globally per minute;
+24 queued turns/watch and 100/owner per rolling day. Owners may register 25 live
+watches, each lasting at most thirty days. A pending batch retains twenty latest
+events plus an omitted count. Inbox quotas are 128 KiB/watch, 1 MiB/owner, 4 MiB/tenant
+and 16 MiB globally; replay quotas are 1,000 rows/watch and 100,000 globally.
+Inbox and batch content expire after seven days. Bounded hourly cleanup runs even
+with producers off; freshness checks prevent replay after ledger pruning.
 
-Core stop/key-rotation ports cancel queued wakes and fence later sends. Active
-requests already accepted by a provider cannot be undone. Re-enabling requires new
-events; cancelled work is never silently replayed. The migration retains delivery
-history and has no downgrade. Keep the compatible-reader rollback floor installed.
-Woken turns only read and report: safety is forced on, agent/deployment write
-allowances are ignored, and shell, built-ins and management tools are unavailable. Sessions carrying skills
-are refused because the provider cannot remove skills mid-session.
-No polling, MCP watch-management tools or live internal migration is included.
+Stop/key rotation cancels queued wakes and fences later sends; accepted provider
+requests cannot be undone. Re-enabling requires fresh events. Turns only read and
+report under current access, spend and execution-origin checks; shell, built-ins,
+skills and management tools are unavailable. There are no polling or MCP management
+tools. See [architecture](architecture.md#signed-page-event-watch-entry-point) for
+per-write output checks, tool restoration and cancellation behavior.

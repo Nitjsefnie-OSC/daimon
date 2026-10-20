@@ -2440,59 +2440,39 @@ tool safety disabled.
 
 ### Signed page-event watch entry point
 
-`daimon-sidecar` accepts `POST /callbacks/watches/{watch_id}` from OS page hosts.
-Core registration binds an OS page to its tenant, human owner, concrete agent,
-exact conversation and provider session. The page host signs a versioned envelope
-covering watch/page/key identity, timestamp, event UUID and the raw body digest;
-its signing key stays server-side. Bearer callbacks and outside senders are refused.
-Both ingress and the narrow database function verify the signature and freshness.
-The replay ledger and existing `watch_fired` durable wake commit atomically.
+OS page hosts sign events after their own ACL/CSRF checks. The sidecar verifies
+HMAC, binding, freshness and replay before acknowledging a transaction that stores
+evidence and enqueues a `watch_fired` wake. It has no direct table access or turn
+runner; core's durable queue handles dispatch. Discord, Slack and Teams share
+compatible readers; CLI and scheduler do not dispatch continuations. Old readers
+ignore the new reason before batching, preserving unrelated work on rollback.
 
-The producer setting and durable global gate default off. Compatible queue readers
-are shared by Discord, Slack and Teams; CLI and scheduler do not independently
-execute continuations. Old compatible readers ignore the new reason before batching,
-so unrelated work stays readable during rollback.
+Migration `0117_watches` follows `0116_thread_model_settings`. The producer setting
+and durable global gate default off. Watch turns explicitly use `attended=False`
+and require the current origin's exact session grant. Registration, key generation,
+owner access, destination, balance, member caps and channel budget are rechecked
+before model/confirmation sends and report writes. Deleted threads have no fallback;
+unsupported backends and implicit session replacement are refused.
 
-Migration `0117_watches` follows `0116_thread_model_settings`. A watch turn explicitly
-passes `attended=False`, uses core admission and the shared unattended decider, and
-revalidates registration, stops, key generation and exact session before every
-driver send. Balance, member monthly caps and the attributed channel budget are
-read again before model and confirmation sends and before each report write.
-Its current execution origin must be unattended and hold the exact
-bound session grant; missing or mismatched grants refuse the send. The common gate covers all three chat adapters,
-including confirmation sends. Watches require a gateable Managed Agents session;
-unsupported backends and implicit session replacement are refused. Deployment and
-agent unattended-write allowances cannot widen watch authority. Watch admission
-validates an explicit snapshot-field allowlist before any provider mutation. It uses
-`core.turn.unattended_capabilities` with the `watch` policy: built-ins and skills
-are off. A thin watch wrapper also freezes telemetry fields, rejects unreviewed
-instance attributes, derives the allowlist from enabled named reads, and omits
-disabled native toolsets. The shared helper
-projects and applies the tool config and restores it through repeated cancellation.
-Cache invalidation commits before either the apply or restore can mutate a session.
-Sessions carrying skills, multiagent coordinators or unreviewed fields are refused,
-including fields recognized by a newer provider SDK. Tools are rebuilt in one
-update: only explicitly named, enabled third-party MCP read configs are retained,
-all toolset defaults are disabled, and every retained tool requires the current
-read/report approval. Default-only toolsets grant no tools; operators must enumerate
-read tool names in the agent's per-tool configs. Shell/custom tools, agent built-ins,
-management endpoints and write configs are unavailable. Mounted data and credential
-vaults stay attached, with no native execution tools or delegation to use them outside
-the named read allowlist. Writes remain refused by the live posture. Reports use only the registered destination; deleted threads never fall
-back to a parent channel. Evidence is byte-bounded and escaped as untrusted text.
-The runner restores the original tool/server arrays before leaving the turn,
-including on errors and cancellation. Cached tool hashes are invalidated first so
-after interruption the next bind reapplies its ordinary tools. Core revokes the
-origin session grant after this cleanup. Output authorization also gates each
-platform send/edit/upload, including terminal success, interrupted completion,
-errors and overflow chunks. A failed check latches delivery off for the rest of
-the turn and its late tasks, so finalization cannot publish retained content.
-Detached watch output-file sweeps do not run after the execution grant ends.
+`core.turn.unattended_capabilities` supplies the `watch` policy and shared
+validation, tool projection, apply and restore. The thin watch wrapper freezes
+telemetry and instance fields, refuses duplicate server toolsets, and retains only
+enabled, exact-name third-party read configs. Skills, multiagent coordinators and
+unknown fields (including newly parsed SDK fields) refuse before mutation. Built-ins,
+custom tools, management endpoints and writes are unavailable; defaults are disabled
+and every retained tool asks the live read/report decider. Default-only toolsets
+provide no tools. Mounted data/vaults grant no native or delegated execution.
 
-Revoking a key, stopping a watch or disabling an owner/tenant/global gate cancels
-queued wakes. Re-enabling does not revive them. Evidence expires after seven days;
-independent byte, row and rate quotas prevent a pending batch growing without bound.
-There are no polling sources, enrollment tools or internal-watch migration in this
-adapter build. Authenticated page hosts use core's signing/registration ports.
-Account erasure removes owned registrations, evidence, pending wakes and owner
-stop controls; the privacy preview includes the watches it will erase.
+Cache invalidation commits before provider mutation. Original tool/server arrays
+restore before release, including repeated cancellation; origin authority is revoked
+after cleanup. The next bind reconciles tools after interruption. Each platform
+send/edit/upload, chunk and terminal success/error uses a latched output check:
+once refused, cleanup and late tasks cannot publish retained content. Watch turns
+start no detached output-file sweeps after their grant ends.
+
+Stop, key rotation and gate revocation cancel queued wakes; re-enabling requires
+fresh events. Evidence is escaped as untrusted text and expires after seven days.
+Account erasure removes registrations, evidence, pending wakes and owner controls;
+the privacy preview includes them. There are no enrollment tools, polls or internal
+watch migration. See [self-hosting](self-hosting.md#signed-page-event-watch-sidecar)
+for source, storage and request limits.
