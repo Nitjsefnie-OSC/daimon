@@ -7,6 +7,7 @@ import uuid
 import pytest
 import pytest_asyncio
 from daimon.core.authz import Subject
+from daimon.core.errors import StoreError
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import (
     create_routine,
@@ -209,3 +210,59 @@ async def test_schedule_edits_pause_and_unchanged_values_keep_the_opt_in(
     after = await get_routine(db_session, row.id, tenant_id=tenant_id)
     assert after is not None and after.sandbox_tools_enabled is True
     assert len(await sandbox_tools_history(db_session, row.id, tenant_id=tenant_id)) == 1
+
+
+async def _dm_ready(session: AsyncSession, tenant_id: uuid.UUID) -> RoutineRow:
+    """A channel-less routine created with known provenance, so it may turn into a DM one."""
+    return await create_routine(
+        session,
+        tenant_id=tenant_id,
+        created_by_user_id="1001",
+        agent_id="agent_a",
+        agent_name="daimon",
+        cron_expr="0 9 * * *",
+        timezone_="UTC",
+        trigger_message="nightly",
+        source_provenance_known=True,
+    )
+
+
+async def test_a_dm_routine_cannot_be_opted_in(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await _dm_ready(db_session, tenant_id)
+    dm = await update_routine(db_session, row.id, tenant_id=tenant_id, destination_kind="dm")
+    assert dm is not None and dm.destination_kind == "dm"
+
+    with pytest.raises(StoreError, match="DM routines can't use sandbox tools"):
+        await set_sandbox_tools(
+            db_session,
+            row.id,
+            tenant_id=tenant_id,
+            enabled=True,
+            set_by="a",
+            actor=ADMIN,
+            via="cli",
+        )
+
+    after = await get_routine(db_session, row.id, tenant_id=tenant_id)
+    assert after is not None and after.sandbox_tools_enabled is False
+    assert await sandbox_tools_history(db_session, row.id, tenant_id=tenant_id) == []
+
+
+async def test_converting_to_dm_clears_the_opt_in(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await _dm_ready(db_session, tenant_id)
+    await set_sandbox_tools(
+        db_session, row.id, tenant_id=tenant_id, enabled=True, set_by="a", actor=ADMIN, via="mcp"
+    )
+
+    dm = await update_routine(
+        db_session, row.id, tenant_id=tenant_id, destination_kind="dm", edited_by="1001"
+    )
+
+    assert dm is not None and dm.destination_kind == "dm"
+    assert dm.sandbox_tools_enabled is False
+    history = await sandbox_tools_history(db_session, row.id, tenant_id=tenant_id)
+    assert history[-1].via == "edit" and history[-1].after_enabled is False

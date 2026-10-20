@@ -925,15 +925,18 @@ async def _set_routine_sandbox_tools_impl(
         row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
         if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
-        result = await routines_store.set_sandbox_tools(
-            session,
-            routine_id,
-            tenant_id=auth.tenant_id,
-            enabled=enabled,
-            set_by=str(auth.account_id),
-            actor=actor,
-            via="mcp",
-        )
+        try:
+            result = await routines_store.set_sandbox_tools(
+                session,
+                routine_id,
+                tenant_id=auth.tenant_id,
+                enabled=enabled,
+                set_by=str(auth.account_id),
+                actor=actor,
+                via="mcp",
+            )
+        except StoreError as exc:
+            raise ToolError(str(exc)) from exc
     if result is None:
         raise ToolError("routine not found")
     return _routine_for_reader(auth, result[0])

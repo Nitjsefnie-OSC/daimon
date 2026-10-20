@@ -541,6 +541,11 @@ async def get_first_routine_for_principal(
 
 type SandboxVia = Literal["mcp", "cli"]
 
+DM_SANDBOX_REFUSAL = (
+    "DM routines can't use sandbox tools: they run as the owner's private DM turn. "
+    "Nothing was changed."
+)
+
 
 async def set_sandbox_tools(
     session: AsyncSession,
@@ -555,7 +560,9 @@ async def set_sandbox_tools(
     """Opt one routine's own runs in to (or out of) built-in sandbox tools.
 
     Only a current human admin may (`Action.SET_ROUTINE_SANDBOX_TOOLS`); owning
-    the routine is not enough. Returns the row and whether it changed, or None
+    the routine is not enough. A DM routine cannot be opted in (StoreError):
+    it runs as the owner's private DM turn, and converting a routine to DM
+    clears an opt-in (`_save_routine_edit`). Returns the row and whether it changed, or None
     for an unknown id. Setting the value it already has writes nothing, so a
     repeated opt-in is a no-op; a change records `set_by`/`set_at` on the row
     and appends a `routine_sandbox_history` row.
@@ -569,6 +576,8 @@ async def set_sandbox_tools(
     )
     if orm is None:
         return None
+    if enabled and orm.destination_kind == "dm":
+        raise StoreError(DM_SANDBOX_REFUSAL)
     before = orm.sandbox_tools_enabled
     if before == enabled:
         return RoutineRow.model_validate(orm), False

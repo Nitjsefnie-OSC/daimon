@@ -245,11 +245,19 @@ def test_empty_roster_disables_all_but_done_and_refresh() -> None:
 
 
 @pytest.mark.parametrize(
-    ("enabled", "line"),
-    [(False, "Sandbox tools: off"), (True, "Sandbox tools: on (admin opt-in)")],
+    ("overrides", "line"),
+    [
+        ({}, "Sandbox tools: off"),
+        ({"sandbox_tools_enabled": True}, "Sandbox tools: on (admin opt-in)"),
+        (
+            {"destination_kind": "dm", "destination_id": "u1", "created_by_user_id": "u1"},
+            "Sandbox tools: off (DM routines can't use sandbox tools)",
+        ),
+    ],
+    ids=["default", "opted_in", "dm"],
 )
-def test_panel_shows_the_routine_sandbox_opt_in(enabled: bool, line: str) -> None:
-    state = _make_state([_make_entry(sandbox_tools_enabled=enabled)])
+def test_panel_shows_the_routine_sandbox_opt_in(overrides: dict[str, Any], line: str) -> None:
+    state = _make_state([_make_entry(**overrides)])
     container = build_panel_container(state, now=datetime(2026, 5, 14, 12, 0, tzinfo=UTC))
     text = " ".join(
         child.content for child in container.children if isinstance(child, discord.ui.TextDisplay)

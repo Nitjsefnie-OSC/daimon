@@ -40,6 +40,7 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.routines import (
+    DM_SANDBOX_REFUSAL,
     create_routine,
     get_routine,
     list_routines_missing_agent_name,
@@ -321,6 +322,13 @@ async def run_sandbox_tools(
             raise UserFacingError(
                 f"No routine in this tenant with id {', '.join(missing)}. Nothing was changed."
             )
+        dms = [
+            str(rid)
+            for rid, row in rows.items()
+            if row is not None and row.destination_kind == "dm"
+        ]
+        if enabled and dms:
+            raise UserFacingError(f"{', '.join(dms)}: {DM_SANDBOX_REFUSAL}")
         pending = [
             rid
             for rid, row in rows.items()

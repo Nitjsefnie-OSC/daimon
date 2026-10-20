@@ -117,3 +117,33 @@ async def test_off_reverts_an_opt_in(db_session_factory) -> None:
     async with db_session_factory() as session:
         history = await sandbox_tools_history(session, rows[0].id, tenant_id=tenant_id)
     assert [entry.after_enabled for entry in history] == [True, False]
+
+
+async def test_a_listed_dm_routine_refuses_the_whole_batch(db_session_factory) -> None:
+    tenant_id, rows = await _routines(db_session_factory, 1)
+    async with db_session_factory.begin() as session:
+        dm = await create_routine(
+            session,
+            tenant_id=tenant_id,
+            created_by_user_id="1001",
+            agent_id="ag",
+            agent_name="daimon",
+            cron_expr="0 9 * * *",
+            timezone_="UTC",
+            trigger_message="private",
+            source_provenance_known=True,
+            destination_kind="dm",
+            destination_id="1001",
+        )
+
+    with pytest.raises(UserFacingError, match="DM routines can't use sandbox tools"):
+        await run_sandbox_tools(
+            rt=build_cli_runtime(db_session_factory),
+            console=Console(file=StringIO()),
+            tenant_id=tenant_id,
+            routine_ids=[rows[0].id, dm.id],
+            enabled=True,
+            dry_run=True,
+        )
+
+    assert await _enabled(db_session_factory, tenant_id, [*rows, dm]) == [False, False]
