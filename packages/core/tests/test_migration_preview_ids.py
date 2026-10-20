@@ -287,6 +287,11 @@ async def test_deployed_upgrade_and_downgrade_paths(
             _assert_head(sync, LEAD_HEAD)
             command.upgrade(config, "head")
             _assert_head(sync)
+            assert (
+                sync.scalar(text("SELECT enabled FROM watch_controls WHERE scope = 'global'"))
+                is False
+            )
+            sync.commit()
             with pytest.raises(NotImplementedError, match="Watch evidence"):
                 command.downgrade(config, LEAD_HEAD)
             _assert_head(sync)
