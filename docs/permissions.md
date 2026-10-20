@@ -156,6 +156,8 @@ the turn, before anything is sent or changed, when the session:
   a capability: the session and its resources (files, repositories, memory
   stores), the agent, its model, skills and MCP servers, each tool, a
   toolset's default and per-tool settings, and their permission policies.
+  The session's telemetry (timing, token usage and its cache creation,
+  outcome evaluations) is held to a reviewed schema the same way.
   An unknown field is refused even when it is empty, and so is one a newer
   SDK has started to parse. A known field must also hold its reviewed shape:
   a setting that should be a word, number or true/false is refused when it

@@ -141,10 +141,11 @@ def _fields(*names: str) -> frozenset[str]:
     return frozenset(name for group in names for name in group.split())
 
 
-# The reviewed schema of every capability-bearing node, frozen here rather
-# than read from the installed SDK: a field the provider adds, or an SDK
-# upgrade starts parsing, is refused until it is reviewed. Opaque data (a
-# custom tool's `input_schema`, metadata values, usage) is not walked.
+# The reviewed schema of every node, frozen here rather than read from the
+# installed SDK: a field the provider adds, or an SDK upgrade starts parsing,
+# is refused until it is reviewed. Telemetry (stats, usage and its cache
+# creation, outcome evaluations) is frozen too. Opaque data (a custom tool's
+# `input_schema`, metadata values) is not walked.
 _SESSION = _fields(
     "id type agent archived_at created_at updated_at deployment_id environment_id",
     "metadata outcome_evaluations resources stats status title usage vault_ids",
@@ -155,6 +156,10 @@ _AGENT = _fields(
 # Inference settings only (Daimon's own driver writes `inference_geo` and
 # `effort`, which the SDK does not parse yet); none of them grants a tool.
 _MODEL = _fields("id speed inference_geo effort")
+_STATS = _fields("active_seconds duration_seconds")
+_USAGE = _fields("cache_creation cache_read_input_tokens input_tokens output_tokens")
+_CACHE_CREATION = _fields("ephemeral_1h_input_tokens ephemeral_5m_input_tokens")
+_OUTCOME = _fields("type outcome_id description result iteration explanation completed_at")
 # The two skill kinds the SDK knows, by their own `type` literals.
 _SKILL_TYPES = frozenset(
     kind
@@ -208,8 +213,8 @@ def _only(value: object, names: frozenset[str]) -> None:
 # Value shapes for the same nodes, checked on the snapshot's raw provider
 # form: a reviewed scalar must be that scalar (or null), so no field can hide
 # inside a value that became an object or a list. Objects and lists are
-# checked all the way down; only telemetry, metadata and a custom tool's
-# input schema are opaque data.
+# checked all the way down; only metadata and a custom tool's input schema
+# are opaque data.
 type _Shape = Callable[[object], bool]
 
 
@@ -271,6 +276,8 @@ def _tagged(**variants: _Shape) -> _Shape:
 
 _TEXT = _scalar(str)
 _FLAG = _scalar(bool)
+_COUNT = _scalar(int)
+_NUMBER = _scalar(int, float)
 _LEVELS = ("low", "medium", "high", "xhigh", "max")
 _POLICY_SHAPE = _tagged(always_allow=_object(type=_TEXT), always_ask=_object(type=_TEXT))
 _DEFAULT_SHAPE = _object(enabled=_FLAG, permission_policy=_POLICY_SHAPE)
@@ -302,9 +309,26 @@ _SESSION_SHAPE = _object(
     status=_TEXT,
     title=_TEXT,
     metadata=_opaque,
-    outcome_evaluations=_opaque,
-    stats=_opaque,
-    usage=_opaque,
+    outcome_evaluations=_list(
+        _object(
+            type=_TEXT,
+            outcome_id=_TEXT,
+            description=_TEXT,
+            result=_TEXT,
+            iteration=_scalar(int),
+            explanation=_TEXT,
+            completed_at=_TEXT,
+        )
+    ),
+    stats=_object(active_seconds=_NUMBER, duration_seconds=_NUMBER),
+    usage=_object(
+        cache_creation=_nullable(
+            _object(ephemeral_1h_input_tokens=_COUNT, ephemeral_5m_input_tokens=_COUNT)
+        ),
+        cache_read_input_tokens=_COUNT,
+        input_tokens=_COUNT,
+        output_tokens=_COUNT,
+    ),
     vault_ids=_list(_TEXT),
     resources=_list(
         _tagged(
@@ -415,6 +439,12 @@ def require_allowed_capabilities(
     _only(snapshot, _SESSION)
     if not _SESSION_SHAPE(snapshot.model_dump(mode="json", warnings=False)):
         _refuse()
+    _only(snapshot.stats, _STATS)
+    _only(snapshot.usage, _USAGE)
+    if snapshot.usage.cache_creation is not None:
+        _only(snapshot.usage.cache_creation, _CACHE_CREATION)
+    for outcome in snapshot.outcome_evaluations:
+        _only(outcome, _OUTCOME)
     agent = snapshot.agent
     _only(agent, _AGENT)
     if agent.multiagent is not None or (agent.skills and not allow_skills):

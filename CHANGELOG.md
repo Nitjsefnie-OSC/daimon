@@ -40,6 +40,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - An unattended session with an MCP server whose name contains `/` is refused before anything is sent. A watch's tool allowlist is kept as server and tool pairs, so a server named `linear/bridge` can no longer enable an absent `bridge/get_issue` tool on the `linear` server.
 
+- An unattended session's telemetry (timing, token usage and cache creation, outcome evaluations) must match its reviewed schema; a new or reshaped field there is refused like one anywhere else in the session.
+
 - Origin-based MCP actions require the signed grant of the calling session.
   Routines and timers cannot borrow a concurrent human origin, and empty origin
   IDs refuse. Human handoffs retain their approval surfaces.

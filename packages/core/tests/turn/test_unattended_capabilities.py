@@ -926,3 +926,52 @@ def test_a_hidden_field_in_a_session_needing_no_update_is_still_refused(
     require_allowed_capabilities(clean)
     with pytest.raises(AdmissionDenied):
         require_allowed_capabilities(_mutated(_HIDDEN_SHAPES["no_change_enabled_object"]))
+
+
+_OUTCOME: dict[str, Any] = {
+    "type": "outcome_evaluation",
+    "outcome_id": "outc_1",
+    "description": "d",
+    "result": "satisfied",
+    "iteration": 1,
+    "explanation": None,
+    "completed_at": "2026-10-01T00:00:00Z",
+}
+
+
+def _with_telemetry(session: dict[str, Any]) -> None:
+    session["stats"] = {"active_seconds": 1.5, "duration_seconds": 3}
+    session["usage"] = {
+        "cache_creation": {"ephemeral_1h_input_tokens": 1, "ephemeral_5m_input_tokens": 2},
+        "cache_read_input_tokens": 3,
+        "input_tokens": 4,
+        "output_tokens": 5,
+    }
+    session["outcome_evaluations"] = [dict(_OUTCOME)]
+
+
+def test_reviewed_telemetry_passes() -> None:
+    require_allowed_capabilities(_mutated(_with_telemetry))
+
+
+@pytest.mark.parametrize(
+    ("path", "value"),
+    [
+        ("stats.future_execution_capability", False),
+        ("usage.future_execution_capability", False),
+        ("usage.cache_creation.future_execution_capability", False),
+        ("outcome_evaluations.0.future_execution_capability", False),
+        ("stats.active_seconds", _HIDDEN),
+        ("usage.input_tokens", [_HIDDEN]),
+        ("usage.cache_creation", [_HIDDEN]),
+        ("usage.cache_creation.ephemeral_1h_input_tokens", _HIDDEN),
+        ("outcome_evaluations.0.iteration", _HIDDEN),
+        ("outcome_evaluations.0", [_HIDDEN]),
+    ],
+)
+def test_telemetry_is_frozen_like_every_other_node(path: str, value: object) -> None:
+    """Ported from the watches review: telemetry no longer passes opaquely."""
+    change = _set(path, value)
+    session = _mutated(lambda s: (_with_telemetry(s), change(s)))
+    with pytest.raises(AdmissionDenied, match="backend_unsupported"):
+        require_allowed_capabilities(session)
