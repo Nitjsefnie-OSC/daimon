@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Preserve recorded approval cards for existing backend switches and other
+  non-watch actions when the provider omits session overrides after watch gates
+  are introduced. Watch enrollment still requires its own verified approval.
+
 - Protect legacy destination-free routine previews and diagnostics from non-owner
   readers, including administrators, across MCP and chat panels. Clear retained
   legacy private output once during upgrade; operator backfill output stays redacted.
