@@ -35,6 +35,7 @@ from daimon.core.direct_messages import (
     require_unsealed_source,
     start_cold_dm,
     start_dm,
+    tenant_ready,
 )
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -76,6 +77,13 @@ _ACCESS_DENIALS: frozenset[AdmissionDenialReason] = frozenset(
         "runs_elsewhere",
         "own_agents_only",
     }
+)
+_DM_FAILURES = (
+    DaimonError,
+    MAResolverMissError,
+    discord.HTTPException,
+    anthropic.APIError,
+    SQLAlchemyError,
 )
 _DISCOVERY_FAILURE_NOTICE = "Couldn't open a private conversation. Please retry or ask an admin."
 
@@ -170,7 +178,7 @@ class DirectMessageCog(commands.Cog):
         message: discord.Message | _DmRequest,
     ) -> tuple[Admission | None, bool, bool]:
         runtime = self.bot.runtime
-        if tenant.archived_at is not None or tenant.provision_status != "ready":
+        if not tenant_ready(tenant):
             self._suppress(message, "tenant_unavailable")
             return None, False, False
         async with runtime.sessionmaker() as session:
@@ -532,13 +540,7 @@ class DirectMessageCog(commands.Cog):
                 allowed_mentions=discord.AllowedMentions.none(),
             )
             await interaction.followup.send("Ready in your DMs.", ephemeral=True)
-        except (
-            DaimonError,
-            MAResolverMissError,
-            discord.HTTPException,
-            anthropic.APIError,
-            SQLAlchemyError,
-        ) as exc:
+        except _DM_FAILURES as exc:
             log.warning("discord.dm.move_failed", error_type=type(exc).__name__)
             message = _error_text(
                 exc,
@@ -569,13 +571,7 @@ class DirectMessageCog(commands.Cog):
                     del self._pending[key]
                 try:
                     await self._reply(message)
-                except (
-                    DaimonError,
-                    MAResolverMissError,
-                    discord.HTTPException,
-                    anthropic.APIError,
-                    SQLAlchemyError,
-                ) as exc:
+                except _DM_FAILURES as exc:
                     log.warning(
                         "discord.dm.discovery_failed",
                         error_type=type(exc).__name__,
@@ -615,9 +611,7 @@ class DirectMessageCog(commands.Cog):
             )
             if (
                 not enabled
-                or tenant is None
-                or tenant.archived_at is not None
-                or tenant.provision_status != "ready"
+                or not tenant_ready(tenant)
                 or not recipient_policy.allows(str(message.author.id))
                 or subject.verified_membership is not True
                 or not authorize(policy, subject=subject, action=Action.START_TURN)
@@ -696,13 +690,7 @@ class DirectMessageCog(commands.Cog):
                         await message.channel.send(
                             chunk, allowed_mentions=discord.AllowedMentions.none()
                         )
-        except (
-            DaimonError,
-            MAResolverMissError,
-            discord.HTTPException,
-            anthropic.APIError,
-            SQLAlchemyError,
-        ) as exc:
+        except _DM_FAILURES as exc:
             log_anthropic_overload(
                 exc,
                 tenant_id=conversation.tenant_id,

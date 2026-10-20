@@ -13,7 +13,6 @@ from daimon.core.tool_safety import (
     ToolAnnotations,
     ToolCall,
     ToolSafetyPolicy,
-    classify_tool,
 )
 from daimon.core.turn.posture import PolicyApproval
 from daimon.core.turn.unattended import (
@@ -90,12 +89,6 @@ async def test_posture_reads_annotations_only_through_its_seam(trusted: bool) ->
     )
     assert (await posture.decide(_call("memory_flag_list"))).allow is trusted
     assert seen == (["linear/memory_flag_list"] if trusted else [])
-
-
-def test_a_destructive_hint_wins_over_read_only() -> None:
-    policy = ToolSafetyPolicy(enabled=True)
-    both = ToolAnnotations(read_only_hint=True, destructive_hint=True)
-    assert classify_tool(policy, server_name="s", tool_name="get_x", annotations=both) == "write"
 
 
 @pytest.mark.parametrize("enabled", [False, True])

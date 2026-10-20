@@ -32,13 +32,19 @@ from typing import TYPE_CHECKING
 from anthropic import AsyncAnthropic
 from anthropic.types.beta import BetaManagedAgentsSession
 from cryptography.fernet import MultiFernet
-from daimon.core.defaults.metadata import MA_METADATA_KEY_CHANNEL, MA_METADATA_KEY_PRIVATE_DM
+from daimon.core.defaults.metadata import (
+    MA_METADATA_KEY_ACCOUNT,
+    MA_METADATA_KEY_CHANNEL,
+    MA_METADATA_KEY_PRIVATE_DM,
+    MA_METADATA_KEY_TENANT,
+)
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.mcp_tool_annotations import (
     agent_mcp_token_for,
     mcp_annotation_lookup,
     no_mcp_token,
 )
+from daimon.core.mux_backend import resource_scope
 from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.tool_safety import (
     ToolCall,
@@ -52,6 +58,7 @@ from daimon.core.turn.approvals import (
     channel_for_tool_rules,
     unattended_decider,
 )
+from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.posture import PolicyApproval, ToolConfirmationResult
 from daimon.core.turn.unattended_capabilities import (
     UnattendedEntryPoint,
@@ -268,10 +275,7 @@ async def dm_session_authority(
     A replacement gets a new authority; an in-place identity or endpoint change
     refuses the batch instead of combining rules and hints from different agents.
     """
-    from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
-    from daimon.core.mux_backend import resource_scope
     from daimon.core.turn.admission import decide_before_send
-    from daimon.core.turn.errors import AdmissionDenied
 
     scope = resource_scope(
         tenant_id=str(tenant_id),

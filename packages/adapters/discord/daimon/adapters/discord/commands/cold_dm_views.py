@@ -16,6 +16,18 @@ SWITCH_VIEW_SECONDS = 900
 
 
 class _PrivateControl(discord.ui.View):
+    user_id: int
+    route_id: int
+    noun: str
+
+    async def interaction_check(self, interaction: discord.Interaction) -> bool:
+        if interaction.user.id != self.user_id or interaction.channel_id != self.route_id:
+            await interaction.response.send_message(
+                f"This {self.noun} belongs to another conversation.", ephemeral=True
+            )
+            return False
+        return True
+
     async def on_error(
         self,
         interaction: discord.Interaction,
@@ -32,6 +44,8 @@ class _PrivateControl(discord.ui.View):
 
 
 class ServerSelector(_PrivateControl):
+    noun = "selector"
+
     def __init__(
         self,
         *,
@@ -53,14 +67,6 @@ class ServerSelector(_PrivateControl):
         self.message: discord.Message | None = None
         self.page = 0
         self._render()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id or interaction.channel_id != self.route_id:
-            await interaction.response.send_message(
-                "This selector belongs to another conversation.", ephemeral=True
-            )
-            return False
-        return True
 
     def complete(self) -> None:
         """Retire an accepted selector immediately, before admission or model execution."""
@@ -119,6 +125,8 @@ class ServerSelector(_PrivateControl):
 
 
 class ServerSwitch(_PrivateControl):
+    noun = "control"
+
     def __init__(
         self, *, user_id: int, route_id: int, switch: SwitchServer, expire: Callable[[], None]
     ) -> None:
@@ -149,11 +157,3 @@ class ServerSwitch(_PrivateControl):
 
     async def on_timeout(self) -> None:
         self._expire()
-
-    async def interaction_check(self, interaction: discord.Interaction) -> bool:
-        if interaction.user.id != self.user_id or interaction.channel_id != self.route_id:
-            await interaction.response.send_message(
-                "This control belongs to another conversation.", ephemeral=True
-            )
-            return False
-        return True

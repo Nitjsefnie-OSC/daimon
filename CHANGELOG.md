@@ -7,22 +7,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-### Fixed
-
-- Preserve recorded approval cards for existing backend switches and other
-  non-watch actions when the provider omits session overrides after watch gates
-  are introduced. Watch enrollment still requires its own verified approval.
-
-- Protect legacy destination-free routine previews and diagnostics from non-owner
-  readers, including administrators, across MCP and chat panels. Clear retained
-  legacy private output once during upgrade; operator backfill output stays redacted.
-
-- Lead approval Details loads authorized live evidence on each click and shows
-  removed records as no longer available. Cards retain no cached evidence.
-  Batch mailbox readback requires the common lead read check, and hidden leads
-  no longer consume list pages. Automatic resume batches skip old configuration
-  revisions, old destinations and unreadable records before filling their window.
-
 ### Added
 
 - Native tenant-scoped lead intake with encrypted capture, Gmail qualification,
@@ -86,13 +70,6 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Gate Discord turns and routine owners by configured role IDs, with current membership checks for MCP, scheduled fires, and private delivery. Configure roles with `daimon tenants access-policy set --invoker-role`.
 
-### Fixed
-
-- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
-
-- Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
-
-
 ### Security
 
 - An unattended session with an MCP server whose name contains `/` is refused before anything is sent. A watch's tool allowlist is kept as server and tool pairs, so a server named `linear/bridge` can no longer enable an absent `bridge/get_issue` tool on the `linear` server.
@@ -123,6 +100,24 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - An agent-wide `deny` tool rule on one of Daimon's own tools (`daimon-mcp/<tool>`) now stops the call. The MCP server refuses it, directly or through `call_tool`, when that agent's chat or routine session makes it and tool rules are enabled. The rule used to be saved but never enforced for Daimon's own tools. An agent-wide `deny` on `daimon-mcp/*` denies all of Daimon's own tools for that agent, tools added later included, and `search_tools` and `call_tool` too; wildcards are recognised only for `daimon-mcp`, agent-wide and `deny`. The turn driver applies `ask` and channel rules on them (see Fixed).
 
 ### Fixed
+
+- Preserve recorded approval cards for existing backend switches and other
+  non-watch actions when the provider omits session overrides after watch gates
+  are introduced. Watch enrollment still requires its own verified approval.
+
+- Protect legacy destination-free routine previews and diagnostics from non-owner
+  readers, including administrators, across MCP and chat panels. Clear retained
+  legacy private output once during upgrade; operator backfill output stays redacted.
+
+- Lead approval Details loads authorized live evidence on each click and shows
+  removed records as no longer available. Cards retain no cached evidence.
+  Batch mailbox readback requires the common lead read check, and hidden leads
+  no longer consume list pages. Automatic resume batches skip old configuration
+  revisions, old destinations and unreadable records before filling their window.
+
+- Access policies that keep the default admin bypass remain readable by older deployments during rolling upgrades.
+
+- Discord private conversations retain operational and billing notices while access denials stay silent. Discovery failures after membership and invoker checks show a generic notice without server or agent names.
 
 - Continuing a routine session through the CLI, MCP or a checkpoint retains its conversation channel rules; its private transcript stamp no longer makes it execute as a DM.
 

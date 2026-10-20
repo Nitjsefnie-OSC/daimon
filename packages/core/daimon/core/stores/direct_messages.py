@@ -9,11 +9,11 @@ from daimon.core._models import (
     DirectMessageConversation,
     DirectMessagePolicy,
     ThreadAgentBinding,
-    ThreadSession,
 )
 from daimon.core.errors import DaimonError, UserFacingError
+from daimon.core.stores.thread_sessions import retire_dm_scope
 from pydantic import BaseModel, ConfigDict
-from sqlalchemy import delete, func, select, text, union, update
+from sqlalchemy import delete, func, select, text, union
 from sqlalchemy.dialects.postgresql import insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -224,22 +224,12 @@ async def quarantine_conversation(
             DirectMessageConversation.scope_id == conversation.scope_id,
         )
     )
-    retired = (
-        await session.execute(
-            update(ThreadSession)
-            .where(
-                ThreadSession.tenant_id == conversation.tenant_id,
-                ThreadSession.platform == conversation.platform,
-                ThreadSession.thread_id == conversation.scope_id,
-                ThreadSession.status == "live",
-            )
-            .values(status="dead")
-            .returning(ThreadSession.ma_session_id)
-        )
-    ).scalars()
-    ids = list(retired)
-    await session.flush()
-    return ids
+    return await retire_dm_scope(
+        session,
+        tenant_id=conversation.tenant_id,
+        platform=conversation.platform,
+        scope_id=conversation.scope_id,
+    )
 
 
 async def lock_route(

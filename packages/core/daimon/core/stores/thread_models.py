@@ -7,10 +7,9 @@ No try/except -- exceptions propagate to the adapter boundary.
 from __future__ import annotations
 
 import uuid
-from typing import Any, cast
 
 from daimon.core._models import ThreadModelSetting
-from sqlalchemy import CursorResult, delete, func, select
+from sqlalchemy import delete, func, select
 from sqlalchemy.dialects.postgresql import insert as pg_insert
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -56,9 +55,9 @@ async def set_thread_model(
 
 async def clear_thread_model(
     session: AsyncSession, *, tenant_id: uuid.UUID, platform: str, thread_id: str
-) -> bool:
-    """Back to the agent's own model. Returns whether a choice existed."""
-    result = await session.execute(
+) -> None:
+    """Back to the agent's own model."""
+    await session.execute(
         delete(ThreadModelSetting).where(
             ThreadModelSetting.tenant_id == tenant_id,
             ThreadModelSetting.platform == platform,
@@ -66,4 +65,3 @@ async def clear_thread_model(
         )
     )
     await session.flush()
-    return cast(CursorResult[Any], result).rowcount == 1

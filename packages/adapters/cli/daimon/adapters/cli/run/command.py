@@ -28,14 +28,12 @@ from daimon.core.session_ports_compat import retrieve_session_record
 from daimon.core.stores.accounts import get_account
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import get_tenant
-from daimon.core.turn.approvals import AnnotationLookup
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.driver import run_turn, unattended_sends
 from daimon.core.turn.outcomes import current_outcome, observe_turn
 from daimon.core.turn.posture import BillingExempt, RequireApproval, ToolConfirmation
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.unattended import (
-    session_annotations,
     session_gate,
     session_rules_channel,
     unattended_posture,
@@ -99,6 +97,7 @@ async def _run_with_defaults(settings: Settings, session: str, user_message: str
         # the driver gates again before the message and every confirmation.
         await gate()
         snapshot = await retrieve_session_record(rt.anthropic, session, scope=scope)
+        keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
         with unattended_sends(gate):
             return await run_conversation(
                 rt=rt,
@@ -111,7 +110,7 @@ async def _run_with_defaults(settings: Settings, session: str, user_message: str
                     session_factory=rt.sessionmaker,
                     tenant_id=tenant_id,
                     channel_id=session_rules_channel(snapshot, platform=platform),
-                    annotations_for=_annotations_for(rt, snapshot, tenant_id=tenant_id),
+                    fernet=build_multifernet(keys) if keys else None,
                     entry_point="cli_run",
                 ),
             )
@@ -134,20 +133,6 @@ async def _session_tenant(
     if tenant is None:
         raise ScopeViolation(session.id, "the session's tenant is not on this deployment")
     return tenant.id, tenant.platform
-
-
-def _annotations_for(
-    rt: CliRuntime, session: BetaManagedAgentsSession, *, tenant_id: uuid.UUID
-) -> AnnotationLookup | None:
-    """Operator-trusted hints bound to the executed session's agent and servers."""
-    keys = tuple(key.get_secret_value() for key in rt.settings.crypto.keys)
-    return session_annotations(
-        rt.settings.tool_safety,
-        session,
-        session_factory=rt.sessionmaker,
-        tenant_id=tenant_id,
-        fernet=build_multifernet(keys) if keys else None,
-    )
 
 
 # `RequireApproval` is frozen and field-less; one shared default (ruff B008).

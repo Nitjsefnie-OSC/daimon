@@ -1289,8 +1289,8 @@ intent; it uses the REST freshness bound when member events are absent.
 Daimon invalidates gateway evidence on member updates/removals and guild
 removal/unavailability. REST fallback remains necessary when events or intents
 are missing; untimestamped SDK member cache entries are not fresh proof.
-Ordinary positive checks expire after 30 seconds, negative checks after five.
-Private result delivery always fetches live membership. Concurrent lookups
+[Discord invoker roles](permissions.md#discord-invoker-roles) gives how long a
+check is cached and when a live lookup is required. Concurrent lookups
 share work; rate-limit retries and network waits have a ten-second overall
 bound. API denial, timeout, missing credentials, and unavailable guilds fail
 closed when current evidence is required. An expired grant is never reused
@@ -1326,7 +1326,7 @@ a restart invalidates them and the person must send a new message.
 
 ### Rolling out routine DM destinations
 
-Migration `0111_routine_dm_destination` expands the routine destination enum
+Migration `0112_routine_dm_destination` expands the routine destination enum
 and constrains DM recipients to the non-null owner. Deploy compatible readers,
 scheduler and Discord posters before creating any `dm` rows; stop older
 writers and posters during a mixed-version rollout. Apply the migration before

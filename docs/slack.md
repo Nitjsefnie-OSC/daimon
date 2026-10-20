@@ -48,8 +48,9 @@ Watch turns do not schedule detached session-output sweeps after their execution
 grant ends.
 
 Files an agent saves under `/mnt/session/outputs` are uploaded to the Slack
-thread after an interactive turn completes (scheduled routines deliver
-nothing). Delivery runs in the background after the reply is posted — the
+thread after an interactive turn completes (a routine with a destination
+sends its files with its result instead; see
+[routines](routines.md#generated-files)). Delivery runs in the background after the reply is posted — the
 adapter waits for Managed Agents to index newly written files, so files may
 arrive a few seconds after the reply. Every delivery is labelled with the
 person whose turn made the files, in every thread, whether one person uses
@@ -401,10 +402,6 @@ platform caches can keep a copy after the picture changes.
 For explicitly configured alternate providers, progress cards display neutral message snapshots and ordered draft previews. Terminal callbacks replace the card with the authoritative answer and retire Cancel. A provider cost is omitted until a verified display tariff is available; the default Anthropic display and price calculation are unchanged.
 
 Scheduled routine deliveries use the same file uploader as interactive turns,
-including thread destinations and creator fallback DMs. Each delivery includes
-up to ten generated files, with a 200 MB per-file limit; skipped files are
-reported in text. File uploads share the routine result's at-most-once claim,
-so partial or uncertain delivery is not replayed across polls. The Slack SDK
-may retry a single send after a server error or connection reset. Fallback-DM
-files recheck tenant DM controls, recipient eligibility and channel isolation
-before each file and after download.
+including thread destinations and creator fallback DMs. The file limits, the
+per-file rechecks and the at-most-once delivery guarantee are in
+[routines](routines.md#generated-files).
