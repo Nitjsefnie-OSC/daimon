@@ -3905,3 +3905,78 @@ class GeminiRuntimeState(Base):
     project: Mapped[str] = mapped_column(Text, nullable=False)
     kind: Mapped[str] = mapped_column(Text, nullable=False)
     body: Mapped[str | None] = mapped_column(Text, nullable=True)
+
+
+class SelfHostedAgentRecord(Base):
+    """Tenant-owned resource; spec contains model, system, tools, skills and metadata."""
+
+    __tablename__ = "selfhosted_agents"
+    __table_args__ = (
+        Index(
+            "uq_selfhosted_agents_active_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("archived_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SelfHostedEnvironmentRecord(Base):
+    """Harness routing and credential references live in the environment spec."""
+
+    __tablename__ = "selfhosted_environments"
+    __table_args__ = (
+        Index(
+            "uq_selfhosted_environments_active_name",
+            "tenant_id",
+            "name",
+            unique=True,
+            postgresql_where=text("archived_at IS NULL"),
+        ),
+    )
+
+    id: Mapped[str] = mapped_column(Text, primary_key=True)
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), nullable=False
+    )
+    name: Mapped[str] = mapped_column(Text, nullable=False)
+    spec: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    revision: Mapped[int] = mapped_column(Integer, nullable=False, default=1)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    updated_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    archived_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+
+
+class SelfHostedResourceOperation(Base):
+    """Reference-only receipts, principal-owned and retained for seven days."""
+
+    __tablename__ = "selfhosted_resource_operations"
+    __table_args__ = (Index("ix_selfhosted_resource_operations_expires_at", "expires_at"),)
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
+    )
+    account_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    kind: Mapped[str] = mapped_column(Text, primary_key=True)
+    key: Mapped[str] = mapped_column(Text, primary_key=True)
+    principal_id: Mapped[str] = mapped_column(Text, nullable=False)
+    operation_id: Mapped[str] = mapped_column(Text, nullable=False)
+    action: Mapped[str] = mapped_column(Text, nullable=False)
+    digest: Mapped[str] = mapped_column(Text, nullable=False)
+    result: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), server_default=func.now())
+    expires_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), server_default=text("now() + interval '7 days'")
+    )

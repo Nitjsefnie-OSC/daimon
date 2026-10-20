@@ -1,5 +1,40 @@
 # mux
 
+Postgres-backed resource ports are available in
+`daimon.core.stores.selfhosted_resources` for host injection. Admission and CLI
+wiring land in the follow-up PR. Both the host and driver use `HarnessConfig`
+from `mux.drivers.selfhosted.config` for `selfhosted.environment` version 1.
+Its transport fields are `harness_url`, `auth_mode`, `auth_ref`, optional
+`packages_note`, and `transport` (default `direct`). `foundry_invocations`
+requires `agent_name` and `project_endpoint`. Resource `account_scope_id` is
+the tenant UUID. Foundry agent names are 1–63 ASCII letters, digits, underscores
+or hyphens and must start with a letter or digit. Full mux specs are persisted
+as JSONB alongside names,
+revisions and lifecycle timestamps. Active names are unique within a tenant;
+archived names can be reused, and name/ID resolution excludes archived rows.
+Mutations use account- and resource-kind-scoped keys, with principal ownership.
+Receipts contain only resource references/revisions and expire after seven days.
+Account erasure previews and deletes its receipts while retaining tenant-shared
+agent and environment records. Personal writes take the same account lock as
+erasure and require a live account. Deployment bootstrap uses the explicit
+`operator`/`cli`/`cli-deployment-operator` scope without personal attribution.
+Resource retries reread the row and refuse deleted or changed revisions. Writes
+prune expired receipts for their tenant; operators can prune idle tenants with
+`cleanup_expired_receipts` in the store module. Archive preserves historical
+resources; hard deletion invalidates any session still referring to that ID.
+
+The shared resource validator rejects credential-shaped configuration values, credential
+URLs (including package/index/VCS sources), arbitrary extensions and MCP tool-policy dictionaries. Bearer references
+must name environment variables; Entra references must be audience URIs.
+MCP credential references must start with `HARNESS_MCP_CRED_`; credentialed
+MCP endpoints require HTTPS except on loopback.
+Names, instructions, descriptions and package notes remain free text.
+Routing uses HTTPS, with loopback HTTP accepted for local use. Direct HTTP on
+internal service names, RFC1918 IPv4 or ULA IPv6 requires `allow_insecure_http=true`;
+public, link-local and reserved IP addresses are refused, including alternate IPv4 spellings;
+this permits the in-cluster ACA fallback explicitly. Foundry fields are accepted
+only for the Foundry transport.
+
 Source loss consent can name the unsupported native URL-fetch capability as
 `builtin_tool:web_fetch`. This does not waive other builtin tools or authorize
 shell-based emulation of the missing native tool.

@@ -1,5 +1,10 @@
 # Architecture
 
+Account erasure previews and deletes the account’s self-hosted resource retry
+receipts. The tenant’s shared agent and environment records remain available.
+Personal resource writes take the account-erasure lock and reject erased accounts,
+so an in-flight mutation cannot leave a new personal receipt after erasure.
+
 Opted-in Discord worker fleets use the existing posted-card renderer and Stop
 guard. The card shows each worker's role, backend, model and current state.
 Complete rows stay in ordinal order within Discord's total text limit; large
