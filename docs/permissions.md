@@ -202,17 +202,23 @@ agent defines it; custom tools are still removed.
 
 ### Routine sandbox opt-in
 
-The operator opts a routine in with `daimon routines sandbox-tools`. The
-`set_routine_sandbox_tools` MCP tool accepts only a current Discord server
-admin calling with their own token, re-checked against the server on every
-call. Agent keys, agents acting in a conversation on an admin's behalf,
-operator tokens, legacy tokens without a token id, and Slack or Teams callers
-are refused, and owning the routine is not enough. DM routines cannot be
-opted in. Every change is recorded with who made it, when, and the routine id
-(`routine_sandbox_history`). An edit to the routine's agent, trigger message,
-destination or budget channel turns the opt-in off. Routine status shows the
-current setting. The opt-in applies to that routine's own scheduled runs only.
-See [routines.md](routines.md#sandbox-tools).
+The operator opts a routine in with `daimon routines sandbox-tools`, the
+supported path. The `set_routine_sandbox_tools` MCP tool is refused for every
+caller a deployment issues today (an admin surface is pending a decision): it
+refuses agent keys, agents acting in a conversation on an admin's behalf,
+operator tokens, legacy tokens without a token id, and Slack or Teams callers,
+and owning the routine is not enough. DM routines cannot be opted in.
+
+An opt-in covers exactly what was approved: built-ins are enabled for a run
+only when the run's agent version and environment are exactly the ones
+recorded at opt-in, and any mismatch or missing record keeps them off. An edit
+to the agent or its environment by anyone allowed to configure it therefore
+turns the opt-in off at the next run, as does an edit to the routine's agent,
+trigger message, destination or budget channel. Every change is recorded with
+who made it, when, the routine id and the agent version and environment it
+covers (`routine_sandbox_history`). Routine status shows the current setting.
+The opt-in applies to that routine's own scheduled runs only. See
+[routines.md](routines.md#sandbox-tools).
 
 A refused routine records `AdmissionDenied: backend_unsupported` as its
 result. Agent chat answers with a tool error, `daimon run` exits with the

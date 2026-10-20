@@ -56,7 +56,7 @@
             ],
             "thread_id": "555000555"
           },
-          "sandbox_tools": false,
+          "sandbox": null,
           "session_factory": {
             "fixture_type": "async_sessionmaker"
           },

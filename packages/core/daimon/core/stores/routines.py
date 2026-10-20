@@ -38,6 +38,7 @@ from daimon.core.stores.domain import (
     Role,
     RoutineDestinationKind,
     RoutineRow,
+    SandboxPin,
     UnattendedRequester,
 )
 from sqlalchemy import and_, delete, false, func, or_, select, true, update
@@ -367,6 +368,7 @@ async def _save_routine_edit(
             sandbox_tools_enabled=False,
             sandbox_tools_set_by=edited_by,
             sandbox_tools_set_at=cleared_at,
+            **_PIN_CLEARED,
         )
     if expected_updated_at is not None and current.updated_at != expected_updated_at:
         raise StoreError("Routine changed while being edited; reload it and try again.")
@@ -541,6 +543,13 @@ async def get_first_routine_for_principal(
 
 type SandboxVia = Literal["mcp", "cli"]
 
+PIN_UNAVAILABLE_REFUSAL = (
+    "Can't read the routine's agent version or environment, so sandbox tools can't be "
+    "turned on for it. Nothing was changed."
+)
+#: The setter a fire records when it finds the agent or environment changed.
+SANDBOX_DRIFT_SETTER: Final = "agent_changed"
+
 DM_SANDBOX_REFUSAL = (
     "DM routines can't use sandbox tools: they run as the owner's private DM turn. "
     "Nothing was changed."
@@ -556,8 +565,14 @@ async def set_sandbox_tools(
     set_by: str,
     actor: Subject,
     via: SandboxVia,
+    pin: SandboxPin | None = None,
 ) -> tuple[RoutineRow, bool] | None:
     """Opt one routine's own runs in to (or out of) built-in sandbox tools.
+
+    An opt-in covers exactly `pin`, the agent version and environment
+    revision read just before (`routine_sandbox.current_pin`); without one it
+    is refused (StoreError). Turning tools off forgets the pin. Opting in
+    again with a different pin records the new one.
 
     Only a current human admin may (`Action.SET_ROUTINE_SANDBOX_TOOLS`); owning
     the routine is not enough. A DM routine cannot be opted in (StoreError):
@@ -578,13 +593,21 @@ async def set_sandbox_tools(
         return None
     if enabled and orm.destination_kind == "dm":
         raise StoreError(DM_SANDBOX_REFUSAL)
+    if enabled and pin is None:
+        raise StoreError(PIN_UNAVAILABLE_REFUSAL)
     before = orm.sandbox_tools_enabled
-    if before == enabled:
+    recorded = pin_of_orm(orm)
+    if before == enabled and (not enabled or recorded == pin):
         return RoutineRow.model_validate(orm), False
     now = datetime.now(UTC)
+    kept = pin if enabled else None
     orm.sandbox_tools_enabled = enabled
     orm.sandbox_tools_set_by = set_by
     orm.sandbox_tools_set_at = now
+    orm.sandbox_agent_id = kept.agent_id if kept else None
+    orm.sandbox_agent_version = kept.agent_version if kept else None
+    orm.sandbox_environment_id = kept.environment_id if kept else None
+    orm.sandbox_environment_updated_at = kept.environment_updated_at if kept else None
     orm.updated_at = now
     session.add(
         RoutineSandboxHistoryRecord(
@@ -595,6 +618,10 @@ async def set_sandbox_tools(
             set_by=set_by,
             set_at=now,
             via=via,
+            agent_id=kept.agent_id if kept else None,
+            agent_version=kept.agent_version if kept else None,
+            environment_id=kept.environment_id if kept else None,
+            environment_updated_at=kept.environment_updated_at if kept else None,
         )
     )
     await session.flush()
@@ -607,6 +634,90 @@ async def set_sandbox_tools(
         via=via,
     )
     return RoutineRow.model_validate(orm), True
+
+
+def pin_of_orm(orm: Routine) -> SandboxPin | None:
+    if (
+        orm.sandbox_agent_id is None
+        or orm.sandbox_agent_version is None
+        or orm.sandbox_environment_id is None
+        or orm.sandbox_environment_updated_at is None
+    ):
+        return None
+    return SandboxPin(
+        agent_id=orm.sandbox_agent_id,
+        agent_version=orm.sandbox_agent_version,
+        environment_id=orm.sandbox_environment_id,
+        environment_updated_at=orm.sandbox_environment_updated_at,
+    )
+
+
+_PIN_CLEARED: Final = {
+    "sandbox_agent_id": None,
+    "sandbox_agent_version": None,
+    "sandbox_environment_id": None,
+    "sandbox_environment_updated_at": None,
+}
+
+
+async def clear_sandbox_drift(
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    pin: SandboxPin,
+) -> bool:
+    """Turn off an opt-in whose agent or environment changed since `pin` was recorded.
+
+    Called when a fire found its session no longer matches the pin. Only the
+    opt-in that recorded `pin` is cleared, so a newer admin opt-in is never
+    undone. The routine's revision (`updated_at`) is left alone so the run
+    that noticed, which went ahead without built-ins, still records its
+    result. Logs a `via="edit"` history row by `SANDBOX_DRIFT_SETTER`.
+    """
+    now = datetime.now(UTC)
+    result = cast(
+        "CursorResult[Any]",
+        await session.execute(
+            update(Routine)
+            .where(
+                Routine.id == routine_id,
+                Routine.tenant_id == tenant_id,
+                Routine.sandbox_tools_enabled.is_(True),
+                Routine.sandbox_agent_id == pin.agent_id,
+                Routine.sandbox_agent_version == pin.agent_version,
+                Routine.sandbox_environment_id == pin.environment_id,
+                Routine.sandbox_environment_updated_at == pin.environment_updated_at,
+            )
+            .values(
+                sandbox_tools_enabled=False,
+                sandbox_tools_set_by=SANDBOX_DRIFT_SETTER,
+                sandbox_tools_set_at=now,
+                **_PIN_CLEARED,
+            )
+            .execution_options(synchronize_session=False)
+        ),
+    )
+    if not result.rowcount:
+        return False
+    session.add(
+        RoutineSandboxHistoryRecord(
+            tenant_id=tenant_id,
+            routine_id=routine_id,
+            before_enabled=True,
+            after_enabled=False,
+            set_by=SANDBOX_DRIFT_SETTER,
+            set_at=now,
+            via="edit",
+        )
+    )
+    await session.flush()
+    log.info(
+        "routine.sandbox_tools_cleared_by_drift",
+        tenant_id=str(tenant_id),
+        routine_id=str(routine_id),
+    )
+    return True
 
 
 SANDBOX_SETTER_ERASED: Final = "erased"

@@ -54,7 +54,7 @@
             "seal_ids": [],
             "thread_id": null
           },
-          "sandbox_tools": false,
+          "sandbox": null,
           "session_factory": {
             "fixture_type": "async_sessionmaker"
           },

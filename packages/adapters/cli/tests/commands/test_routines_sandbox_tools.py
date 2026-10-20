@@ -1,16 +1,34 @@
 """`daimon routines sandbox-tools`: the operator's cutover for a confirmed list of routines."""
 
 import uuid
+from datetime import UTC, datetime
 from io import StringIO
+from unittest.mock import AsyncMock
 
+import daimon.adapters.cli.commands.routines as routines_cli
 import pytest
 from daimon.adapters.cli.commands.routines import run_sandbox_tools
 from daimon.core.errors import UserFacingError
+from daimon.core.routine_sandbox import SandboxPinUnavailable
+from daimon.core.stores.domain import SandboxPin
 from daimon.core.stores.routines import create_routine, get_routine, sandbox_tools_history
 from daimon.testing.factories import make_tenant
 from rich.console import Console
 
 from ..harness import build_cli_runtime
+
+PIN = SandboxPin(
+    agent_id="ag",
+    agent_version=3,
+    environment_id="env_1",
+    environment_updated_at=datetime(2026, 10, 1, tzinfo=UTC),
+)
+
+
+@pytest.fixture(autouse=True)
+def _current_pin(monkeypatch):
+    """The routine's agent and environment, as Managed Agents would report them."""
+    monkeypatch.setattr(routines_cli, "current_pin", AsyncMock(return_value=PIN))
 
 
 async def _routines(db_session_factory, count: int):
@@ -147,3 +165,53 @@ async def test_a_listed_dm_routine_refuses_the_whole_batch(db_session_factory) -
         )
 
     assert await _enabled(db_session_factory, tenant_id, [*rows, dm]) == [False, False]
+
+
+async def test_an_unreadable_agent_or_environment_refuses_the_whole_batch(
+    db_session_factory, monkeypatch
+) -> None:
+    tenant_id, rows = await _routines(db_session_factory, 2)
+    monkeypatch.setattr(
+        routines_cli,
+        "current_pin",
+        AsyncMock(side_effect=[PIN, SandboxPinUnavailable("archived")]),
+    )
+
+    with pytest.raises(UserFacingError, match="Can't read the routine's agent version"):
+        await run_sandbox_tools(
+            rt=build_cli_runtime(db_session_factory),
+            console=Console(file=StringIO()),
+            tenant_id=tenant_id,
+            routine_ids=[row.id for row in rows],
+            enabled=True,
+            dry_run=False,
+        )
+
+    assert await _enabled(db_session_factory, tenant_id, rows) == [False, False]
+
+
+async def test_re_running_after_an_agent_edit_re_approves_it(
+    db_session_factory, monkeypatch
+) -> None:
+    tenant_id, rows = await _routines(db_session_factory, 1)
+    rt = build_cli_runtime(db_session_factory)
+    for version in (3, 4):
+        monkeypatch.setattr(
+            routines_cli,
+            "current_pin",
+            AsyncMock(return_value=SandboxPin("ag", version, "env_1", PIN.environment_updated_at)),
+        )
+        output = StringIO()
+        await run_sandbox_tools(
+            rt=rt,
+            console=Console(file=output, width=200),
+            tenant_id=tenant_id,
+            routine_ids=[rows[0].id],
+            enabled=True,
+            dry_run=False,
+        )
+
+    assert "re-approve current agent and environment" in output.getvalue()
+    async with db_session_factory() as session:
+        row = await get_routine(session, rows[0].id, tenant_id=tenant_id)
+    assert row is not None and row.sandbox_agent_version == 4

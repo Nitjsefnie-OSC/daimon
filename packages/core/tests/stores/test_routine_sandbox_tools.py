@@ -3,14 +3,17 @@
 from __future__ import annotations
 
 import uuid
+from dataclasses import replace
+from datetime import UTC, datetime
 from typing import Any
 
 import pytest
 import pytest_asyncio
 from daimon.core.authz import Subject
 from daimon.core.errors import StoreError
-from daimon.core.stores.domain import RoutineRow
+from daimon.core.stores.domain import RoutineRow, SandboxPin
 from daimon.core.stores.routines import (
+    clear_sandbox_drift,
     create_routine,
     get_routine,
     pause_routine,
@@ -23,6 +26,12 @@ from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession
 
 ADMIN = Subject(is_admin=True, platform_user_id="admin-1")
+PIN = SandboxPin(
+    agent_id="agent_a",
+    agent_version=3,
+    environment_id="env_1",
+    environment_updated_at=datetime(2026, 10, 1, tzinfo=UTC),
+)
 
 
 @pytest_asyncio.fixture
@@ -64,6 +73,7 @@ async def test_admin_opt_in_is_recorded_with_who_when_and_routine(
         row.id,
         tenant_id=tenant_id,
         enabled=True,
+        pin=PIN,
         set_by="account-admin",
         actor=ADMIN,
         via="mcp",
@@ -101,6 +111,7 @@ async def test_only_a_human_admin_may_opt_in(
             row.id,
             tenant_id=tenant_id,
             enabled=True,
+            pin=PIN,
             set_by="owner-account",
             actor=actor,
             via="mcp",
@@ -121,12 +132,20 @@ async def test_setting_the_same_value_again_writes_nothing(
             row.id,
             tenant_id=tenant_id,
             enabled=True,
+            pin=PIN,
             set_by="a",
             actor=ADMIN,
             via="cli",
         )
     result = await set_sandbox_tools(
-        db_session, row.id, tenant_id=tenant_id, enabled=True, set_by="b", actor=ADMIN, via="cli"
+        db_session,
+        row.id,
+        tenant_id=tenant_id,
+        enabled=True,
+        pin=PIN,
+        set_by="b",
+        actor=ADMIN,
+        via="cli",
     )
 
     assert result is not None and result[1] is False
@@ -141,7 +160,14 @@ async def test_opt_in_changes_only_that_routine(
     other = await _routine(db_session, tenant_id)
 
     await set_sandbox_tools(
-        db_session, chosen.id, tenant_id=tenant_id, enabled=True, set_by="a", actor=ADMIN, via="mcp"
+        db_session,
+        chosen.id,
+        tenant_id=tenant_id,
+        enabled=True,
+        pin=PIN,
+        set_by="a",
+        actor=ADMIN,
+        via="mcp",
     )
 
     after_other = await get_routine(db_session, other.id, tenant_id=tenant_id)
@@ -156,7 +182,14 @@ async def test_another_tenant_cannot_reach_the_routine(
 
     assert (
         await set_sandbox_tools(
-            db_session, row.id, tenant_id=stranger, enabled=True, set_by="a", actor=ADMIN, via="mcp"
+            db_session,
+            row.id,
+            tenant_id=stranger,
+            enabled=True,
+            pin=PIN,
+            set_by="a",
+            actor=ADMIN,
+            via="mcp",
         )
         is None
     )
@@ -165,7 +198,14 @@ async def test_another_tenant_cannot_reach_the_routine(
 async def _opted_in(session: AsyncSession, tenant_id: uuid.UUID) -> RoutineRow:
     row = await _routine(session, tenant_id)
     result = await set_sandbox_tools(
-        session, row.id, tenant_id=tenant_id, enabled=True, set_by="a", actor=ADMIN, via="mcp"
+        session,
+        row.id,
+        tenant_id=tenant_id,
+        enabled=True,
+        pin=PIN,
+        set_by="a",
+        actor=ADMIN,
+        via="mcp",
     )
     assert result is not None
     return result[0]
@@ -242,6 +282,7 @@ async def test_a_dm_routine_cannot_be_opted_in(
             row.id,
             tenant_id=tenant_id,
             enabled=True,
+            pin=PIN,
             set_by="a",
             actor=ADMIN,
             via="cli",
@@ -257,7 +298,14 @@ async def test_converting_to_dm_clears_the_opt_in(
 ) -> None:
     row = await _dm_ready(db_session, tenant_id)
     await set_sandbox_tools(
-        db_session, row.id, tenant_id=tenant_id, enabled=True, set_by="a", actor=ADMIN, via="mcp"
+        db_session,
+        row.id,
+        tenant_id=tenant_id,
+        enabled=True,
+        pin=PIN,
+        set_by="a",
+        actor=ADMIN,
+        via="mcp",
     )
 
     dm = await update_routine(
@@ -289,6 +337,7 @@ async def test_a_flip_takes_effect_from_the_next_run_and_drops_the_in_flight_res
         claimed.id,
         tenant_id=tenant_id,
         enabled=enabled,
+        pin=PIN if enabled else None,
         set_by="a",
         actor=ADMIN,
         via="cli",
@@ -325,6 +374,7 @@ async def test_purging_an_admin_erases_them_as_setter_but_keeps_the_log(
             row.id,
             tenant_id=tenant.id,
             enabled=True,
+            pin=PIN,
             set_by=setter,
             actor=ADMIN,
             via="mcp",
@@ -355,3 +405,105 @@ async def test_purging_an_admin_erases_them_as_setter_but_keeps_the_log(
         kept.id: [("other-admin", "mcp")],
     }
     assert current == {by_mcp.id: "erased", by_panel_edit.id: "erased", kept.id: "other-admin"}
+
+
+async def test_an_opt_in_records_the_agent_version_and_environment_it_covers(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await _opted_in(db_session, tenant_id)
+
+    assert (
+        row.sandbox_agent_id,
+        row.sandbox_agent_version,
+        row.sandbox_environment_id,
+        row.sandbox_environment_updated_at,
+    ) == (PIN.agent_id, PIN.agent_version, PIN.environment_id, PIN.environment_updated_at)
+    [entry] = await sandbox_tools_history(db_session, row.id, tenant_id=tenant_id)
+    assert (entry.agent_id, entry.agent_version, entry.environment_id) == (
+        PIN.agent_id,
+        PIN.agent_version,
+        PIN.environment_id,
+    )
+    assert entry.environment_updated_at == PIN.environment_updated_at
+
+
+async def test_an_opt_in_without_a_readable_agent_and_environment_is_refused(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await _routine(db_session, tenant_id)
+
+    with pytest.raises(StoreError, match="Can't read the routine's agent version"):
+        await set_sandbox_tools(
+            db_session,
+            row.id,
+            tenant_id=tenant_id,
+            enabled=True,
+            set_by="a",
+            actor=ADMIN,
+            via="cli",
+        )
+
+    after = await get_routine(db_session, row.id, tenant_id=tenant_id)
+    assert after is not None and after.sandbox_tools_enabled is False
+
+
+async def test_re_approving_a_new_agent_version_records_it_and_off_forgets_it(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await _opted_in(db_session, tenant_id)
+    newer = replace(PIN, agent_version=4)
+
+    result = await set_sandbox_tools(
+        db_session,
+        row.id,
+        tenant_id=tenant_id,
+        enabled=True,
+        pin=newer,
+        set_by="a",
+        actor=ADMIN,
+        via="cli",
+    )
+    assert result is not None and result[1] is True
+    assert result[0].sandbox_agent_version == 4
+    off = await set_sandbox_tools(
+        db_session, row.id, tenant_id=tenant_id, enabled=False, set_by="a", actor=ADMIN, via="cli"
+    )
+    assert off is not None
+    assert (off[0].sandbox_agent_id, off[0].sandbox_agent_version) == (None, None)
+
+
+async def test_a_fire_that_found_drift_clears_only_the_opt_in_it_ran_under(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await _opted_in(db_session, tenant_id)
+
+    # A stale pin (an admin re-approved meanwhile) clears nothing.
+    assert not await clear_sandbox_drift(
+        db_session, row.id, tenant_id=tenant_id, pin=replace(PIN, agent_version=2)
+    )
+    assert await clear_sandbox_drift(db_session, row.id, tenant_id=tenant_id, pin=PIN)
+
+    after = await get_routine(db_session, row.id, tenant_id=tenant_id)
+    assert after is not None
+    assert after.sandbox_tools_enabled is False
+    assert after.sandbox_tools_set_by == "agent_changed"
+    assert after.sandbox_agent_version is None
+    # The run that noticed keeps its revision, so its result is still recorded.
+    assert after.updated_at == row.updated_at
+    history = await sandbox_tools_history(db_session, row.id, tenant_id=tenant_id)
+    assert (history[-1].via, history[-1].set_by, history[-1].after_enabled) == (
+        "edit",
+        "agent_changed",
+        False,
+    )
+
+
+async def test_an_edit_that_clears_the_opt_in_forgets_its_pin(
+    db_session: AsyncSession, tenant_id: uuid.UUID
+) -> None:
+    row = await _opted_in(db_session, tenant_id)
+
+    updated = await update_routine(db_session, row.id, tenant_id=tenant_id, trigger_message="new")
+
+    assert updated is not None
+    assert (updated.sandbox_agent_id, updated.sandbox_environment_id) == (None, None)

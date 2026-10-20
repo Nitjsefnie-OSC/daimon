@@ -99,6 +99,7 @@ from daimon.core.routine_delivery import (
     render_routine_controls,
 )
 from daimon.core.routine_files import collect_routine_files
+from daimon.core.routine_sandbox import RoutineSandbox, pin_of
 from daimon.core.rule_views import (
     keeps_routine_inside,
     routine_destination_channel,
@@ -139,7 +140,11 @@ from daimon.core.stores.github_issued_tokens import (
     touch_running_mcp_app_session,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.core.stores.routines import record_result, update_routine_agent_id
+from daimon.core.stores.routines import (
+    clear_sandbox_drift,
+    record_result,
+    update_routine_agent_id,
+)
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.security_audit import append_github_token_event
 from daimon.core.stores.tenants import get_tenant
@@ -223,6 +228,29 @@ class _CapsAdapter:
             user_id=user_id,
             now=datetime.now(UTC),
         )
+
+
+def _routine_sandbox(
+    sm: async_sessionmaker[AsyncSession], row: RoutineRow
+) -> RoutineSandbox | None:
+    """The routine's opt-in for this fire, or None when it has none recorded.
+
+    When the run's agent or environment no longer matches what the admin
+    approved, the run goes ahead without built-ins and the opt-in is cleared,
+    so the admin has to approve the new agent or environment.
+    """
+    pin = pin_of(row)
+    if pin is None:
+        return None
+
+    async def on_drift() -> None:
+        try:
+            async with sm() as session, session.begin():
+                await clear_sandbox_drift(session, row.id, tenant_id=row.tenant_id, pin=pin)
+        except Exception:  # the run already went ahead without built-ins
+            log.exception("routine.sandbox_drift_clear_failed", routine_id=str(row.id))
+
+    return RoutineSandbox(pin=pin, on_drift=on_drift)
 
 
 async def _build_fire(
@@ -705,8 +733,9 @@ async def _build_fire(
                 if fire_policy is not None
                 else None
             ),
-            # Built-in sandbox tools only for a routine an admin opted in.
-            sandbox_tools=row.sandbox_tools_enabled,
+            # Built-in sandbox tools only for a routine an admin opted in, and
+            # only while its agent version and environment are the ones approved.
+            sandbox=_routine_sandbox(sm, row),
         )
 
         if row.destination_kind is None:

@@ -3,8 +3,9 @@
 from __future__ import annotations
 
 import uuid
+from datetime import UTC, datetime
 from typing import Any
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import daimon.adapters.mcp.tools.routines as _routines_mod
 import pytest
@@ -12,8 +13,9 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.core.config import McpSettings
 from daimon.core.membership import Membership
+from daimon.core.routine_sandbox import SandboxPinUnavailable
 from daimon.core.scope import DeploymentDefault
-from daimon.core.stores.domain import Role, RoutineRow
+from daimon.core.stores.domain import Role, RoutineRow, SandboxPin
 from daimon.core.stores.routines import create_routine, get_routine, sandbox_tools_history
 from daimon.testing.factories import make_tenant
 from daimon.testing.membership import FixtureMembershipResolver
@@ -25,6 +27,20 @@ _get_impl = _routines_mod._get_routine_impl  # pyright: ignore[reportPrivateUsag
 _list_impl = _routines_mod._list_routines_impl  # pyright: ignore[reportPrivateUsage]
 
 ADMIN = "admin-1"
+PIN = SandboxPin(
+    agent_id="ag",
+    agent_version=3,
+    environment_id="env_1",
+    environment_updated_at=datetime(2026, 10, 1, tzinfo=UTC),
+)
+
+
+@pytest.fixture(autouse=True)
+def _current_pin(monkeypatch: pytest.MonkeyPatch) -> None:
+    """The routine's agent and environment, as Managed Agents would report them."""
+    monkeypatch.setattr(_routines_mod, "current_pin", AsyncMock(return_value=PIN))
+
+
 OWNER = "owner-1"
 
 
@@ -99,6 +115,7 @@ async def test_admin_opts_one_routine_in_and_status_shows_it(
     result = await _set_impl(runtime, admin, routine_id=chosen.id, enabled=True)
 
     assert result.sandbox_tools_enabled is True
+    assert (result.sandbox_agent_version, result.sandbox_environment_id) == (3, "env_1")
     assert result.sandbox_tools_set_by == str(admin.account_id)
     shown = await _get_impl(runtime, admin, routine_id=chosen.id)
     assert shown.sandbox_tools_enabled is True
@@ -112,7 +129,7 @@ async def test_admin_opts_one_routine_in_and_status_shows_it(
     assert switched_off.sandbox_tools_enabled is False
 
 
-PERSON_ONLY = "only be changed by a person"
+PERSON_ONLY = "does not accept an agent"
 ADMIN_ONLY = "owner cannot"
 
 
@@ -176,3 +193,24 @@ async def test_unknown_routine_reads_as_not_found(
         await _set_impl(
             runtime, _auth(tenant_id, ADMIN, is_admin=True), routine_id=uuid.uuid4(), enabled=True
         )
+
+
+async def test_an_unreadable_agent_or_environment_refuses_the_opt_in(
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+    db_session: AsyncSession,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant_id, chosen, _ = await _setup(db_session)
+    runtime = _runtime(committing_sessionmaker, _resolver())
+    monkeypatch.setattr(
+        _routines_mod, "current_pin", AsyncMock(side_effect=SandboxPinUnavailable("gone"))
+    )
+
+    with pytest.raises(ToolError, match="Can't read the routine's agent version"):
+        await _set_impl(
+            runtime, _auth(tenant_id, ADMIN, is_admin=True), routine_id=chosen.id, enabled=True
+        )
+
+    async with committing_sessionmaker() as session:
+        after = await get_routine(session, chosen.id, tenant_id=tenant_id)
+    assert after is not None and after.sandbox_tools_enabled is False

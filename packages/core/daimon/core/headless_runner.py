@@ -75,6 +75,7 @@ from daimon.core.mux_backend import managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, sdk_agent, sdk_environment
 from daimon.core.neutral_resources import WorkerPermissions, resolve_worker_spec
 from daimon.core.pricing import ModelRates, ProviderPrice
+from daimon.core.routine_sandbox import RoutineSandbox, run_matches_pin
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.sessions import create_session
 from daimon.core.stores import access_policy as policy_store
@@ -185,7 +186,7 @@ async def run_turn(
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
-    sandbox_tools: bool = False,
+    sandbox: RoutineSandbox | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -216,7 +217,7 @@ async def run_turn(
             budget_channel_id=budget_channel_id,
             origin_place=origin_place,
             model_override=model_override,
-            sandbox_tools=sandbox_tools,
+            sandbox=sandbox,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -247,7 +248,7 @@ async def run_turn(
                 budget_channel_id=budget_channel_id,
                 origin_place=origin_place,
                 model_override=model_override,
-                sandbox_tools=sandbox_tools,
+                sandbox=sandbox,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -282,7 +283,7 @@ async def run_turn_impl(
     budget_channel_id: str | None = None,
     origin_place: RoutineOrigin | None = None,
     model_override: str | None = None,
-    sandbox_tools: bool = False,
+    sandbox: RoutineSandbox | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -360,9 +361,12 @@ async def run_turn_impl(
 
     Headless turns mount shared memory only, never personal memory.
 
-    ``sandbox_tools`` is the routine's admin opt-in to built-in sandbox tools
-    (`Routine.sandbox_tools_enabled`); without it they are off, as for every
-    other unattended run (`unattended_capabilities.capability_policy`).
+    ``sandbox`` is the routine's admin opt-in to built-in sandbox tools. They
+    are on only when this run's own session uses exactly the agent version
+    and environment revision the opt-in recorded (`routine_sandbox`); on any
+    mismatch the run goes ahead with them off and ``sandbox.on_drift`` is
+    called once. Without it they are off, as for every other unattended run
+    (`unattended_capabilities.capability_policy`).
     """
     turn_scope: Scope | None = None
     if load_turn_settings().path == "mux":
@@ -480,6 +484,21 @@ async def run_turn_impl(
         usage_record: Callable[..., Awaitable[object]] | None = None
         if usage_record_factory is not None:
             usage_record = usage_record_factory(session.id, model_choice_id(session.agent.model))
+
+        sandbox_tools = False
+        if sandbox is not None:
+            sandbox_tools = await run_matches_pin(
+                anthropic, sandbox.pin, session, tenant_id=tenant_id
+            )
+            if not sandbox_tools:
+                log.warning(
+                    "headless.sandbox_pin_mismatch",
+                    session_id=session.id,
+                    agent_id=session.agent.id,
+                    agent_version=session.agent.version,
+                    environment_id=session.environment_id,
+                )
+                await sandbox.on_drift()
 
         billing: BillingPosture
         if usage_record is not None:

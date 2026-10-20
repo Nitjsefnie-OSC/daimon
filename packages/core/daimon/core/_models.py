@@ -531,6 +531,14 @@ class Routine(Base):
     sandbox_tools_set_at: Mapped[datetime | None] = mapped_column(
         DateTime(timezone=True), nullable=True
     )
+    # What the opt-in covers (`routine_sandbox.SandboxPin`): built-ins run only
+    # while a fire's agent version and environment revision still match.
+    sandbox_agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sandbox_agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    sandbox_environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    sandbox_environment_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
@@ -560,6 +568,13 @@ class RoutineSandboxHistoryRecord(Base):
     set_by: Mapped[str] = mapped_column(Text)
     set_at: Mapped[datetime] = mapped_column(DateTime(timezone=True))
     via: Mapped[str] = mapped_column(Text)
+    # The pin an opt-in recorded (`after_enabled`); null otherwise.
+    agent_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    agent_version: Mapped[int | None] = mapped_column(Integer, nullable=True)
+    environment_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    environment_updated_at: Mapped[datetime | None] = mapped_column(
+        DateTime(timezone=True), nullable=True
+    )
 
 
 class ThreadSession(Base):

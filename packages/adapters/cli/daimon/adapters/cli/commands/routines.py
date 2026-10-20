@@ -35,12 +35,19 @@ from daimon.core.membership import MembershipResolver
 from daimon.core.membership_subject import resolve_subject
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import retrieve_agent
+from daimon.core.routine_sandbox import (
+    SandboxPin,
+    SandboxPinUnavailable,
+    current_pin,
+    pin_of,
+)
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.direct_messages import dm_enabled
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.routines import (
     DM_SANDBOX_REFUSAL,
+    PIN_UNAVAILABLE_REFUSAL,
     create_routine,
     get_routine,
     list_routines_missing_agent_name,
@@ -329,13 +336,37 @@ async def run_sandbox_tools(
         ]
         if enabled and dms:
             raise UserFacingError(f"{', '.join(dms)}: {DM_SANDBOX_REFUSAL}")
+        # An opt-in covers the agent version and environment each routine would
+        # run with now; one that can't be read refuses the whole list.
+        pins: dict[uuid.UUID, SandboxPin] = {}
+        if enabled:
+            unreadable: list[str] = []
+            for rid, row in rows.items():
+                assert row is not None
+                try:
+                    pins[rid] = await current_pin(
+                        rt.anthropic, rt.sessionmaker, row, default=rt.deployment_default
+                    )
+                except SandboxPinUnavailable:
+                    unreadable.append(str(rid))
+            if unreadable:
+                raise UserFacingError(f"{', '.join(unreadable)}: {PIN_UNAVAILABLE_REFUSAL}")
         pending = [
             rid
             for rid, row in rows.items()
-            if row is not None and row.sandbox_tools_enabled != enabled
+            if row is not None
+            and (row.sandbox_tools_enabled != enabled or (enabled and pin_of(row) != pins[rid]))
         ]
         for rid in ids:
-            console.print(f"{rid}: {'turn ' + state if rid in pending else 'already ' + state}")
+            row = rows[rid]
+            label = (
+                "already " + state
+                if rid not in pending
+                else "re-approve current agent and environment"
+                if enabled and row is not None and row.sandbox_tools_enabled
+                else "turn " + state
+            )
+            console.print(f"{rid}: {label}")
         if dry_run:
             console.print(f"Dry run: {len(pending)} routine(s) would change; nothing written.")
             return
@@ -352,6 +383,7 @@ async def run_sandbox_tools(
                 # Whoever holds the database credentials is the operator.
                 actor=Subject(is_admin=True),
                 via="cli",
+                pin=pins.get(rid),
             )
     console.print(
         f"Sandbox tools {state} for {len(pending)} routine(s); {len(ids) - len(pending)} unchanged."

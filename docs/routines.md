@@ -685,8 +685,21 @@ turned on for one channel or thread routine at a time, for that routine's own
 scheduled runs only. DM routines cannot be opted in: they run as the owner's
 private DM turn. Owning a routine is not enough to opt it in.
 
-- **Operator CLI** (the path that works on every platform), for one routine or
-  a confirmed list of them:
+An opt-in covers exactly the agent and environment the routine runs with when
+it is made. **Built-ins are enabled for a run only when the run's agent
+version and environment are exactly the ones recorded at opt-in; any mismatch
+or missing record keeps them off.** Opting in records the routine's agent id
+and version and its environment's id and revision (`updated_at`), and an
+opt-in is refused when they can't be read. At each fire the scheduler compares
+the run's own session with that record. After anyone edits the agent (its
+prompt, MCP servers, tools, skills or anything else that makes a new version)
+or the environment, or the routine resolves to a different one, the next run
+goes ahead without built-ins, the mismatch is logged, and the opt-in is
+cleared with an `edit` history row by `agent_changed`. The operator then
+re-approves the routine as it now is by running the command again.
+
+- **Operator CLI**, the supported path, for one routine or a confirmed list of
+  them:
 
   ```bash
   daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID [ROUTINE_ID ...] --dry-run
@@ -694,15 +707,18 @@ private DM turn. Owning a routine is not enough to opt it in.
   daimon routines sandbox-tools --tenant TENANT_UUID ROUTINE_ID --off
   ```
 
-  Every id must name a routine in that tenant, and none may be a DM routine
-  when turning tools on, or nothing changes. A routine already set that way is
-  left alone, so the command can be re-run; `--dry-run` prints what would
-  change and writes nothing.
-- **The `set_routine_sandbox_tools` MCP tool** (`routine_id`, `enabled`)
-  accepts only a current Discord server admin calling with their own token.
-  Their admin rights are re-read from the server on every call. Agent keys,
-  agents acting in a conversation, operator tokens, legacy tokens without a
-  token id, and callers on Slack or Teams are refused; use the CLI there.
+  Every id must name a routine in that tenant, none may be a DM routine when
+  turning tools on, and each routine's agent and environment must be readable,
+  or nothing changes. A routine already set that way, for the same agent
+  version and environment, is left alone, so the command can be re-run; one
+  whose agent or environment changed is re-approved as it now is. `--dry-run`
+  prints what would change and writes nothing.
+- **The `set_routine_sandbox_tools` MCP tool** (`routine_id`, `enabled`) is
+  refused for every caller a deployment issues today; an admin surface for it
+  is pending a decision. It would accept only a person's own token held by a
+  current Discord server admin, re-checked against the server on every call,
+  and it refuses agent keys, agents acting in a conversation, operator
+  tokens, legacy tokens without a token id, and Slack or Teams callers.
 
 Each change sets `sandbox_tools_set_by` (the account or CLI principal) and
 `sandbox_tools_set_at` on the routine and appends a row to

@@ -76,6 +76,7 @@ from daimon.core.permissions import (
     limiting_ids_at,
 )
 from daimon.core.routine_delivery import destination_shape_error
+from daimon.core.routine_sandbox import SandboxPinUnavailable, current_pin
 from daimon.core.routines import routine_for_reader
 from daimon.core.rule_views import routine_destination_channel
 from daimon.core.scope import ScopeContext
@@ -862,14 +863,14 @@ async def _delete_routine_impl(
 
 
 _SANDBOX_PERSON_ONLY = (
-    "A routine's sandbox tools can only be changed by a person: a current Discord "
-    "server admin calling this tool with their own token, or the operator with "
-    "`daimon routines sandbox-tools`. Not by an agent in a conversation. Do not retry."
+    "A routine's sandbox tools are changed by the operator with "
+    "`daimon routines sandbox-tools`; this tool does not accept an agent, an agent "
+    "in a conversation, an operator token or a legacy token. Do not retry."
 )
 _SANDBOX_ADMIN_ONLY = (
-    "Only a current Discord server admin, with their own token, can turn on sandbox "
-    "tools for a routine here; the routine's owner cannot. Elsewhere the operator uses "
-    "`daimon routines sandbox-tools`. Do not retry."
+    "A routine's sandbox tools are changed by the operator with "
+    "`daimon routines sandbox-tools`; this tool accepts only a current Discord "
+    "server admin, and the routine's owner cannot. Do not retry."
 )
 
 
@@ -921,10 +922,21 @@ async def _set_routine_sandbox_tools_impl(
 ) -> RoutineRow:
     actor = await _sandbox_admin(runtime, auth)
     caller = await load_isolation_view(runtime, auth)
-    async with runtime.session_factory.begin() as session:
+    async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
-        if row is None or not _sees_routine(caller, row):
-            raise ToolError("routine not found")
+    if row is None or not _sees_routine(caller, row):
+        raise ToolError("routine not found")
+    # The opt-in covers the agent version and environment the routine would
+    # run with now; the scheduler keeps built-ins off once either changes.
+    pin = None
+    if enabled:
+        try:
+            pin = await current_pin(
+                runtime.client, runtime.session_factory, row, default=runtime.deployment_default
+            )
+        except SandboxPinUnavailable as exc:
+            raise ToolError(routines_store.PIN_UNAVAILABLE_REFUSAL) from exc
+    async with runtime.session_factory.begin() as session:
         try:
             result = await routines_store.set_sandbox_tools(
                 session,
@@ -934,6 +946,7 @@ async def _set_routine_sandbox_tools_impl(
                 set_by=str(auth.account_id),
                 actor=actor,
                 via="mcp",
+                pin=pin,
             )
         except StoreError as exc:
             raise ToolError(str(exc)) from exc
@@ -1092,13 +1105,15 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         """Turn built-in sandbox tools (bash, file reads and edits and the rest) on or off
         for one routine's own scheduled runs. Admin only.
 
-        They are off for every unattended run by default. Only a current Discord server
-        admin may call this, with their own token, and their admin rights are re-read from
-        the server on each call; owning the routine is not enough. Agent keys, agents in a
-        conversation, operator tokens, legacy tokens and other platforms are refused; the
-        operator uses ``daimon routines sandbox-tools`` instead. DM routines cannot be opted
-        in. Each change records who made it and when, and ``get_routine``/``list_routines``
-        show it as ``sandbox_tools_enabled``. It takes effect from the routine's next run.
+        They are off for every unattended run by default. The supported path is the
+        operator's ``daimon routines sandbox-tools``. This tool accepts only a current Discord
+        server admin, re-checked against the server on each call; owning the routine is not
+        enough, and agent keys, agents in a conversation, operator tokens, legacy tokens and
+        other platforms are refused. DM routines cannot be opted in. An opt-in covers exactly
+        the routine's current agent version and environment: once either changes, runs go
+        without built-ins and the opt-in is cleared. Each change records who made it and when,
+        and ``get_routine``/``list_routines`` show it as ``sandbox_tools_enabled``. It takes
+        effect from the routine's next run.
         Setting the value a routine already has changes nothing. Timers, watches, agent
         chat, fleet workers, ``daimon run`` and checkpoints cannot be opted in.
         """

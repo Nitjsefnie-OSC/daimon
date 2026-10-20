@@ -55,7 +55,15 @@ CHAIN = [
     HEAD,
 ]
 # Added by HEAD, so absent from every older revision the chain is checked at.
-SANDBOX_COLUMNS = {"sandbox_tools_enabled", "sandbox_tools_set_by", "sandbox_tools_set_at"}
+SANDBOX_COLUMNS = {
+    "sandbox_tools_enabled",
+    "sandbox_tools_set_by",
+    "sandbox_tools_set_at",
+    "sandbox_agent_id",
+    "sandbox_agent_version",
+    "sandbox_environment_id",
+    "sandbox_environment_updated_at",
+}
 # The preview chain before the ID repair: each legacy revision ran the
 # canonical script under its own ID and parent. The sha256 pins the bytes
 # preview databases ran, so an edit to a deployed canonical script fails here
