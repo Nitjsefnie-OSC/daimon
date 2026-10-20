@@ -113,7 +113,11 @@ async def _history_page(
         scanned = 0
         async for message in channel.history(limit=201):
             scanned += 1
-            if not message.author.bot:
+            if (
+                not message.author.bot
+                and getattr(message, "webhook_id", None) is None
+                and getattr(message, "application_id", None) is None
+            ):
                 page.append(message)
                 if len(page) == limit:
                     break

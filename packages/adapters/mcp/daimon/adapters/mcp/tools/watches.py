@@ -26,6 +26,7 @@ from daimon.adapters.mcp.tools.discord._client import (
 )
 from daimon.adapters.mcp.tools.setup_target import require_turn_origin
 from daimon.adapters.mcp.watch_polling import authorize_poll
+from daimon.core import channel_backend
 from daimon.core.config import DirectMessagePolicy
 from daimon.core.continuity.continuation import ContinuationRequest
 from daimon.core.membership_subject import resolve_subject
@@ -33,6 +34,7 @@ from daimon.core.stores import mux_state, watches
 from daimon.core.stores.domain import ChatPlatform, TurnOriginRow, WatchRow
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.contracts.config import BackendConfig, resolve_default
 from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.contracts.profile import SUPPORTED
 from mux.profiles import get_profile
@@ -133,12 +135,38 @@ async def require_attended_owner(
             account_id=str(auth.account_id),
         )
         async with runtime.session_factory() as db:
-            binding = await mux_state.get_binding(db, slot, read_persisted=True)
-        if (
-            binding is not None
-            and get_profile(binding.profile).support_for("tool_confirmation") not in SUPPORTED
-        ):
-            raise ToolError("Backend cannot prove owner card approval")
+            # Admission prefers the shared slot on ever-shared threads. Check
+            # both slots: neither history may supply an unsupported enrollment.
+            for candidate in (Slot(thread=slot.thread), slot):
+                binding = await mux_state.get_binding(db, candidate, read_persisted=True)
+                if binding is None:
+                    continue
+                if (
+                    binding.thread != candidate.thread
+                    or binding.legacy_account_id != candidate.account_id
+                ):
+                    raise ToolError("Backend binding differs from owner scope")
+                retained, _, _ = await channel_backend.resolve_turn_backend(
+                    db,
+                    slot.thread.channel,
+                    None,
+                    enabled=True,
+                    retained_revision=binding.config_revision,
+                )
+                if binding.config_revision == 0:
+                    resolved = resolve_default(BackendConfig())
+                else:
+                    if (
+                        retained is None
+                        or retained.channel != slot.thread.channel
+                        or retained.local != binding.config_revision
+                    ):
+                        raise ToolError("Backend binding revision differs from admission")
+                    resolved = retained
+                if (resolved.backend, resolved.profile) != (binding.provider, binding.profile):
+                    raise ToolError("Backend binding revision differs from admission")
+                if get_profile(resolved.profile).support_for("tool_confirmation") not in SUPPORTED:
+                    raise ToolError("Backend cannot prove owner card approval")
         gap = await _session_gate.session_card_gap(runtime, auth, origin, tool_name=tool_name)
     except Exception:
         # Unsupported backends and unreadable proofs cannot authorize enrollment.
@@ -230,26 +258,61 @@ async def rotate_watch_impl(
     runtime: McpRuntime, auth: AuthIdentity, *, watch_id: str, origin_context_id: str | None = None
 ) -> WatchSummary:
     try:
+        watch = await enrollment_preflight(
+            runtime, auth, watch_id, origin_context_id, tool_name="rotate_watch_key"
+        )
+        if watch.source != "page_event":
+            raise ValueError("Poll watches have no signing key")
         key_id, key = secrets.token_hex(12), secrets.token_urlsafe(48)
         async with runtime.session_factory.begin() as db:
-            watch = await watches.require_owned_watch(
+            current = await watches.require_owned_watch(
                 db,
                 uuid.UUID(watch_id),
                 tenant_id=auth.tenant_id,
                 account_id=auth.account_id,
                 is_admin=False,
             )
-            await require_attended_owner(
-                runtime, auth, origin_context_id, tool_name="rotate_watch_key"
-            )
-            if watch.source != "page_event":
-                raise ValueError("Poll watches have no signing key")
+            require_unchanged_enrollment(watch, current)
             await watches.rotate_signing_key(
                 db, watch.id, key_id=key_id, key=key, expires_at=watch.expires_at
             )
         return await deliver_rotated_key(runtime, auth, watch, key_id=key_id, key=key)
     except ValueError as exc:
         raise ToolError(str(exc)) from exc
+
+
+async def enrollment_preflight(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    watch_id: str,
+    origin_context_id: str | None,
+    *,
+    tool_name: str,
+) -> WatchRow:
+    """Do provider I/O before acquiring the global firing/control lock."""
+    async with runtime.session_factory() as db:
+        row = await watches.get_watch(db, uuid.UUID(watch_id))
+    if row is None or row.tenant_id != auth.tenant_id or row.owner_account_id != auth.account_id:
+        raise ValueError("Watch not found")
+    await require_attended_owner(runtime, auth, origin_context_id, tool_name=tool_name)
+    await authorize_poll(runtime, row)
+    return row
+
+
+def require_unchanged_enrollment(before: WatchRow, current: WatchRow) -> None:
+    # Poll bookkeeping may advance during I/O; binding, control state and
+    # enrollment parameters must still be exactly those that were authorized.
+    changing = {
+        "baseline",
+        "fire_count",
+        "lease_owner",
+        "lease_expires_at",
+        "next_check_at",
+        "backoff_until",
+        "consecutive_errors",
+    }
+    if before.model_dump(exclude=changing) != current.model_dump(exclude=changing):
+        raise ValueError("Watch changed during approval; retry enrollment")
 
 
 async def deliver_rotated_key(
@@ -277,6 +340,11 @@ async def manage_watch_impl(
 ) -> WatchSummary:
     try:
         admin = await fresh_admin(runtime, auth)
+        approved = None
+        if action == "resume":
+            approved = await enrollment_preflight(
+                runtime, auth, watch_id, origin_context_id, tool_name="resume_watch"
+            )
         async with runtime.session_factory.begin() as db:
             row = await watches.require_owned_watch(
                 db,
@@ -289,11 +357,9 @@ async def manage_watch_impl(
             if action == "pause":
                 await watches.pause_watch(db, row.id)
             elif action == "resume":
-                await require_attended_owner(
-                    runtime, auth, origin_context_id, tool_name="resume_watch"
-                )
+                assert approved is not None
+                require_unchanged_enrollment(approved, row)
                 await watches.resume_watch(db, row.id, now=now)
-                await authorize_poll(runtime, row)
             elif action == "delete":
                 await watches.delete_watch(db, row.id, now=now)
                 return summary(row.model_copy(update={"status": "deleted"}))

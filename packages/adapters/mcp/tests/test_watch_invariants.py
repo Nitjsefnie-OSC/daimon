@@ -44,7 +44,7 @@ def history(messages):
     return SimpleNamespace(history=iterate)
 
 
-def message(identity, *, bot=False):
+def message(identity, *, bot=False, webhook_id=None, application_id=None):
     return SimpleNamespace(
         id=identity,
         author=SimpleNamespace(id=123, name="author", bot=bot),
@@ -53,6 +53,8 @@ def message(identity, *, bot=False):
         created_at=datetime.now(UTC),
         attachments=[],
         type=discord.MessageType.default,
+        webhook_id=webhook_id,
+        application_id=application_id,
     )
 
 
@@ -78,6 +80,19 @@ async def test_i1_scan_overflow_refuses_a_partial_human_window():
             before=None,
             poll_humans_only=True,
         )
+
+
+@pytest.mark.parametrize("automated", [{"webhook_id": 777}, {"application_id": 888}])
+async def test_automated_posts_without_bot_flag_do_not_displace_humans(automated):
+    human = message(1)
+    before = await _history_page(history([human]), limit=1, before=None, poll_humans_only=True)
+    after = await _history_page(
+        history([message(i, **automated) for i in range(2, 102)] + [human]),
+        limit=1,
+        before=None,
+        poll_humans_only=True,
+    )
+    assert before == after
 
 
 @pytest.mark.fresh_schema
@@ -325,3 +340,91 @@ async def test_i1_resolved_place_identity_refuses_a_raw_distinct_source(runtime_
         source.assert_not_called()
     async with runtime.session_factory() as db:
         assert await watches.list_evidence(db, watch.id) == []
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize("unsupported_slot", ["shared", "private"])
+async def test_enrollment_resolves_both_slot_revisions_like_admission(
+    attended_owner, monkeypatch, unsupported_slot
+):
+    from daimon.adapters.mcp.tools.watches import require_attended_owner
+    from mux.contracts.config import BackendConfig, resolve_default
+
+    runtime, _, auth, origin = attended_owner
+    default = resolve_default(BackendConfig())
+    proof = AsyncMock(return_value=None)
+    monkeypatch.setattr(_session_gate, "session_card_gap", proof)
+    resolved_revisions = []
+
+    async def binding(db, slot, **kwargs):
+        bad = (slot.account_id is None) == (unsupported_slot == "shared")
+        return SimpleNamespace(
+            thread=slot.thread,
+            legacy_account_id=slot.account_id,
+            config_revision=1 if bad else 0,
+            provider="gemini" if bad else default.backend,
+            profile="gemini.inline_reuse" if bad else default.profile,
+        )
+
+    async def resolve(db, channel, agent, *, enabled, retained_revision):
+        assert enabled and agent is None
+        resolved_revisions.append(retained_revision)
+        return (
+            SimpleNamespace(
+                channel=channel, local=1, backend="gemini", profile="gemini.inline_reuse"
+            ),
+            False,
+            "channel",
+        )
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools.watches.mux_state.get_binding", binding)
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools.watches.channel_backend.resolve_turn_backend", resolve
+    )
+    with pytest.raises(ToolError, match="card approval"):
+        await require_attended_owner(runtime, auth, origin, tool_name="create_watch")
+    assert 1 in resolved_revisions
+    proof.assert_not_called()
+
+
+@pytest.mark.fresh_schema
+@pytest.mark.parametrize("action", ["resume", "rotate"])
+async def test_enrollment_access_checks_precede_global_lock_and_recheck_state(
+    attended_owner, monkeypatch, action
+):
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    runtime, watch, auth, origin = attended_owner
+    await manage_watch_impl(runtime, auth, watch_id=str(watch.id), action="pause")
+    if action == "rotate":
+        async with runtime.session_factory.begin() as db:
+            await db.execute(
+                text("UPDATE watches SET source='page_event' WHERE id=:id"), {"id": watch.id}
+            )
+    independent = async_sessionmaker(runtime.session_factory.kw["bind"].engine)
+    observed = []
+
+    async def check_access(*args):
+        async with independent.begin() as other:
+            free = await other.scalar(text("SELECT pg_try_advisory_xact_lock(813749201)"))
+            observed.append(free)
+        # A stop/control action while network I/O was outstanding invalidates
+        # this approval, even when the final status is still paused.
+        async with runtime.session_factory.begin() as db:
+            await watches.pause_watch(db, watch.id)
+
+    monkeypatch.setattr("daimon.adapters.mcp.tools.watches.authorize_poll", check_access)
+    delivery = AsyncMock()
+    monkeypatch.setattr("daimon.adapters.mcp.tools.watches.private_key_delivery", delivery)
+    with pytest.raises(ToolError, match="changed during approval"):
+        if action == "resume":
+            await manage_watch_impl(
+                runtime, auth, watch_id=str(watch.id), action="resume", origin_context_id=origin
+            )
+        else:
+            await rotate_watch_impl(runtime, auth, watch_id=str(watch.id), origin_context_id=origin)
+    assert observed == [True]
+    delivery.assert_not_called()
+    async with runtime.session_factory() as db:
+        assert (await watches.get_watch(db, watch.id)).status == "paused"
+        assert await db.scalar(text("SELECT count(*) FROM watch_capabilities")) == 0
