@@ -20,7 +20,7 @@ from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing import ma_environment, ma_session
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
-from daimon.testing.watch_fixtures import install_poll_ports, install_watch_ports
+from daimon.testing.watch_fixtures import install_poll_ports
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -33,7 +33,7 @@ async def enrolled_page_watch(db_session_factory, monkeypatch, *, source="page_e
     )
     now = datetime.now(UTC)
     async with db_session_factory.begin() as db:
-        await (install_poll_ports(db) if source == "poll" else install_watch_ports(db))
+        await install_poll_ports(db)
         await watches.set_watch_control(db, scope="global", enabled=True)
         tenant = await make_tenant(db, platform="discord", workspace_id="710000099")
         principal = await get_or_create_platform_principal(
