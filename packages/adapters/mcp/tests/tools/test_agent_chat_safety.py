@@ -22,6 +22,7 @@ import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools import _agent_chat_safety as safety
+from daimon.adapters.mcp.tools import agent_chat
 from daimon.adapters.mcp.tools import sessions as general_sessions
 from daimon.adapters.mcp.tools._session_access import hub_session_access
 from daimon.adapters.mcp.tools.agent_chat import (
@@ -826,8 +827,9 @@ async def test_continue_with_a_message_refuses_when_the_resumed_turn_runs_on(
     runtime = _runtime(fake, factory, _ENABLED)
     # The resumed turn never ends here.
     monkeypatch.setattr(FakeSession, "_pending", lambda self: {"evt_still"})
+    monkeypatch.setattr(agent_chat, "_RESUME_WAIT_S", 0.1)
     with pytest.raises(ToolError, match="not sent"):
-        await _continue_turn_impl(runtime, _auth(), _SESSION, "next", resume_wait_s=0.1)
+        await _continue_turn_impl(runtime, _auth(), _SESSION, "next")
     assert "message" not in fake.kinds()
 
 
