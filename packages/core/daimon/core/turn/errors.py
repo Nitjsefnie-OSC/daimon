@@ -34,13 +34,16 @@ class AdmissionDenied(DaimonError):
     """Raised by `admit()` when the invoker policy, channel protection, balance, cap
     or channel budget gate rejects the turn.
 
-    Carries only a closed reason literal — no rendered user-facing text.
-    Denial copy stays adapter-side.
+    Carries a closed reason literal — no rendered user-facing text; denial
+    copy stays adapter-side. `detail` optionally names what was refused (the
+    unattended capability gate gives the provider field's path, such as
+    `session.budget`) and is appended to the message for logs and run records.
     """
 
-    def __init__(self, *, reason: AdmissionDenialReason) -> None:
-        super().__init__(reason)
+    def __init__(self, *, reason: AdmissionDenialReason, detail: str | None = None) -> None:
+        super().__init__(reason if detail is None else f"{reason}: {detail}")
         self.reason: AdmissionDenialReason = reason
+        self.detail: str | None = detail
 
 
 class DmSourceSealedError(DaimonError):

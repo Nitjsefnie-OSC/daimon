@@ -510,8 +510,11 @@ async def test_a_failed_gate_sends_nothing_and_starts_no_worker(
 
 
 @pytest.mark.parametrize(
-    "unconstrainable",
-    [with_coordinator, with_hidden_capability],
+    ("unconstrainable", "named"),
+    [
+        (with_coordinator, "delegation to other agents (session.agent.multiagent)"),
+        (with_hidden_capability, "unreviewed value at session.agent.model.effort"),
+    ],
     ids=["coordinator", "hidden_field"],
 )
 @pytest.mark.parametrize(
@@ -520,16 +523,53 @@ async def test_a_failed_gate_sends_nothing_and_starts_no_worker(
     ids=["start_turn", "continue_turn", "ask_existing", "hub_continue_turn"],
 )
 async def test_a_coordinator_session_is_refused_before_anything_is_sent(
-    entry: Entry, unconstrainable: Callable[[Any], Any], factory: async_sessionmaker[AsyncSession]
+    entry: Entry,
+    unconstrainable: Callable[[Any], Any],
+    named: str,
+    factory: async_sessionmaker[AsyncSession],
 ) -> None:
-    """Its roster's children could write unasked, and MA cannot drop it mid-session."""
+    """Its roster's children could write unasked, and MA cannot drop it mid-session.
+
+    The refusal names what it refused; only a coordinator is called delegation.
+    """
     fake = FakeSession()
     fake.unconstrainable = unconstrainable
     runtime = _runtime(fake, factory, _ENABLED)
-    with pytest.raises(ToolError, match="cannot run here"):
+    with pytest.raises(ToolError, match="cannot run here") as refused:
         await entry(runtime, fake)
+    assert str(refused.value) == (
+        f"This agent cannot run here: an agent chat nobody watches cannot limit {named}."
+    )
     assert fake.calls == []
     assert _no_workers()
+
+
+def _with_preview_fields(session: Any) -> Any:
+    """`session` as Preview returns it (2026-10-20): fields the pinned SDK does not parse."""
+    dumped = session.model_dump(mode="json")
+    dumped["budget"] = None
+    dumped["agent"]["execution_identity"] = {"type": "service_account"}
+    return type(session).model_validate(dumped)
+
+
+@pytest.mark.parametrize(
+    "entry",
+    [_entry_start, _entry_continue, _entry_ask_existing, _entry_hub_continue],
+    ids=["start_turn", "continue_turn", "ask_existing", "hub_continue_turn"],
+)
+async def test_a_session_with_preview_provider_fields_runs(
+    entry: Entry, factory: async_sessionmaker[AsyncSession]
+) -> None:
+    """Every agent chat turn was refused on Preview over `budget` and `execution_identity`."""
+    fake = FakeSession(tool="get_issue")
+    fake.unconstrainable = _with_preview_fields
+    runtime = _runtime(fake, factory, _ENABLED)
+    await entry(runtime, fake)
+    await _settle(runtime)
+
+    kinds = fake.kinds()
+    assert kinds.index("update") < kinds.index("message")
+    assert [c["result"] for c in fake.confirmations] == ["allow"]
 
 
 @pytest.mark.parametrize(

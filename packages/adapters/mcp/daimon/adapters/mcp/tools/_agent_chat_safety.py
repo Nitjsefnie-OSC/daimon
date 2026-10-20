@@ -117,7 +117,8 @@ async def gate(runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgen
     """Rewrite `session`'s tool config from the current policy before a send.
 
     A session the unattended gate cannot constrain (a coordinator agent, or
-    a capability this release does not know) is refused as a tool error.
+    a capability this release does not know) is refused as a tool error
+    naming what was refused.
     """
     try:
         await gate_session_snapshot(
@@ -131,10 +132,13 @@ async def gate(runtime: McpRuntime, auth: AuthIdentity, session: BetaManagedAgen
             entry_point="mcp_chat",
         )
     except AdmissionDenied as err:
-        raise ToolError(
-            "This agent cannot run here: it has capabilities (such as delegating to "
-            "other agents) that an agent chat nobody watches cannot limit."
-        ) from err
+        raise ToolError(unconstrained_message(err)) from err
+
+
+def unconstrained_message(err: AdmissionDenied) -> str:
+    """The refusal for a session the unattended gate cannot constrain, naming what."""
+    what = err.detail or "capabilities this release has not reviewed"
+    return f"This agent cannot run here: an agent chat nobody watches cannot limit {what}."
 
 
 def rules_channel(auth: AuthIdentity, session: BetaManagedAgentsSession) -> str | None:
