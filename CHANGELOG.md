@@ -9,13 +9,46 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Anthropic backend configurations that require `steer`, `native_event_replay`, `environments_fork` or `native_schedules` are now refused at admission; the Anthropic driver never supported them. The self-hosted profile now declares native settlement over model-request usage (`native_requests`) instead of native totals; recorded self-hosted usage and billing are unchanged. A new CI test checks every capability a profile declares against its driver. The Anthropic driver now implements `reconcile`, projecting the session status and recent events into a snapshot; Daimon does not call it yet.
 
+- Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
+
+- Isolate self-hosted checkpoint exporters from tool cleanup, retry interrupted exports, and keep sessions sealed when process termination cannot be verified.
+
+- Keep self-hosted sessions sealed until failed tool cleanup succeeds, and retry journal reopen failures on subsequent requests.
+
+- Reconcile remotely committed harness usage after a failed local commit, preserve
+  measured WAL outcomes during updates, and reject cursors without sequence headroom.
+
 - Attach shared selfhosted skill pins only when an authorized editor adds them; unrelated saves cannot authorize another editor’s unowned pins.
+- Add an opt-in Codex app-server harness loop with Azure Responses metering and
+  the existing tool approval and isolation boundary; keep the Agents SDK default.
+  Bound denied calls and model continuations, disable bundled controller skills,
+  and enforce one usage outcome before turn end. OpenAI live probes require
+  explicit probe mode and refuse Azure configuration. Preserve marker-prefixed
+  user input, preserve checkpoint compaction prompts and summaries, and honor
+  cancellation or deadlines during controller shutdown. Meter internal compaction
+  separately from the ordinary continuation budget.
+- Preserve remotely committed usage during harness restart, retain measured responses
+  across reservation outages, recover failed warning delivery, and replay completed
+  turns with their original terminal event.
+
+- Use `gpt-6-luna` for selfhosted test and smoke fixtures, refuse other live-test deployments, and reserve `gpt-6.1-sol` for production defaults.
+
+- Reserve harness event sequences in remote blocks so stale cursors cannot reuse events after sandbox loss; retain measured usage through WAL acknowledgement failures.
+
+- Persist each self-hosted session's highest client cursor and apply it to every event append, so stale polls cannot disable sequence fencing after restore.
+
+- Count recovered self-hosted usage once, replay answers below receipt cursors after a restart, and flush pending checkpoints before closing shared credentials.
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.
 
 - Honor saved allow rules during selfhosted tool inspection, and retain uploader provenance in the internal reader for already-retained skill versions attached to shared agents. This does not provide selfhosted uploads.
 - Reject self-hosted session-pool credentials without pool routing and empty
   transport session IDs; document matching Entra authentication in the harness.
+- Preserve measured self-hosted usage recovered from remote write-ahead records and
+  deliver delayed checkpoint warnings on the next turn.
+
+- Self-hosted harnesses durably record paid-work claims before model calls,
+  preserve cleanup recovery cursors, and display checkpoint durability notices.
 
 - Route selfhosted direct requests to Azure Container Apps session pools with a stable per-session identifier and the fixed Entra pool audience.
 ### Fixed
@@ -30,6 +63,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Self-hosted channels skip Anthropic thread naming, organic participation, cosmetic responder lookups and session-file sweeps. Their MCP credentials block Anthropic-specific operations while keeping message and file posting available under agent rules. Timers and task continuations resolve local targets, and unavailable follow-up runtimes or handovers refuse without provider calls. Unsupported scheduled routines stop before provider resolution.
 - Keep stricter tool approval permissions when replay repeats a call, and recover partially completed selfhosted approval batches after a host restart.
+- Restore selfhosted workspace, history and usage inventory from Azure Blob checkpoints after an ephemeral sandbox is destroyed; checkpoint terminal turns and cancellation before acknowledging completion.
+- Restore selfhosted workspace, history and usage inventory from Azure Blob checkpoints after an ephemeral sandbox is destroyed; checkpoint terminal turns and cancellation, report degraded durability without blocking sessions, and recover above the client cursor after sandbox loss.
 
 - Join harness tool workers before completing cancellation or accepting another turn, and retain reasoning alongside tool calls during context-overflow recovery.
 
