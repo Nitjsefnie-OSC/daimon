@@ -166,7 +166,9 @@ callback, settlement and normalized export. See `../testing/docs/conformance/REA
 host's existing SDK client; an explicitly injected Events implementation still
 wins. The host bridge runs when `DAIMON_TURN__PATH=mux`, the default (unset
 or empty also selects `mux`); `legacy` selects the previous direct-SDK path.
-No client retry settings are added by the bridge.
+Prepared mux turns send each provider mutation once (`max_retries=0`) within a
+timeout, so a claimed native mutation is never duplicated; the legacy path keeps
+the SDK's configured retries.
 Sessions lifecycle remains a separately injected port.
 
 The Events port checks host resource authorization before sending, listing,
