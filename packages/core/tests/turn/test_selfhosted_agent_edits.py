@@ -428,3 +428,14 @@ async def test_an_update_whose_lease_expired_does_not_publish(thread, monkeypatc
     await thread.store.renew_lease(
         rival["lease"], now=rival["lease"].expires_at - timedelta(seconds=1), ttl=UPDATE_LEASE_TTL
     )
+
+
+async def test_the_driver_rebuilt_after_an_edit_keeps_the_persisted_cursor(thread):
+    await thread.turn()
+    thread.edit_agent(system="edited instructions")
+    prepared = await thread.prepare()
+    # The rebuilt driver reads the persisted high-water mark, so its next request
+    # fences at the thread's cursor instead of restarting from zero.
+    assert prepared.backend.events.high_water is not None
+    await thread.run(prepared)
+    assert thread.bodies()[1]["instructions"] == "edited instructions"
