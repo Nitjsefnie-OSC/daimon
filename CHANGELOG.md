@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Anthropic backend configurations that require `steer`, `native_event_replay`, `environments_fork` or `native_schedules` are now refused at admission; the Anthropic driver never supported them. The self-hosted profile now declares native settlement over model-request usage (`native_requests`) instead of native totals; recorded self-hosted usage and billing are unchanged. A new CI test checks every capability a profile declares against its driver.
+- Anthropic backend configurations that require `steer`, `native_event_replay`, `environments_fork` or `native_schedules` are now refused at admission; the Anthropic driver never supported them. The self-hosted profile now declares native settlement over model-request usage (`native_requests`) instead of native totals; recorded self-hosted usage and billing are unchanged. A new CI test checks every capability a profile declares against its driver. The Anthropic driver now implements `reconcile`, projecting the session status and recent events into a snapshot; Daimon does not call it yet.
 
 - Attach shared selfhosted skill pins only when an authorized editor adds them; unrelated saves cannot authorize another editor’s unowned pins.
 

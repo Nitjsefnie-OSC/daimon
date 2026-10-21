@@ -26,6 +26,7 @@ from mux.contracts.resources import ProjectionSnapshot
 from mux.drivers.anthropic.actions import translate_inputs
 from mux.drivers.anthropic.cancel import observed_stop
 from mux.drivers.anthropic.normalize import EventNormalizer, object_json
+from mux.drivers.anthropic.reconcile import reconcile_session
 from mux.drivers.anthropic.resources._authorization import (
     ResourceAuthorization,
     authorize,
@@ -249,7 +250,7 @@ class AnthropicEvents:
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         self._check(scope, session)
-        raise UnsupportedCapability(("reconcile",), "anthropic.managed_agents")
+        return await reconcile_session(self._client, session)
 
     async def cancel(
         self, scope: Scope, session: ResourceRef, *, turn_id: str, key: str

@@ -53,7 +53,7 @@ PENDING: Mapping[str, PendingReason] = MappingProxyType(
         ),
         "C05": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
-            "Events.reconcile is unavailable; host paged journal/gap/root projection adapter absent",
+            "driver reconcile projects native state, but the host paged journal/gap/root projection adapter is absent",
         ),
         "C06": PendingReason(
             PendingKind.ADAPTER_DEPENDENCY,
