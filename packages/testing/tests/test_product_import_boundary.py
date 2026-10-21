@@ -74,7 +74,9 @@ def _check(root: Path) -> subprocess.CompletedProcess[str]:
         "mux.state.usage_ledger",
     ],
 )
-@pytest.mark.parametrize("target", ["mux.testing.conformance.budget", "daimon.testing.conformance.budget"])
+@pytest.mark.parametrize(
+    "target", ["mux.testing.conformance.budget", "daimon.testing.conformance.budget"]
+)
 @pytest.mark.parametrize("indirect", [False, True])
 def test_real_import_linter_refuses_reintroduced_harness_import(
     tmp_path: Path, source: str, target: str, indirect: bool
