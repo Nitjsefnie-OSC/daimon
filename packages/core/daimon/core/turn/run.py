@@ -1406,7 +1406,12 @@ async def run_prepared_turn_impl(
     # stream generation was attached, or before a ceiling cut the turn off.
     active_admission = active_admission_cell[0]
     revision = active_admission.backend_revision
-    if revision is None or revision.profile == "anthropic.managed_agents":
+    persistence = active_persistence_cell[0]
+    # A turn that queued for the lease and ended (Stop, ceiling) without taking
+    # it is not the session's holder: usage the holder's stream has yet to
+    # record is the holder's, and recording it here would charge this user.
+    queued_only = persistence is not None and not persistence.lease_acquired
+    if not queued_only and (revision is None or revision.profile == "anthropic.managed_agents"):
         await _settle(
             deps,
             session_id=active_session_id_cell[0],

@@ -2737,6 +2737,15 @@ async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
     )
 
 
+@dataclasses.dataclass
+class _QueuedTurn:
+    outcome: RunOutcome
+    rows: list[ThreadSession]
+    requests: list[str]
+    usage_after_waiter: list[Any]
+    usage_after_holder: list[Any]
+
+
 async def _run_turn_behind_a_busy_lease(
     db_session: AsyncSession,
     db_schema: str,
@@ -2746,9 +2755,17 @@ async def _run_turn_behind_a_busy_lease(
     cancel: asyncio.Event,
     deadline: datetime | None,
     stop_after_s: float | None = None,
-) -> tuple[RunOutcome, list[ThreadSession], list[str]]:
-    """Run one mux turn whose thread lease is always held by another turn."""
+) -> _QueuedTurn:
+    """Run user B's mux turn on a thread whose lease user A's turn always holds.
+
+    The session has one model call upstream that A's stream has not recorded.
+    After B's turn ends, A settles the session as its holder would; the usage
+    rows are read after each step."""
+    from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
+        BetaManagedAgentsSpanModelRequestEndEvent,
+    )
     from daimon.core.stores.mux_state import PostgresStateStore
+    from daimon.core.turn.prepare import admitted_session_scope as scope_for
     from mux.state.lease import LeaseBusy
 
     tenant = await make_tenant(db_session)
@@ -2762,7 +2779,19 @@ async def _run_turn_behind_a_busy_lease(
         ma_session_id="sess_live",
     )
     await db_session.commit()
-    router = _router(session_bodies=[], dead_session_ids=set())
+    unrecorded = BetaManagedAgentsSpanModelRequestEndEvent(
+        id="evt_span_of_a",
+        is_error=False,
+        model_request_start_id="start_1",
+        model_usage=ma_model_usage(input_tokens=10, output_tokens=20),
+        processed_at=datetime.now(UTC),
+        type="span.model_request_end",
+    )
+    router = _router(
+        session_bodies=[],
+        dead_session_ids=set(),
+        events_by_session={"sess_live": [unrecorded.model_dump(mode="json")]},
+    )
     requests: list[str] = []
 
     async def busy(self: object, slot: Any, **_: object) -> NoReturn:
@@ -2793,11 +2822,12 @@ async def _run_turn_behind_a_busy_lease(
         )
         agent = ma_agent(id="ag_1", tenant_id=tenant.id)
         env = ma_environment(id="env_1", tenant_id=tenant.id)
+        admission = _admission(account_id=account.id, agent=agent, env=env)
         prepared = _prepared_turn(
             deps=deps,
-            admission=_admission(account_id=account.id, agent=agent, env=env),
+            admission=admission,
             tenant_id=tenant.id,
-            external_user_id="user-1",
+            external_user_id="user-b",
             ma_session_id="sess_live",
             mapping_id=row.id,
             session_account_id=account.id,
@@ -2810,7 +2840,7 @@ async def _run_turn_behind_a_busy_lease(
             tenant_id=tenant.id,
             platform="discord",
             thread_id=thread_id,
-            external_user_id="user-1",
+            external_user_id="user-b",
             user_message="hello",
             lifecycle=RecordingLifecycle(),
             cancel=cancel,
@@ -2825,9 +2855,32 @@ async def _run_turn_behind_a_busy_lease(
                 .scalars()
                 .all()
             )
+            usage_after_waiter = list(await usage_events.list_for_tenant(s, tenant_id=tenant.id))
+        requests_by_waiter = list(requests)
+        await run_module._settle(  # pyright: ignore[reportPrivateUsage]
+            deps,
+            session_id="sess_live",
+            scope=scope_for(admission, tenant_id=tenant.id, session_id="sess_live"),
+            record=bind_recorder(
+                deps,
+                tenant_id=tenant.id,
+                external_user_id="user-a",
+                ma_session_id="sess_live",
+                model_id=agent.model.id,
+            ),
+        )
+        async with sessionmaker() as s:
+            usage_after_holder = list(await usage_events.list_for_tenant(s, tenant_id=tenant.id))
     finally:
         await engine.dispose()
-    return outcome, rows, requests
+    return _QueuedTurn(outcome, rows, requests_by_waiter, usage_after_waiter, usage_after_holder)
+
+
+def _assert_usage_belongs_to_the_holder(queued: _QueuedTurn) -> None:
+    assert queued.usage_after_waiter == [], "a turn that never held the lease records no usage"
+    assert [(u.managed_session_id, u.platform_user_id) for u in queued.usage_after_holder] == [
+        ("sess_live", "user-a")
+    ], "the holder's own settlement records the call once, under the holder"
 
 
 async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring_the_session(
@@ -2839,7 +2892,7 @@ async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring
     most until its own ceiling, then ends through the ordinary ceiling outcome. It
     never ran on the mapping, whose holder is using it, so the mapping stays live."""
     started = asyncio.get_running_loop().time()
-    outcome, rows, requests = await _run_turn_behind_a_busy_lease(
+    queued = await _run_turn_behind_a_busy_lease(
         db_session,
         db_schema,
         monkeypatch,
@@ -2848,12 +2901,17 @@ async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring
         deadline=datetime.now(UTC) + timedelta(seconds=0.5),
     )
     waited = asyncio.get_running_loop().time() - started
+    outcome, rows, requests = queued.outcome, queued.rows, queued.requests
 
     assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
     assert outcome.state.termination == TerminationReason.CEILING
     assert 0.4 <= waited < 5, "the wait is bounded by the turn's ceiling"
     assert [(r.ma_session_id, r.status) for r in rows] == [("sess_live", "live")]
     assert not [r for r in requests if r.startswith("POST")], "a queued turn sends nothing"
+    assert not [r for r in requests if r == "GET /v1/sessions/sess_live/events"], (
+        "a queued turn does not read the session's events to settle them"
+    )
+    _assert_usage_belongs_to_the_holder(queued)
 
 
 async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
@@ -2861,7 +2919,7 @@ async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
     db_schema: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    outcome, rows, requests = await _run_turn_behind_a_busy_lease(
+    queued = await _run_turn_behind_a_busy_lease(
         db_session,
         db_schema,
         monkeypatch,
@@ -2871,10 +2929,13 @@ async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
         stop_after_s=0.2,
     )
 
+    outcome, rows, requests = queued.outcome, queued.rows, queued.requests
     assert outcome.state.termination == TerminationReason.INTERRUPTED
     assert not outcome.recovered
     assert [(r.ma_session_id, r.status) for r in rows] == [("sess_live", "live")]
     assert not [r for r in requests if r.startswith("POST")]
+    assert not [r for r in requests if r == "GET /v1/sessions/sess_live/events"]
+    _assert_usage_belongs_to_the_holder(queued)
 
 
 # Both ceiling tests below aim the real turn ceiling at `link_replacement`, which they
