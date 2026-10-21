@@ -1236,7 +1236,10 @@ replacement key is used.
 Profile accounting modes select the existing settlement protocol. Request-span
 profiles retain their legacy arithmetic, projections and idempotency keys.
 Native totals require complete attributed usage, verified prices and measured
-infrastructure before settlement; unknown charges stay pending. Native root
+infrastructure before settlement; unknown charges stay pending. Native requests
+settle the same way over incremental model-request observations, which is what
+the self-hosted driver emits; native totals and native root totals settle turn
+observations. Each mode names its grain (`AccountingMode.usage_grain`). Native root
 totals additionally permit the existing independently proven disjoint child
 inventory; this does not enable delegation configuration. Usage DTOs carry only
 a provider, so accounting reads the registered profiles' shared mode and refuses
