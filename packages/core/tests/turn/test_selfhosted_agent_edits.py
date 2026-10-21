@@ -8,6 +8,7 @@ from __future__ import annotations
 
 import asyncio
 from dataclasses import dataclass, replace
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 
 import pytest
@@ -20,8 +21,8 @@ from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, ThreadRef
 from mux.contracts.resources import MCPConnection, SessionSpec, SkillRef, ToolSpec
 from mux.drivers.selfhosted import wire
-from mux.errors import ContinuityLost
-from mux.state.lease import Slot
+from mux.errors import ContinuityLost, UnsupportedCapability
+from mux.state.lease import LeaseBusy, Slot
 
 from .conformance_support import ACCOUNT, TENANT
 from .test_selfhosted_host import BASE, PROFILE, REVISION, Wire, composed  # noqa: F401
@@ -332,4 +333,47 @@ async def test_archived_agent_is_still_refused(thread):
     with pytest.raises(ContinuityLost) as lost:
         await thread.prepare()
     assert "agent_archived" in str(lost.value)
+    assert thread.wire.posts == 1
+
+
+async def test_a_rival_turn_cannot_take_the_lease_while_the_binding_advances(thread, monkeypatch):
+    await thread.turn()
+    before = await thread.binding()
+    slot = Slot(thread=before.thread, account_id=before.legacy_account_id)
+    rival = {}
+    put_binding = thread.store.put_binding
+
+    async def rival_then_put(binding, *, expected_generation):
+        # The moment after the busy check: a rival turn tries to start.
+        try:
+            lease = await thread.store.acquire_lease(
+                slot,
+                holder="rival",
+                turn_id="rival",
+                now=datetime.now(UTC),
+                ttl=timedelta(seconds=30),
+            )
+        except LeaseBusy:
+            rival["blocked"] = True
+        else:
+            rival["blocked"] = False
+            await thread.store.release_lease(lease)
+        return await put_binding(binding, expected_generation=expected_generation)
+
+    monkeypatch.setattr(thread.store, "put_binding", rival_then_put)
+    thread.edit_agent(system="edited instructions")
+    await thread.prepare()
+    assert rival == {"blocked": True}
+    assert (await thread.binding()).generation == before.generation + 1
+    # The update released its hold: the next turn runs normally on the new config.
+    await thread.run(await thread.prepare())
+    assert thread.bodies()[1]["instructions"] == "edited instructions"
+
+
+async def test_an_agent_archived_between_preparation_and_send_does_not_run(thread):
+    await thread.turn()
+    prepared = await thread.prepare()
+    thread.agents.value = thread.agents.value.model_copy(update={"lifecycle": "archived"})
+    with pytest.raises((ContinuityLost, UnsupportedCapability)):
+        await thread.run(prepared)
     assert thread.wire.posts == 1

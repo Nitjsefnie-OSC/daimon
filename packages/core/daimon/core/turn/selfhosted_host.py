@@ -2,7 +2,8 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
@@ -167,8 +168,12 @@ class _PinnedAgents:
         self._agents, self._agent = agents, agent
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
-        if ref != self._agent.ref:
-            return await self._agents.retrieve(scope, ref)
+        live = await self._agents.retrieve(scope, ref)
+        if ref != self._agent.ref or live.lifecycle != "active":
+            # An agent archived after preparation must not execute: hand the
+            # driver the live record so it refuses exactly as it would unpinned.
+            # A merely edited agent keeps serving the snapshot (next turn applies it).
+            return live
         return self._agent
 
     def __getattr__(self, name: str) -> object:
@@ -192,20 +197,29 @@ async def _pin_planned_agent(
     return replace(runtime, agents=_PinnedAgents(runtime.agents, agent))
 
 
-async def _slot_is_leased(store: StateStore, slot: Slot, now: datetime) -> bool:
-    """True while a turn holds the thread's lease (the durable in-flight marker)."""
+@contextlib.asynccontextmanager
+async def _hold_slot(store: StateStore, slot: Slot, now: datetime) -> AsyncIterator[None]:
+    """Hold the thread's lease while its binding is advanced.
+
+    A turn holds this lease while it runs, so failing to take it means a turn is
+    in flight. Holding it until the new generation is published keeps a rival
+    turn from starting beneath the update: it cannot acquire the lease meanwhile,
+    and one that acquires after sees the new generation in its binding check.
+    """
     try:
         lease = await store.acquire_lease(
             slot,
-            holder="selfhosted-update-probe",
-            turn_id="probe",
+            holder="selfhosted-update",
+            turn_id="update:" + slot.model_dump_json(),
             now=now,
-            ttl=timedelta(seconds=5),
+            ttl=timedelta(seconds=30),
         )
-    except LeaseBusy:
-        return True
-    await store.release_lease(lease)
-    return False
+    except LeaseBusy as error:
+        raise _busy(now, "session_active") from error
+    try:
+        yield
+    finally:
+        await store.release_lease(lease)
 
 
 def _config_changed(
@@ -240,28 +254,34 @@ async def _advance_binding(
     the edit. Written through the store's generation compare-and-swap.
     """
     now = request.now()
-    if await _slot_is_leased(store, slot, now) or session.state != "idle":
-        raise _busy(now, "session_active")
-    ref = session.ref
-    plan = await backend.sessions.plan_update(request.scope, ref, spec)
-    if plan.action == "refuse":
-        raise ContinuityLost(binding.id, plan.unmet)
-    key = "selfhosted:update:" + str(uuid5(NAMESPACE_URL, binding.id + digest))
-    await backend.sessions.apply_update(
-        request.scope, plan, expected=plan.expected_revision, key=key
-    )
-    advanced = (await backend.sessions.retrieve(request.scope, ref)).binding
-    successor = advanced.model_copy(
-        update={
-            "generation": binding.generation + 1,
-            "config_revision": spec.config_revision,
-            "native_refs": {**advanced.native_refs, "model": runtime.model, "plan_digest": digest},
-        }
-    )
-    try:
-        return await store.put_binding(successor, expected_generation=binding.generation)
-    except BindingConflict as error:
-        raise _busy(now, "binding_changed") from error
+    async with _hold_slot(store, slot, now):
+        ref = session.ref
+        # Read the state again under the lease: a turn may have started since `session`.
+        if (await backend.sessions.retrieve(request.scope, ref)).state != "idle":
+            raise _busy(now, "session_active")
+        plan = await backend.sessions.plan_update(request.scope, ref, spec)
+        if plan.action == "refuse":
+            raise ContinuityLost(binding.id, plan.unmet)
+        key = "selfhosted:update:" + str(uuid5(NAMESPACE_URL, binding.id + digest))
+        await backend.sessions.apply_update(
+            request.scope, plan, expected=plan.expected_revision, key=key
+        )
+        advanced = (await backend.sessions.retrieve(request.scope, ref)).binding
+        successor = advanced.model_copy(
+            update={
+                "generation": binding.generation + 1,
+                "config_revision": spec.config_revision,
+                "native_refs": {
+                    **advanced.native_refs,
+                    "model": runtime.model,
+                    "plan_digest": digest,
+                },
+            }
+        )
+        try:
+            return await store.put_binding(successor, expected_generation=binding.generation)
+        except BindingConflict as error:
+            raise _busy(now, "binding_changed") from error
 
 
 async def prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTurn:
