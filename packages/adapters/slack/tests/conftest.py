@@ -3,11 +3,15 @@
 from __future__ import annotations
 
 import dataclasses
+import functools
 import re
-from collections.abc import Iterator
+from collections.abc import Awaitable, Callable, Iterator
+from typing import Any
 
 import pytest
+from aioresponses import CallbackResult
 from aioresponses import aioresponses as AioResponsesMock
+from daimon.adapters.slack.app import SlackApp
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
@@ -127,18 +131,52 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
     # non-admin member so tests that don't override get the fail-closed baseline.
     mock.get(  # pyright: ignore[reportUnknownMemberType]
         _USERS_INFO_PATTERN,
+        callback=_default_users_info,
+        repeat=True,
+    )
+
+
+# The workspace hosting the app in the turn under test. The default users.info
+# payload names it as the user's own workspace, so a turn's requester is a
+# verified member unless a test overrides the payload; it is set by
+# ``_track_host_team`` around each turn body.
+_current_host_team_id = "T_TEST"
+
+
+def _default_users_info(_url: object, **_kwargs: object) -> CallbackResult:
+    return CallbackResult(
         payload={
             "ok": True,
             "user": {
                 "id": "U_TEST",
                 "name": "tester",
+                "team_id": _current_host_team_id,
                 "is_admin": False,
                 "is_owner": False,
                 "is_primary_owner": False,
             },
-        },
-        repeat=True,
+        }
     )
+
+
+def _tracking_host_team(
+    method: Callable[..., Awaitable[None]],
+) -> Callable[..., Awaitable[None]]:
+    """Wrap a turn entry point so its ``team_id`` is the host in the users.info stub."""
+
+    @functools.wraps(method)
+    async def wrapper(*args: Any, **kwargs: Any) -> None:
+        global _current_host_team_id
+        _current_host_team_id = kwargs["team_id"]
+        return await method(*args, **kwargs)
+
+    return wrapper
+
+
+@pytest.fixture(autouse=True)
+def _track_host_team(monkeypatch: pytest.MonkeyPatch) -> None:
+    for name in ("_run_thread_turn_observed_guarded", "_run_continuation_turn_observed"):
+        monkeypatch.setattr(SlackApp, name, _tracking_host_team(getattr(SlackApp, name)))
 
 
 @pytest.fixture

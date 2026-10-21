@@ -35,6 +35,7 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import SlackApp
+from daimon.adapters.slack.errors import NON_MEMBER_NOTICE
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.continuity.messages import render_unexpected_loss
@@ -1298,7 +1299,7 @@ async def test_initial_card_post_failure_keeps_prepared_intent(
         patch(
             "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=SlackRequester(is_admin=False, display_name=None),
+            return_value=_host_requester(team_id),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         pytest.raises(SlackApiError),
@@ -1347,7 +1348,7 @@ async def test_initial_card_timestamp_write_failure_prevents_turn_and_preserves_
         patch(
             "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=SlackRequester(is_admin=False, display_name=None),
+            return_value=_host_requester(team_id),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         patch(
@@ -1428,7 +1429,7 @@ async def test_terminal_render_followed_by_raise_still_retires_card_intent(
         patch(
             "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=SlackRequester(is_admin=False, display_name=None),
+            return_value=_host_requester(team_id),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
         patch(
@@ -1505,7 +1506,7 @@ async def test_cancelled_initial_card_post_keeps_prepared_intent(
         patch(
             "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=SlackRequester(is_admin=False, display_name=None),
+            return_value=_host_requester(team_id),
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock, return_value=admission),
     ):
@@ -3228,6 +3229,11 @@ async def test_orchestrate_eyes_reaction_transport_error_does_not_leak_thread_sl
             payload={"ok": True, "ts": "1000000000.000001", "channel": "C_TEST"},
             repeat=True,
         )
+    fake_slack_web_client.mock.get(  # pyright: ignore[reportUnknownMemberType]
+        re.compile(r"https://slack\.com/api/users\.info.*"),
+        payload={"ok": True, "user": {"id": "U_TEST", "name": "tester", "team_id": team_id}},
+        repeat=True,
+    )
     fake_slack_web_client.mock.get(  # pyright: ignore[reportUnknownMemberType]
         re.compile(r"https://slack\.com/api/conversations\.replies.*"),
         payload={"ok": True, "messages": [], "has_more": False},
@@ -5816,6 +5822,76 @@ async def test_handle_app_mention_slack_connect_external_when_in_thread_rejects_
     )
 
 
+@pytest.mark.parametrize(
+    "user",
+    [
+        pytest.param({"team_id": "T_OTHER_WORKSPACE", "is_admin": True}, id="external-admin"),
+        pytest.param(
+            {"team_id": "T_OTHER_WORKSPACE", "is_primary_owner": True}, id="external-owner"
+        ),
+        pytest.param({"is_admin": True}, id="no-team-id"),
+        pytest.param({"team_id": "T_MENTION_NONMEMBER", "is_stranger": True}, id="stranger"),
+    ],
+)
+async def test_mention_without_team_fields_from_a_non_member_is_refused_before_admission(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    user: dict[str, Any],
+) -> None:
+    """The event carries no ``user_team`` field, so the cheap gate lets it through;
+    ``users.info`` then shows the sender is not a verified member of this workspace.
+    They get the Connect refusal in their thread and nothing is admitted or stored.
+    """
+    from yarl import URL
+
+    team_id = "T_MENTION_NONMEMBER"
+    parent_ts = "9200000001.000001"
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
+    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
+    _override_users_info(
+        fake_slack_web_client.mock,
+        payload={"ok": True, "user": {"id": "U_EXTERNAL", "name": "visitor", **user}},
+    )
+    app, _ = make_orchestrate_app(db_session_factory)
+    event: dict[str, Any] = {
+        "type": "app_mention",
+        "ts": "9200000001.000002",
+        "event_ts": "9200000001.000002",
+        "thread_ts": parent_ts,
+        "channel": "C_TEST",
+        "user": "U_EXTERNAL",
+        "text": "<@U_BOT> hello",
+    }
+
+    with patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock) as admit:
+        await app._run_thread_turn(  # pyright: ignore[reportPrivateUsage]
+            event,
+            channel="C_TEST",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant_id,
+            thread_id=parent_ts,
+            team_id=team_id,
+        )
+
+    admit.assert_not_awaited()
+    ephemerals = [
+        req
+        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
+        if url == URL("https://slack.com/api/chat.postEphemeral")
+        for req in reqs
+    ]
+    assert len(ephemerals) == 1, "the sender must get exactly one refusal"
+    body = ephemerals[0].kwargs["json"]
+    assert body["user"] == "U_EXTERNAL"
+    assert body["thread_ts"] == parent_ts
+    assert body["text"] == NON_MEMBER_NOTICE
+    assert not any(
+        url == URL("https://slack.com/api/chat.postMessage")
+        for (_, url) in fake_slack_web_client.mock.requests
+    ), "no turn card or reply may be posted"
+
+
 async def test_orchestrate_tenant_cap_when_in_thread_sheds_in_thread(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
@@ -6072,6 +6148,17 @@ def _override_users_info(mock: Any, *, payload: dict[str, Any]) -> None:
     )
 
 
+def _host_requester(team_id: str) -> SlackRequester:
+    """A verified member of the host workspace ``team_id``."""
+    return SlackRequester(
+        is_admin=False,
+        display_name=None,
+        team_id=team_id,
+        is_stranger=False,
+        host_team_id=team_id,
+    )
+
+
 class TestPerTurnRoleUpsert:
     """Slack's per-turn account.role upsert from a live users.info admin lookup.
 
@@ -6112,6 +6199,7 @@ class TestPerTurnRoleUpsert:
                 "user": {
                     "id": "U_ROLE_ADMIN",
                     "name": "admin_user",
+                    "team_id": team_id,
                     "is_admin": True,
                     "is_owner": False,
                     "is_primary_owner": False,
@@ -6394,6 +6482,7 @@ class TestPerTurnRoleUpsert:
                 "user": {
                     "id": "U_ROLE_ADMISSION_DENIED",
                     "name": "member",
+                    "team_id": team_id,
                     "is_admin": False,
                     "is_owner": False,
                     "is_primary_owner": False,
