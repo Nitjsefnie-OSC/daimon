@@ -789,3 +789,67 @@ async def test_runtime_mapping_cardinality_is_lazy_and_keeps_injected_profiles(
             assert lookup[injected] is runtime
         assert lookup.resolved is (runtime if selected and injected == PROFILE else None)
     assert not transport.requests
+
+
+@pytest.mark.parametrize("host_notice", [False, True])
+async def test_selfhosted_factory_injects_persisted_session_cursor(monkeypatch, host_notice):
+    from mux.contracts.events import Event, NativeProvenance
+    from mux.contracts.ports import Agents, Environments
+    from mux.contracts.resources import ProjectionSnapshot
+    from mux.drivers.selfhosted.transport import DirectTransport
+
+    ref = SESSION.model_copy(update={"provider": "selfhosted"})
+    binding = ProviderBinding(
+        id="selfhosted-owner",
+        thread=ThreadRef(channel=REVISION.channel, thread_id="thread"),
+        provider="selfhosted",
+        profile="selfhosted.loop",
+        native_refs={"session": ref.id},
+        generation=1,
+        config_revision=REVISION.local,
+        legacy_account_id=SCOPE.account_id,
+    )
+    store = MemoryStateStore()
+    store.data.projections[ref.id] = ProjectionSnapshot(
+        session=ref,
+        cursor="host-notice" if host_notice else "13",
+        state="idle",
+        taken_at=NOW,
+    )
+    if host_notice:
+        store.data.events[ref.id] = [
+            Event(
+                id="persisted-usage",
+                session_id=ref.id,
+                sequence=0,
+                type="native.selfhosted.usage",
+                payload={},
+                observed_at=NOW,
+                authority="record",
+                native=NativeProvenance(
+                    provider="selfhosted", api_revision="daimon-harness/0", cursor="13"
+                ),
+            )
+        ]
+    from types import SimpleNamespace
+
+    from daimon.core.turn.selfhosted_host import driver
+
+    async with httpx.AsyncClient() as http:
+        runtime = SimpleNamespace(
+            transport_factory=lambda revision, scope: DirectTransport(
+                http, base_url="https://harness.example", token="offline"
+            ),
+            account_scope_id=ref.account_scope_id,
+            agents=cast(Agents, object()),
+            environments=cast(Environments, object()),
+            authorization=lambda scope, target: True,
+            model="gpt-6-luna",
+            max_tool_calls=100,
+            deadline_s=300,
+            tools_resolver=None,
+        )
+        backend = driver(runtime, REVISION, SCOPE, binding, store=store.restart())
+        assert await backend.events.cursor(ref) == 13
+        with pytest.raises(ScopeViolation):
+            await backend.events.cursor(ref.model_copy(update={"id": "foreign"}))

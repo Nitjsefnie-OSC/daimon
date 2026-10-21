@@ -1296,3 +1296,42 @@ qualified server/tool identity.
 The dynamic-session pool audience requires `session_pool=true`; transport
 requests require a nonempty session ID. The pool container must independently
 validate Entra tokens for that audience and allowlist the invoking host principal.
+
+
+Selfhosted C3 transports send the nonsecret `session_id` query parameter on every
+request, including actions/cancel and event polling, so an empty sandbox can
+restore and verify session/turn ownership before handling it. Every C3 request
+also carries `after_seq`, seeded through the injected host-persisted session
+high-water and combined with observed events and explicit stream cursors. A fresh
+driver therefore retains continuity after a host restart. After sandbox
+loss, `history_gap` normalizes to an authoritative `session.history_gap`; recovery
+continues above the client cursor and reconciles interrupted-turn usage. Restores
+announce abandoned remote sequence reservations even when the checkpoint covers
+the client cursor. `checkpoint_warning` maps to a non-terminal native notice.
+
+Event replay may include `replay_after_seq` to read an older range while
+`after_seq` still carries the highest durable client cursor for restore fencing.
+This lets a resumed invocation replay its saved baseline without reusing event
+sequences after sandbox loss.
+
+Self-hosted transport calls require an explicit `after_seq` high-water. Both
+direct and invocation transports retain it with session context and optional
+`replay_after_seq`; cleanup calls must supply the persisted cursor too.
+
+Checkpoint warnings queued after a reader closes attach to the next new turn,
+so the host can show the non-terminal notice within that turn. Recovered remote
+usage keeps its original request identity and measured token counts.
+
+Identical recovered usage (same request identity, model and token counts) is an
+idempotent replay; conflicting counts still fail with `duplicate_usage`. When
+core raises the restore fence above the driver's cursor, it retains the original
+replay range so an accounting receipt cannot hide an answer or terminal event.
+
+The harness records a durable maximum of authenticated `after_seq` cursors for
+the session. This ratchet governs every append, including after an earlier poll
+has already restored the sandbox; any sequence jump emits a covering history
+gap. Lower cursors cannot lower it, and `replay_after_seq` remains read-only.
+
+Selfhosted production profile defaults to `gpt-6.1-sol`. All harness tests,
+interop and live test deployments use `gpt-6-luna`; production defaults are
+asserted as strings only and are never sent to a model in tests.
