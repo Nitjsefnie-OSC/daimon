@@ -96,6 +96,19 @@ class Wire:
         return httpx.Response(202, json={"accepted": True, "turn_id": body["turn_id"]})
 
 
+def append_message_deltas(wire, count):
+    template = wire.events[0]
+    for _ in range(count):
+        wire.events.append(
+            {
+                **template,
+                "seq": len(wire.events) + 1,
+                "type": "agent_message_delta",
+                "data": {"message_id": "long-message", "text": "x"},
+            }
+        )
+
+
 class Resources:
     def __init__(self, value):
         self.value = value
@@ -449,7 +462,12 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "stored_deny"),
         (False, False, "proxy_default"),
         (False, False, "proxy_safety"),
+        (False, False, "inspection_allow_chat"),
+        (False, False, "inspection_allow_unattended"),
+        (False, False, "inspection_auto_chat"),
+        (False, False, "inspection_auto_unattended"),
         (False, False, "long_history"),
+        (False, False, "retained_skills"),
     ],
 )
 async def test_production_shell_admits_before_http_records_and_revokes(
@@ -479,7 +497,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     from daimon.core.turn.runtimes import build_channel_runtime, ensure_channel_runtime
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant_config
     from mux.contracts.extensions import ExtensionConfig
-    from mux.contracts.ids import ThreadRef
+    from mux.contracts.ids import SkillRef, ThreadRef
     from mux.contracts.resources import MCPConnection, ToolSpec
     from mux.state.lease import Slot
     from pydantic import SecretStr
@@ -504,14 +522,68 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             ),
         )
         await mux_state.put_config_revision(db, REVISION)
+    attachment_scope = SCOPE
+    if scenario == "retained_skills":
+        from daimon.core.skills.ingest import bundle_from_files
+        from daimon.core.stores.channel_skills import add_channel_skill
+        from daimon.core.stores.neutral_catalog import PostgresNeutralCatalog
+
+        catalog = PostgresNeutralCatalog(
+            request.deps.sessionmaker, provider="selfhosted", account_scope_id=SCOPE.tenant_id
+        )
+        async with request.deps.sessionmaker() as db, db.begin():
+            uploader = await make_account(db, tenant=tenant)
+        attachment_scope = SCOPE.model_copy(
+            update={"account_id": str(uploader.id), "principal_id": "uploader"}
+        )
+        for name, owner in (
+            ("retained", attachment_scope),
+            ("channel-upload", attachment_scope),
+        ):
+            for version in ("v1", "v2"):
+                bundle = bundle_from_files(
+                    {
+                        "SKILL.md": (
+                            f"---\nname: {name}\ndescription: Retained context.\n---\n{version}"
+                        ).encode(),
+                        "asset.bin": version.encode(),
+                    }
+                )
+                await catalog.put_skill(
+                    owner,
+                    skill_id=name,
+                    version=version,
+                    agent_name="test",
+                    display_title=name,
+                    bundle=bundle,
+                )
+        async with request.deps.sessionmaker() as db, db.begin():
+            await add_channel_skill(
+                db,
+                tenant_id=TENANT,
+                platform=request.platform,
+                channel_id=REVISION.channel.channel_id,
+                skill_id="channel-upload",
+                version="v1",
+                name="channel-upload",
+                owner_agent_name="test",
+                actor_account_id=uploader.id,
+            )
     agent = await SelfHostedAgents(request.deps.sessionmaker).create(
-        SCOPE,
+        attachment_scope,
         AgentSpec(
             name="test",
             model=ModelRef(provider="selfhosted", id="gpt-5"),
+            skills=(SkillRef(id="retained", version="v1"),)
+            if scenario == "retained_skills"
+            else None,
             tools=(
                 ToolSpec(name="write", kind="builtin", permission="ask"),
-                ToolSpec(name="reports", kind="mcp_toolset", permission="ask"),
+                ToolSpec(
+                    name="reports",
+                    kind="mcp_toolset",
+                    permission="auto" if scenario.startswith("inspection") else "ask",
+                ),
             ),
             mcp_servers=(
                 MCPConnection(
@@ -698,7 +770,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         "mcp_ask_accept",
         "stored_deny",
         "proxy_safety",
-    )
+    ) or scenario.startswith("inspection")
     if approval_case and scenario != "ask_disabled":
         from daimon.core.tool_safety import ToolSafetyPolicy
 
@@ -708,7 +780,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 request.deps, tool_safety=ToolSafetyPolicy(enabled=True, agent_rules=True)
             ),
         )
-    if scenario == "stored_deny":
+    if scenario == "stored_deny" or scenario.startswith("inspection_allow"):
         from daimon.core.authz import Subject
         from daimon.core.stores.agent_tool_rules import set_rule
 
@@ -720,7 +792,8 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 agent_name="test",
                 tool_key="reports/get_report",
                 server_url="https://reports.example/mcp",
-                rule="deny",
+                rule="deny" if scenario == "stored_deny" else "allow",
+                scope="chat_and_routines",
                 set_by="admin",
                 actor=Subject(is_admin=True),
             )
@@ -789,6 +862,11 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             )
             assert token.encode() not in call.content
             assert body["model"] == "gpt-5"
+            if scenario == "retained_skills":
+                skills = {skill["name"]: skill for skill in body["skills"]}
+                assert set(skills) == {"retained", "channel-upload"}
+                for skill in skills.values():
+                    assert skill["files"]["asset.bin"] == "v1"
             assert {
                 key: value
                 for key, value in body["tool_policy"].items()
@@ -815,7 +893,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
             body = json.loads(call.content)
             tool = (
                 "reports/get_report"
-                if scenario == "stored_deny"
+                if scenario == "stored_deny" or scenario.startswith("inspection")
                 else "reports/summarize"
                 if scenario == "mcp_ask_accept"
                 else "daimon-mcp/call_tool"
@@ -835,6 +913,23 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                         session_id=body["session_id"],
                         turn_id=body["turn_id"],
                         at=datetime.now(UTC).isoformat(),
+                        type="tool_use",
+                        data=dict(
+                            call_id="call-approval",
+                            name=tool,
+                            executor="mcp" if "/" in tool else "agent",
+                            input={"name": "get_current_time", "arguments": {}}
+                            if scenario.startswith("proxy")
+                            else {"path": "result.txt"},
+                        ),
+                    )
+                )
+                wire.events.append(
+                    dict(
+                        seq=4,
+                        session_id=body["session_id"],
+                        turn_id=body["turn_id"],
+                        at=datetime.now(UTC).isoformat(),
                         type="requires_action",
                         data=dict(
                             action_id="approval",
@@ -847,7 +942,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                     )
                 )
                 for event in deferred:
-                    event["seq"] += 1
+                    event["seq"] += 2
         if late and method == "POST" and call.url.path == "/v0/turns":
             deferred.extend(wire.events[1:])
             measured = deferred[0]
@@ -948,6 +1043,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         render_interval_s=0.01,
         operation_key="production-shell",
         confirm_write=confirm,
+        attended=not scenario.endswith("unattended"),
         # Leave room for durable admission before testing a missing terminal event.
         deadline=datetime.now(UTC) + timedelta(seconds=5) if late else None,
     )
@@ -959,7 +1055,11 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 decision="deny" if scenario in ("ask_deny", "stored_deny") else "allow",
             )
         ]
-        assert len(cards) == (0 if scenario in ("stored_deny", "proxy_safety") else 1)
+        assert len(cards) == (
+            0
+            if scenario in ("stored_deny", "proxy_safety") or scenario.startswith("inspection")
+            else 1
+        )
         assert bool(executions) == (scenario not in ("ask_deny", "stored_deny"))
     if scenario == "proxy_default":
         assert executions == ["neutral"] and cards == [] and actions == []
@@ -1218,7 +1318,11 @@ async def test_batched_host_approvals_submit_independent_idempotent_actions(comp
         root_turn_id=wire.events[0]["turn_id"],
     )
     confirmations = [
-        dict(type="user.tool_confirmation", tool_use_id="selfhosted:tool:" + action, result="allow")
+        dict(
+            type="user.tool_confirmation",
+            tool_use_id="selfhosted:tool:call-" + action,
+            result="allow",
+        )
         for action in ("one", "two")
     ]
     from mux.errors import ProviderError
@@ -1233,15 +1337,33 @@ async def test_batched_host_approvals_submit_independent_idempotent_actions(comp
     with pytest.raises(ProviderError):
         await stale.send(confirmations[:1])
     assert actions == []
-    await io.send(confirmations)
-    await io.send(confirmations)
+    await io.send(confirmations[:1])
+    restarted = await prepare_selfhosted(request)
+    assert restarted.backend is not prepared.backend
+    assert restarted.session_ref == prepared.session_ref
+    pending = await restarted.backend.events.reconcile(SCOPE, restarted.session_ref)
+    assert [action.id for action in pending.required_actions] == ["two"]
+    recovered = SelfHostedTurnIO(
+        restarted.backend,
+        SCOPE,
+        restarted.session_ref,
+        persistence=Persistence(),
+        root_turn_id=wire.events[0]["turn_id"],
+    )
+    await recovered.send(confirmations)
+    await recovered.send(confirmations)
+    settled = await restarted.backend.events.reconcile(SCOPE, restarted.session_ref)
+    assert settled.required_actions == ()
     assert actions == [
         dict(action_id="one", decision="allow"),
         dict(action_id="two", decision="allow"),
     ]
 
 
-async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(composed, monkeypatch):
+@pytest.mark.parametrize("delta_count", [0, 5100])
+async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(
+    composed, monkeypatch, delta_count
+):
     from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
@@ -1256,6 +1378,7 @@ async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(comp
     )
     root = wire.events[0]["turn_id"]
     wire.events.pop()
+    append_message_deltas(wire, delta_count)
     cancellations, recorded, released = [], [], []
     original = wire.handle
 
@@ -1303,7 +1426,172 @@ async def test_interrupt_journals_canonical_stop_before_releasing_occupancy(comp
         persistence=Persistence(),
         root_turn_id=root,
     )
-    stopped = await io.interrupt(timeout_s=2)
+    stopped = await io.interrupt(timeout_s=10)
     assert stopped.stopped and stopped.outcome == "interrupted"
     assert len(cancellations) == 1
     assert released == [(stopped.receipt_operation_id, prepared.session_ref)]
+
+
+async def test_replay_pages_past_five_thousand_records_in_one_turn(composed, monkeypatch):
+    from daimon.core.turn.reducers import apply
+    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from daimon.core.turn.state import TextBlock, TurnState
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+
+    request, wire, _, _ = composed
+    prepared = await prepare_selfhosted(request)
+    receipt = await prepared.backend.events.send(
+        SCOPE,
+        prepared.session_ref,
+        (UserMessage(content=(TextPart(text="question"),)),),
+        key="long-replay",
+    )
+    message, ended = wire.events[-2:]
+    wire.events[:] = wire.events[:2]
+    append_message_deltas(wire, 5100)
+    wire.events.extend(
+        [
+            {**message, "seq": len(wire.events) + 1},
+            {**ended, "seq": len(wire.events) + 2},
+        ]
+    )
+    cursors, recorded = [], []
+    original = prepared.backend.events.list
+
+    async def list_events(scope, session, *, page):
+        if page.order == "asc":
+            cursors.append(int(page.cursor or "0"))
+        return await original(scope, session, page=page)
+
+    monkeypatch.setattr(prepared.backend.events, "list", list_events)
+
+    class Persistence:
+        async def record(self, session, event, *, source_key=None):
+            recorded.append(event.sequence)
+
+    async def baseline(session, roots, after):
+        return (), True, 0
+
+    io = SelfHostedTurnIO(
+        prepared.backend,
+        SCOPE,
+        prepared.session_ref,
+        persistence=Persistence(),
+        root_turn_id=receipt.turn_id,
+        baseline_loader=baseline,
+    )
+    replayed = await io.replay(timeout_s=10)
+    state = TurnState()
+    for display in replayed:
+        state = apply(state, display)
+    assert [block.text for block in state.content if isinstance(block, TextBlock)] == ["answer 1"]
+    assert state.stop_reason is not None and state.stop_reason.type == "end_turn"
+    assert cursors == list(range(0, 5101, 100))
+    assert recorded == list(range(1, len(wire.events) + 1))
+
+    async def stalled_page(scope, session, *, page):
+        result = await original(scope, session, page=page)
+        return result.model_copy(update={"next_cursor": page.cursor})
+
+    from mux.errors import ProviderError
+
+    monkeypatch.setattr(prepared.backend.events, "list", stalled_page)
+    with pytest.raises(ProviderError) as caught:
+        await io.replay(timeout_s=10)
+    assert caught.value.native_code == "host_history_cursor"
+
+
+@pytest.mark.parametrize("explicit", [None, False, True])
+@pytest.mark.parametrize("approval_first", [False, True])
+async def test_live_and_replayed_approval_permissions_match(composed, explicit, approval_first):
+    from daimon.core.tool_safety import ToolSafetyPolicy, decide_tool_call
+    from daimon.core.turn.approvals import tool_calls_for
+    from daimon.core.turn.reducers import apply
+    from daimon.core.turn.selfhosted_io import SelfHostedTurnIO
+    from daimon.core.turn.state import ToolUseBlock, TurnState
+    from mux.contracts.actions import UserMessage
+    from mux.contracts.events import TextPart
+    from mux.contracts.ids import PageRequest
+
+    request, wire, _, _ = composed
+    prepared = await prepare_selfhosted(request)
+    receipt = await prepared.backend.events.send(
+        SCOPE,
+        prepared.session_ref,
+        (UserMessage(content=(TextPart(text="question"),)),),
+        key="replay-approval",
+    )
+    wire.events[:] = wire.events[:2]
+    wire.events.append(
+        dict(
+            seq=3,
+            session_id=prepared.session_ref.id,
+            turn_id=receipt.turn_id,
+            at=datetime.now(UTC).isoformat(),
+            type="requires_action",
+            data=dict(action_id="approval", call_id="call", name="reports/get_report", input={}),
+        )
+    )
+    tool_use = {
+        **wire.events[-1],
+        "type": "tool_use",
+        "data": {
+            "call_id": "call",
+            "name": "reports/get_report",
+            "input": {},
+            "executor": "mcp",
+        },
+    }
+    if approval_first:
+        wire.events.append({**tool_use, "seq": 4})
+    else:
+        wire.events[-1] = {**wire.events[-1], "seq": 4}
+        wire.events.insert(-1, tool_use)
+
+    class Persistence:
+        async def record(self, *args, **kwargs):
+            pass
+
+    async def baseline(session, roots, after):
+        return (), False, 0
+
+    io = SelfHostedTurnIO(
+        prepared.backend,
+        SCOPE,
+        prepared.session_ref,
+        persistence=Persistence(),
+        root_turn_id=receipt.turn_id,
+        explicit_ask=(lambda name: explicit) if explicit is not None else None,
+        baseline_loader=baseline,
+    )
+    page = await prepared.backend.events.list(SCOPE, prepared.session_ref, page=PageRequest())
+    live = []
+    for value in page.data:
+        live.extend(frame.native for frame in await io.accept_record(value))
+    replayed = await io.replay()
+    live_tools = [value for value in live if value.type == "agent.mcp_tool_use"]
+    replayed_tools = [value for value in replayed if value.type == "agent.mcp_tool_use"]
+    assert live_tools and replayed_tools
+    assert all(value.id == "selfhosted:tool:call" for value in live_tools + replayed_tools)
+    states = []
+    for displays in (live, replayed):
+        state = TurnState()
+        for display in displays:
+            state = apply(state, display)
+        states.append(state)
+    blocks = [
+        [block for block in state.content if isinstance(block, ToolUseBlock)] for state in states
+    ]
+    assert blocks[0] == blocks[1]
+    assert len(blocks[0]) == 1
+    expected_ask = explicit is not False
+    assert blocks[0][0].evaluated_permission == ("ask" if expected_ask else "allow")
+    for state in states:
+        (call,) = tool_calls_for(state, ["selfhosted:tool:call"])
+        assert decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=True).outcome == (
+            "ask" if expected_ask else "allow"
+        )
+        assert decide_tool_call(ToolSafetyPolicy(enabled=False), call, attended=False).outcome == (
+            "deny" if expected_ask else "allow"
+        )
