@@ -1,4 +1,10 @@
-"""Explicit self-hosted driver composition; the host supplies resource ports."""
+"""Explicit self-hosted driver composition; the host supplies resource ports.
+
+`__all__` is the host-facing API. The `daimon-harness/0` wire format stays a
+public submodule, `mux.drivers.selfhosted.wire`, with its own `__all__`: the
+host, the harness and the conformance kit all build and read those models, and
+re-exporting them here would give each a second path.
+"""
 
 from __future__ import annotations
 
@@ -9,14 +15,54 @@ from mux.contracts.admission import Admission, admit
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ports import Agents, Artifacts, Environments, ManagedAgents, Skills
 from mux.contracts.profile import Profile
+from mux.drivers.selfhosted.config import (
+    SESSION_POOL_AUDIENCE,
+    HarnessConfig,
+    validate_resource_spec,
+)
 from mux.drivers.selfhosted.context import Authorization, BindingLookup, Context
-from mux.drivers.selfhosted.events import HighWater, SelfHostedEvents, SkillResolver, ToolsResolver
+from mux.drivers.selfhosted.events import (
+    HighWater,
+    SelfHostedEvents,
+    SkillResolver,
+    ToolsResolver,
+    TurnTools,
+    agent_tool_policy,
+)
 from mux.drivers.selfhosted.models import SelfHostedModels
 from mux.drivers.selfhosted.sessions import SelfHostedSessions
-from mux.drivers.selfhosted.transport import Transport
+from mux.drivers.selfhosted.transport import (
+    DirectTransport,
+    FoundryInvocationsTransport,
+    TokenProvider,
+    Transport,
+)
 from mux.drivers.selfhosted.usage import SelfHostedUsage
 from mux.errors import UnsupportedCapability
 from mux.profiles.selfhosted import LOOP
+
+__all__ = [
+    "SESSION_POOL_AUDIENCE",
+    "Authorization",
+    "BindingLookup",
+    "Context",
+    "DirectTransport",
+    "FoundryInvocationsTransport",
+    "HarnessConfig",
+    "HighWater",
+    "SelfHostedDriver",
+    "SelfHostedEvents",
+    "SelfHostedModels",
+    "SelfHostedSessions",
+    "SelfHostedUsage",
+    "SkillResolver",
+    "TokenProvider",
+    "ToolsResolver",
+    "Transport",
+    "TurnTools",
+    "agent_tool_policy",
+    "validate_resource_spec",
+]
 
 
 class SelfHostedDriver:

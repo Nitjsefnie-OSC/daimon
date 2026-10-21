@@ -34,10 +34,7 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.ports import Agents, Environments
 from mux.contracts.resources import ProviderBinding, SessionSpec
 from mux.contracts.usage import UsageObservation
-from mux.drivers.selfhosted import SelfHostedDriver
-from mux.drivers.selfhosted.context import Authorization
-from mux.drivers.selfhosted.events import ToolsResolver
-from mux.drivers.selfhosted.transport import Transport
+from mux.drivers.selfhosted import Authorization, SelfHostedDriver, ToolsResolver, Transport
 from mux.errors import ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
