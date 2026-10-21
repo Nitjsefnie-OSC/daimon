@@ -11,7 +11,7 @@ from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from pathlib import Path
 from typing import TYPE_CHECKING, Literal
-from urllib.parse import urlsplit
+from urllib.parse import parse_qsl, urlencode, urlsplit
 
 import httpx
 from daimon.core.turn.errors import AdmissionDenied
@@ -255,6 +255,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
     active_turn: tuple[str, str] | None = None
     session_bindings: dict[str, str] = {}
     receipt_cursors: dict[str, int] = {}
+    transport_high_water: dict[str, int] = {}
     history_floors: dict[tuple[str, str | None], int] = {}
     ended_turns: set[str] = set()
     agent_policy: dict[str, JsonValue] = {}
@@ -391,6 +392,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             path: str,
             *,
             session_id: str,
+            after_seq: int,
             body: Mapping[str, JsonValue] | None = None,
             mcp_authorization: str | None = None,
             deadline: datetime | None = None,
@@ -407,7 +409,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             # Check before GET as well as POST. The paid send additionally
             # commits its immutable tariff under the same durable wire turn id.
             require_selfhosted_price(billing, model)
-            if method == "POST" and path == "/v0/turns":
+            if method == "POST" and urlsplit(path).path == "/v0/turns":
                 if body is not None:
                     body = dict(body)
                     original_policy = body.get("tool_policy", {})
@@ -493,22 +495,34 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
             # Cleanup and reconciliation need a small independent budget after the host deadline.
             limit = (
                 request.deadline
-                if (method == "POST" and path == "/v0/turns")
+                if (method == "POST" and urlsplit(path).path == "/v0/turns")
                 or request.deadline > datetime.now(UTC)
                 else datetime.now(UTC) + timedelta(seconds=8)
             )
-            if method == "GET" and "/events?after_seq=" in path:
-                prefix, _, raw_after = path.partition("after_seq=")
-                after = max(int(raw_after), await history_floor(session_id))
-                path = prefix + "after_seq=" + str(after)
+            after_seq = max(
+                after_seq, await receipt_cursor(session_id), transport_high_water.get(session_id, 0)
+            )
+            transport_high_water[session_id] = after_seq
+            parsed = urlsplit(path)
+            if method == "GET" and parsed.path.endswith("/events"):
+                query = dict(parse_qsl(parsed.query, keep_blank_values=True))
+                floor = await history_floor(session_id)
+                original_cursor = int(query["after_seq"])
+                replay_cursor = max(int(query.get("replay_after_seq", original_cursor)), floor)
+                fence = max(original_cursor, after_seq, floor)
+                query["after_seq"] = str(fence)
+                if "replay_after_seq" in query or replay_cursor < fence:
+                    query["replay_after_seq"] = str(replay_cursor)
+                path = parsed.path + "?" + urlencode(query)
             result = await transport_impl.request(
                 method,
                 path,
                 session_id=session_id,
+                after_seq=after_seq,
                 body=body,
                 deadline=min(limit, deadline) if deadline is not None else limit,
                 mcp_authorization=minted.header.get_secret_value()
-                if method == "POST" and path == "/v0/turns" and minted is not None
+                if method == "POST" and urlsplit(path).path == "/v0/turns" and minted is not None
                 else None,
             )
             if method == "GET" and "/events?" in path:
@@ -561,7 +575,14 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         operation = active.operation_key if active is not None else None
         key = (session_id, operation)
         if key not in history_floors:
-            floor = await receipt_cursor(session_id)
+            # Receipts can commit before the answer projection. Only the
+            # saved projection or invocation baseline proves a replay floor.
+            from daimon.core.stores.mux_state import PostgresStateStore
+
+            store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
+            projection = await store.projection(session_id)
+            cursor = projection.cursor if projection is not None else ""
+            floor = int(cursor) if cursor.isdecimal() else 0
             if active is not None:
                 baseline = await active.store.get_operation(
                     active.scope, active.operation_key + ":baseline:0"
@@ -670,6 +691,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                                 "POST",
                                 f"/v0/turns/{segment(turn_id)}/cancel",
                                 session_id=session_id,
+                                after_seq=max(
+                                    await receipt_cursor(session_id),
+                                    transport_high_water.get(session_id, 0),
+                                ),
                             )
                         except Exception:
                             logging.getLogger(__name__).warning(
@@ -680,6 +705,10 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
                         f"/v0/sessions/{segment(session_id)}/events"
                         f"?after_seq={await receipt_cursor(session_id)}",
                         session_id=session_id,
+                        after_seq=max(
+                            await receipt_cursor(session_id),
+                            transport_high_water.get(session_id, 0),
+                        ),
                     )
         except Exception:
             logging.getLogger(__name__).warning("self-hosted cleanup pending reconciliation")
