@@ -129,6 +129,7 @@ class SessionSnapshot(BaseModel):
             "github_repo_map_resource_id",
             "github_repo_script_file_id",
             "github_repo_script_resource_id",
+            "mcp_hold",
         ):
             if not data.get(name):
                 data.pop(name, None)
@@ -172,6 +173,11 @@ class SessionSnapshot(BaseModel):
     # session only to add it.
     personal_memory_store_id: str | None = None
     vault_id: str | None
+    # The hold (`daimon.core.mcp_hold.hold_key`) of the Daimon credential the
+    # session mounts. None for the ordinary credential, a shared thread's
+    # credential-free session and every session from before holds existed. Held
+    # and unheld turns never share a session: a difference is an identity change.
+    mcp_hold: str | None = None
 
     # Mutable axis — a difference here can be applied to the live session.
     tools_sha256: str
@@ -278,6 +284,8 @@ def fingerprint_identity(snapshot: SessionSnapshot) -> str:
         # Only when set, so every snapshot without one keeps the fingerprint
         # it was recorded with.
         fields = (*fields, "personal_memory_store_id")
+    if snapshot.mcp_hold is not None:
+        fields = (*fields, "mcp_hold")
     return _fingerprint(snapshot, fields)
 
 
@@ -324,8 +332,12 @@ def snapshot_from_created_session(
     sent_system: str | None = None,
     github_mode: Literal["legacy", "app"] = "app",
     personal_memory_store_ids: Collection[str] = (),
+    mcp_hold: str | None = None,
 ) -> SessionSnapshot:
     """Snapshot a session we just created, from the response plus what we sent.
+
+    `mcp_hold` is the hold key of the Daimon credential the creator mounted
+    (None when it mounted the ordinary one, or none).
 
     `sent_system` is the system prompt sent as the session's own override
     (`daimon.core.platform_system`); it is hashed instead of the agent's.
@@ -353,6 +365,7 @@ def snapshot_from_created_session(
         github_mode=github_mode,
         personal_memory_store_ids=personal_memory_store_ids,
     )
+    snapshot = snapshot.model_copy(update={"mcp_hold": mcp_hold})
     if sent_system is None:
         return snapshot
     return snapshot.model_copy(update={"system_sha256": hash_system(sent_system)})
@@ -573,6 +586,7 @@ def desired_snapshot(
     asks_before_publishing: bool = False,
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
+    mcp_hold: str | None = None,
     repo_mount_path: str | None = None,
     repo_token_issued_at: int | None = None,
     token_issued_at_by_installation: dict[int, int] | None = None,
@@ -622,6 +636,7 @@ def desired_snapshot(
         and (memory_store_id is not None or personal_memory_store_id is not None),
         personal_memory_store_id=personal_memory_store_id,
         vault_id=vault_id,
+        mcp_hold=mcp_hold,
         tools_sha256=hash_tools(
             session_tools(
                 agent,

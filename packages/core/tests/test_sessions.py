@@ -3224,3 +3224,101 @@ async def test_source_environment_projection_retains_unrepresented_native_policy
     assert projected.native == environment.model_dump(mode="json", exclude_unset=True)
     transport.assert_consumed()
     assert [request.method for request in transport.requests] == ["GET"]
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+@pytest.mark.parametrize("held", [False, True])
+async def test_create_session_mounts_the_vault_of_the_turns_hold(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    held: bool,
+) -> None:
+    """A held turn's session mounts a vault named for its hold, whose credential
+    carries the signed hold; an unheld turn's session mounts the ordinary one."""
+    import jwt as pyjwt
+    from daimon.core.mcp_hold import HOLD_CLAIM, hold_vault_suffix
+    from daimon.core.turn_hold import TurnHold
+
+    tenant = await make_tenant(db_session, platform="slack")
+    account = await make_account(db_session, tenant=tenant)
+    agent_uuid = uuid.uuid4()
+    hold = TurnHold(platform="slack", channel_id="C-SYN-1", client=True) if held else None
+    created_vaults: list[str] = []
+    credential_bodies: list[dict[str, Any]] = []
+    session_bodies: list[dict[str, Any]] = []
+    memory_handler = make_fake_memory_store_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
+        if request.method == "GET" and request.url.path == "/v1/vaults":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        if request.method == "POST" and request.url.path == "/v1/vaults":
+            name = json.loads(request.content)["display_name"]
+            created_vaults.append(name)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vlt_new",
+                    "type": "vault",
+                    "display_name": name,
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/vaults/vlt_new/credentials":
+            body = json.loads(request.content)
+            credential_bodies.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vcrd_new",
+                    "type": "credential",
+                    "vault_id": "vlt_new",
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": body["auth"]["mcp_server_url"],
+                    },
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/v1/sessions"):
+            body = json.loads(request.content)
+            session_bodies.append(body)
+            sent_agent = body["agent"]
+            return httpx.Response(
+                200,
+                json=_session_body(
+                    session_id="sess_held",
+                    agent_id=sent_agent if isinstance(sent_agent, str) else sent_agent["id"],
+                    environment_id=body["environment_id"],
+                ),
+            )
+        raise AssertionError(f"unexpected call: {request.method} {request.url.path}")
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_held"),
+        environment=_make_env(anthropic_id="env_held"),
+        account_id=account.id,
+        mcp_settings=McpSettings(
+            jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
+        ),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        hold=hold,
+    )
+
+    ordinary = f"daimon-mcp:{account.id}:{agent_uuid}"
+    assert created_vaults == [ordinary + (hold_vault_suffix(hold) if hold else "")]
+    claims = pyjwt.decode(
+        credential_bodies[0]["auth"]["token"],
+        "x" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert (HOLD_CLAIM in claims) is held
+    assert session_bodies[0]["vault_ids"] == ["vlt_new"]

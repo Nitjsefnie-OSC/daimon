@@ -34,20 +34,26 @@ from daimon.adapters.mcp.auth.verifier import (
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
 )
+from daimon.adapters.mcp.middleware.held_tools import held_tool_refusal, narrow_to_held_tools
 from daimon.adapters.mcp.middleware.tool_rule_backstop import DENIAL_REASON, tool_rule_refusal
 from daimon.core.anthropic_guard import AnthropicDisabled, without_anthropic
 from daimon.core.channel_backend import is_selfhosted_channel
+from daimon.core.mcp_hold import HOLD_CLAIM, parse_hold_claim
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.operator_tokens import scope_tag
 from daimon.core.security_audit import capture_decision, record_denial
 from daimon.core.stores.domain import McpTokenKind, Role
 from daimon.core.stores.security_audit import SecurityAuditEntry, append_event
 from daimon.core.tool_safety import ToolSafetyPolicy
+from daimon.core.turn_hold import TurnHold
 from fastmcp.exceptions import AuthorizationError, NotFoundError, ToolError
 from fastmcp.server.dependencies import get_access_token
 from fastmcp.server.middleware import CallNext, Middleware, MiddlewareContext
 from fastmcp.server.transforms.visibility import disable_components, enable_components
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncSession, async_sessionmaker
+
+#: Audit reason for a call a held credential made to a tool off the allowlist.
+HELD_DENIAL_REASON = "held_tool_not_allowed"
 
 ClaimResolver = Callable[[MiddlewareContext], Awaitable[str | None]]
 SubjectResolver = ClaimResolver
@@ -332,6 +338,10 @@ class IdentityMiddleware(Middleware):
         # from Discord vault tokens (minted by mint_jwt, which never emits internal=True).
         # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
         is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
+        hold = _hold_from_claims(_token.claims if _token else {})
+        if hold is not None:
+            # The stored role is never relied on for a held credential.
+            is_admin = False
         slack_turn_context_id: uuid.UUID | None = None
         raw_slack_context = _token.claims.get("slack_turn_context_id") if _token else None
         if isinstance(raw_slack_context, str) and not internal_claim and agent_id is None:
@@ -354,6 +364,7 @@ class IdentityMiddleware(Middleware):
             slack_turn_context_id=slack_turn_context_id,
             platform_user_id=platform_user_id,
             is_admin=is_admin,
+            hold=hold,
             # Set by the verifier from the token's row; an agent key's only.
             bound_channel_id=(
                 raw_bound_channel
@@ -378,6 +389,8 @@ class IdentityMiddleware(Middleware):
                 raise ToolError(rule_refusal)
         # Each enable appends a rule to session state, which must be this
         # request's alone: StripSessionIdMiddleware (server.py) sees to it.
+        if identity.hold is not None:
+            return await self._resolve_held(context, call_next, identity)
         if identity.is_operator:
             return await self._resolve_operator(context, call_next, identity)
         if is_admin:
@@ -418,6 +431,26 @@ class IdentityMiddleware(Middleware):
         except AnthropicDisabled as exc:
             raise ToolError(str(exc)) from exc
 
+    async def _resolve_held(
+        self, context: MiddlewareContext, call_next: CallNext, identity: AuthIdentity
+    ) -> object:
+        """Show a held identity only the allowlisted tools, and refuse any other call.
+
+        Every tool is hidden first, so a tool added later is closed by default;
+        the refusal covers a client that calls a hidden tool by name, including
+        through the `call_tool` proxy, which re-enters this middleware with the
+        inner tool's name.
+        """
+        fastmcp_ctx = context.fastmcp_context
+        assert fastmcp_ctx is not None  # checked by _resolve_request
+        if context.method == "tools/call":
+            refusal = held_tool_refusal(str(getattr(context.message, "name", "")))
+            if refusal is not None:
+                record_denial(HELD_DENIAL_REASON)
+                raise ToolError(refusal)
+        await narrow_to_held_tools(fastmcp_ctx)
+        return await self._dispatch_for_backend(context, call_next, identity)
+
     async def _resolve_operator(
         self, context: MiddlewareContext, call_next: CallNext, identity: AuthIdentity
     ) -> object:
@@ -440,6 +473,17 @@ class IdentityMiddleware(Middleware):
         if identity.scopes:
             await enable_components(fastmcp_ctx, tags={scope_tag(s) for s in identity.scopes})
         return await call_next(context)
+
+
+def _hold_from_claims(claims: Mapping[str, object]) -> TurnHold | None:
+    """The hold the verifier admitted, or None. An unreadable claim is refused."""
+    raw = claims.get(HOLD_CLAIM)
+    if raw is None:
+        return None
+    try:
+        return parse_hold_claim(raw)
+    except ValueError as exc:
+        raise AuthorizationError("malformed hold claim after verifier") from exc
 
 
 class _TokenFields(TypedDict):
