@@ -63,3 +63,12 @@ def test_listed_id_that_no_longer_exists_fails_the_leg(tmp_path: Path) -> None:
 
     assert result.returncode != 0
     assert "no longer exist" in result.stdout + result.stderr
+
+
+def test_listed_id_in_a_deleted_file_fails_the_leg(tmp_path: Path) -> None:
+    result = _run(
+        tmp_path, "test_deleted.py::test_known_failure", "test_sample.py::test_known_failure"
+    )
+
+    assert result.returncode != 0
+    assert "test_deleted.py::test_known_failure" in result.stdout + result.stderr

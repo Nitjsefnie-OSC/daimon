@@ -45,7 +45,10 @@ def pytest_collection_modifyitems(config: pytest.Config, items: list[pytest.Item
     stale = sorted(
         nodeid
         for nodeid in known - collected
-        if nodeid.partition("::")[0] in collected_files and not config.option.deselect
+        # A deleted or renamed file is stale on every shard. A missing test in a file
+        # this run collected is stale too; other shards' files are theirs to check.
+        if not (config.rootpath / nodeid.partition("::")[0]).is_file()
+        or (nodeid.partition("::")[0] in collected_files and not config.option.deselect)
     )
     # `-k` narrows collection on purpose; the root `-m` default filter only drops opt-in
     # live/slow markers, which no listed test carries, so it does not disable the check.
