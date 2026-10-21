@@ -212,7 +212,16 @@ async def test_c12_checked_client_through_the_engine_on_loopback(
     assert errors == [] and len(calls) == 1 and calls[0]["model"] == "gpt-6-luna"
 
 
-@pytest.mark.parametrize("failure", ["http", "missing_usage", "cancelled"])
+# A response without both integer token counts is unmeasured, never zero usage.
+MALFORMED_USAGE: dict[str, object] = {
+    "missing_usage": None,
+    "empty_usage": {},
+    "no_output_tokens": {"input_tokens": 12},
+    "null_input_tokens": {"input_tokens": None, "output_tokens": 8},
+}
+
+
+@pytest.mark.parametrize("failure", ["http", *MALFORMED_USAGE, "cancelled"])
 async def test_unmeasured_request_never_invents_usage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ) -> None:
@@ -231,7 +240,7 @@ async def test_unmeasured_request_never_invents_usage(
                 headers={"x-request-id": "failed-request"},
                 json={"error": {"message": "private-error", "type": "server_error"}},
             )
-        return reply([text("done")], usage=None)
+        return reply([text("done")], usage=MALFORMED_USAGE[failure])
 
     install(monkeypatch, respond)
     events, emit = collector()

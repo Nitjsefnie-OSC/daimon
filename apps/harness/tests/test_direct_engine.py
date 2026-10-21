@@ -246,7 +246,16 @@ async def test_builtin_tool_schemas_match_the_sdk_adapter(
         assert tool.strict and not tool.mcp
 
 
-@pytest.mark.parametrize("failure", ["http", "missing_usage", "cancelled"])
+# A response without both integer token counts is unmeasured, never zero usage.
+MALFORMED_USAGE: dict[str, object] = {
+    "missing_usage": None,
+    "empty_usage": {},
+    "no_output_tokens": {"input_tokens": 12},
+    "null_input_tokens": {"input_tokens": None, "output_tokens": 8},
+}
+
+
+@pytest.mark.parametrize("failure", ["http", *MALFORMED_USAGE, "cancelled"])
 async def test_unmeasured_request_never_invents_usage(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, failure: str
 ):
@@ -262,7 +271,9 @@ async def test_unmeasured_request_never_invents_usage(
         if failure == "http":
             error = {"message": "private-error", "type": "server_error"}
             return httpx.Response(500, headers={"x-request-id": "failed"}, json={"error": error})
-        return httpx.Response(200, json=response_json([message_item()], usage=None))
+        return httpx.Response(
+            200, json=response_json([message_item()], usage=MALFORMED_USAGE[failure])
+        )
 
     install_azure(monkeypatch, respond)
     context, events = recording_context(tmp_path)

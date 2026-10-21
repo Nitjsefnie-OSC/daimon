@@ -23,7 +23,7 @@ per-session UID; cancellation that never re-runs an interrupted tool.
 ## Results (offline, scripted models only)
 
 - Full harness suite with both engines' tests:
-  `pytest apps/harness/tests -n 2` gives 282 passed, 5 skipped (the baseline
+  `pytest apps/harness/tests -n 2` gives 288 passed, 5 skipped (the baseline
   without them is 163 passed, 3 skipped). The skips are live-provider tests.
 - Given the same scripted Azure Responses traffic, both new engines put
   the same requests on the wire as the current engine. The direct engine also
@@ -47,6 +47,10 @@ Pydantic AI:
   `server/*` tool is refused like today instead of failing the run.
 - A pinned model profile: the default profile for `gpt-6-luna` turns off
   encrypted reasoning content and rewrites MCP tool schemas.
+- Its own check that the response carried integer input and output token
+  counts: Pydantic AI 1.107.9 turns a missing or partial `usage` object into
+  zeros, which would have been journalled as measured usage (found in review;
+  the current engine already refuses these).
 - `retries=0`, `output_retries=0` and a raw-argument validator, so bad tool
   arguments come back as a tool result instead of a hidden extra request.
 - History is stored as Pydantic AI messages, about 4 times larger than the
@@ -60,7 +64,9 @@ Hand-written loop:
 
 - About 40 lines of loop proper (`Turn.converse`, `request`, `call_tool`);
   the rest is provider translation, metering, MCP and overflow handling.
-- History stays in today's Responses format, so sessions remain compatible.
+- `DirectResponsesAdapter` keeps today's Responses history format, so existing
+  sessions remain compatible; `DirectAnthropicAdapter` stores Messages history,
+  which the Responses engines cannot read.
 - A second provider (Anthropic Messages) cost about 110 lines; Anthropic
   usage excludes cached tokens and thinking tokens are not reported separately.
 

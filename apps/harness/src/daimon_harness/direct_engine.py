@@ -409,7 +409,6 @@ class ResponsesProvider:
                 texts.append("".join(p.text for p in item.content if p.type == "output_text"))
             elif item.type == "function_call":
                 calls.append(ToolCall(item.call_id, item.name, item.arguments))
-        usage = response.usage
         return Completion(
             # exclude_unset replays exactly what the API sent, including encrypted reasoning.
             items=[
@@ -418,14 +417,7 @@ class ResponsesProvider:
             ],
             texts=texts,
             calls=calls,
-            usage=None
-            if usage is None
-            else Usage(
-                input_tokens=usage.input_tokens,
-                cached_input_tokens=token_count(usage, "input_tokens_details", "cached_tokens"),
-                output_tokens=usage.output_tokens,
-                reasoning_tokens=token_count(usage, "output_tokens_details", "reasoning_tokens"),
-            ),
+            usage=responses_usage(response),
             failure=response_failure(response),
         )
 
@@ -445,6 +437,21 @@ def trim_output(item: JsonValue) -> JsonValue:
         if isinstance(output, str):
             return {**item, "output": trim(output)}
     return item
+
+
+def responses_usage(response: Response) -> Usage | None:
+    """Measured usage needs both integer token counts; anything less is unmeasured."""
+    usage = response.usage
+    input_tokens = getattr(usage, "input_tokens", None)
+    output_tokens = getattr(usage, "output_tokens", None)
+    if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+        return None
+    return Usage(
+        input_tokens=input_tokens,
+        cached_input_tokens=token_count(usage, "input_tokens_details", "cached_tokens"),
+        output_tokens=output_tokens,
+        reasoning_tokens=token_count(usage, "output_tokens_details", "reasoning_tokens"),
+    )
 
 
 def token_count(usage: object, details: str, field: str) -> int:

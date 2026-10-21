@@ -118,9 +118,17 @@ class CapturingResponsesModel(OpenAIResponsesModel):
             status=response.status,
             incomplete_reason=details.reason if details else None,
             error=f"{error.code}: {error.message}" if error else None,
-            usage_reported=response.usage is not None,
+            usage_reported=reports_token_counts(response),
         )
         return super()._process_response(response, model_settings, model_request_parameters)
+
+
+def reports_token_counts(response: Response) -> bool:
+    """The SDK does not validate responses; 1.107.9 turns absent counts into zeros."""
+    usage = response.usage
+    return all(
+        isinstance(getattr(usage, field, None), int) for field in ("input_tokens", "output_tokens")
+    )
 
 
 def policy_name(context: TurnContext, name: str) -> str:
