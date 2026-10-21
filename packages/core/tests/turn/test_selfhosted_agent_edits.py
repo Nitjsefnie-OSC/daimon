@@ -16,6 +16,7 @@ from daimon.core.turn.errors import SessionBusyError
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.selfhosted_host import UPDATE_LEASE_TTL
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, Revision, ThreadRef
@@ -23,6 +24,7 @@ from mux.contracts.resources import MCPConnection, SessionSpec, SkillRef, ToolSp
 from mux.drivers.selfhosted import wire
 from mux.errors import ContinuityLost, UnsupportedCapability
 from mux.state.lease import LeaseBusy, Slot
+from mux.state.memory import MemoryStateStore
 
 from .conformance_support import ACCOUNT, TENANT
 from .test_selfhosted_host import BASE, PROFILE, REVISION, Wire, composed  # noqa: F401
@@ -377,3 +379,52 @@ async def test_an_agent_archived_between_preparation_and_send_does_not_run(threa
     with pytest.raises((ContinuityLost, UnsupportedCapability)):
         await thread.run(prepared)
     assert thread.wire.posts == 1
+
+
+async def test_a_second_update_cannot_share_the_first_updates_hold(thread, monkeypatch):
+    await thread.turn()
+    before = await thread.binding()
+    second = {}
+    put_binding = thread.store.put_binding
+
+    async def second_update_then_put(binding, *, expected_generation):
+        # While the first update holds the slot, another message prepares the same edit.
+        try:
+            await thread.prepare()
+        except SessionBusyError as error:
+            second["busy"] = error.pending_reasons
+        return await put_binding(binding, expected_generation=expected_generation)
+
+    monkeypatch.setattr(thread.store, "put_binding", second_update_then_put)
+    thread.edit_agent(system="edited instructions")
+    await thread.prepare()
+    assert second == {"busy": ("session_active",)}
+    assert (await thread.binding()).generation == before.generation + 1
+
+
+async def test_an_update_whose_lease_expired_does_not_publish(thread, monkeypatch):
+    if not isinstance(thread.store, MemoryStateStore):
+        pytest.skip("the Postgres store takes lease time from the database clock")
+    await thread.turn()
+    before = await thread.binding()
+    slot = Slot(thread=before.thread, account_id=before.legacy_account_id)
+    rival = {}
+    renew_lease = thread.store.renew_lease
+
+    async def rival_takes_over_then_renew(lease, *, now, ttl):
+        # The update stalled past its lease; a rival turn takes the slot first.
+        rival["lease"] = await thread.store.acquire_lease(
+            slot, holder="rival", turn_id="rival", now=now + UPDATE_LEASE_TTL * 2, ttl=ttl
+        )
+        return await renew_lease(lease, now=now, ttl=ttl)
+
+    monkeypatch.setattr(thread.store, "renew_lease", rival_takes_over_then_renew)
+    thread.edit_agent(system="edited instructions")
+    with pytest.raises(SessionBusyError):
+        await thread.prepare()
+    assert (await thread.binding()).generation == before.generation
+    # The rival still owns the slot: the failed update did not release it.
+    monkeypatch.setattr(thread.store, "renew_lease", renew_lease)
+    await thread.store.renew_lease(
+        rival["lease"], now=rival["lease"].expires_at - timedelta(seconds=1), ttl=UPDATE_LEASE_TTL
+    )

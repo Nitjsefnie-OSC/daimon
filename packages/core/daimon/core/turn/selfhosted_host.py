@@ -8,7 +8,7 @@ from dataclasses import dataclass, replace
 from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import cast
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from daimon.core.mux_backend import (
     TurnBackend,
@@ -41,7 +41,7 @@ from mux.drivers.selfhosted.context import Authorization
 from mux.drivers.selfhosted.events import ToolsResolver
 from mux.drivers.selfhosted.transport import Transport
 from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
-from mux.state.lease import LeaseBusy, Slot
+from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
 
@@ -197,29 +197,35 @@ async def _pin_planned_agent(
     return replace(runtime, agents=_PinnedAgents(runtime.agents, agent))
 
 
+UPDATE_LEASE_TTL = timedelta(seconds=30)
+
+
 @contextlib.asynccontextmanager
-async def _hold_slot(store: StateStore, slot: Slot, now: datetime) -> AsyncIterator[None]:
+async def _hold_slot(store: StateStore, slot: Slot, now: datetime) -> AsyncIterator[Lease]:
     """Hold the thread's lease while its binding is advanced.
 
     A turn holds this lease while it runs, so failing to take it means a turn is
     in flight. Holding it until the new generation is published keeps a rival
     turn from starting beneath the update: it cannot acquire the lease meanwhile,
     and one that acquires after sees the new generation in its binding check.
+    Each update is its own holder, so concurrent updates exclude each other too.
     """
     try:
         lease = await store.acquire_lease(
             slot,
-            holder="selfhosted-update",
-            turn_id="update:" + slot.model_dump_json(),
+            holder="selfhosted-update:" + str(uuid4()),
+            turn_id="update:" + str(uuid4()),
             now=now,
-            ttl=timedelta(seconds=30),
+            ttl=UPDATE_LEASE_TTL,
         )
     except LeaseBusy as error:
         raise _busy(now, "session_active") from error
     try:
-        yield
+        yield lease
     finally:
-        await store.release_lease(lease)
+        # A lease lost to expiry already belongs to a newer holder: leave it alone.
+        with contextlib.suppress(StaleFence):
+            await store.release_lease(lease)
 
 
 def _config_changed(
@@ -254,7 +260,7 @@ async def _advance_binding(
     the edit. Written through the store's generation compare-and-swap.
     """
     now = request.now()
-    async with _hold_slot(store, slot, now):
+    async with _hold_slot(store, slot, now) as lease:
         ref = session.ref
         # Read the state again under the lease: a turn may have started since `session`.
         if (await backend.sessions.retrieve(request.scope, ref)).state != "idle":
@@ -279,8 +285,11 @@ async def _advance_binding(
             }
         )
         try:
+            # Publish only while this update still holds the slot: renewing fails
+            # if the lease expired and a rival turn took it in the meantime.
+            await store.renew_lease(lease, now=request.now(), ttl=UPDATE_LEASE_TTL)
             return await store.put_binding(successor, expected_generation=binding.generation)
-        except BindingConflict as error:
+        except (BindingConflict, StaleFence) as error:
             raise _busy(now, "binding_changed") from error
 
 
