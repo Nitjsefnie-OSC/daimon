@@ -294,3 +294,16 @@ cancelled, queued, in-progress and missing statuses, also end errored with kind
 `model_failed` and the provider error code/message when available. These responses
 never execute tool calls. CI also binds a synthetic 0644 `/mnt/model.env` to
 verify that generically named credential mounts refuse startup.
+
+The offline `tests/test_interop_driver.py` suite connects the real mux driver to
+uvicorn on an ephemeral loopback port. It covers measured usage, tool writes,
+approval execution, cancellation, cursor recovery after a dropped reader,
+reconstructed-driver idempotent resend, a fresh driver opening a stream before
+the first send, and narrowed built-in/MCP permissions.
+The MCP case uses a local HTTPS server and the real Agents SDK with a synthetic
+Azure response client; it checks the model's tool definitions and deliberately
+requests a denied tool to prove refusal. These tests run in the harness CI job.
+At each synthetic model I/O boundary it checks the durable HTTP log already
+contains exactly one new request start, with one matching usage record per
+completed request. Recovery gates approval emission until the reader closes and
+compares the entire recovered event suffix against the durable journal.
