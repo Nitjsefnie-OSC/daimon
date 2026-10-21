@@ -16,6 +16,7 @@ from mux.drivers.selfhosted.wire import TurnRequest
 from openai import AsyncAzureOpenAI
 
 from .conftest import turn
+from .live_probe import checked_client, luna_deployment, run_luna_probe
 
 
 async def test_managed_identity_without_api_key_uses_real_async_transport():
@@ -161,11 +162,11 @@ async def test_sdk_tool_loop_meters_each_request(
     ),
     reason="requires explicit Azure OpenAI credentials",
 )
-async def test_live_azure_responses(tmp_path: Path) -> None:
+async def test_live_azure_responses(tmp_path: Path, monkeypatch: pytest.MonkeyPatch) -> None:
     body = turn()
-    body["model"] = os.environ.get("AZURE_OPENAI_DEPLOYMENT", "gpt-6-luna")
-    if body["model"] != "gpt-6-luna":
-        pytest.skip("C12: live tests only permit the gpt-6-luna deployment")
+    body["model"] = luna_deployment()
+
+    monkeypatch.setattr(model_adapter, "AsyncAzureOpenAI", checked_client)
     body["input"] = [{"type": "text", "text": "Reply with the word ready. Do not use tools."}]
     events: list[tuple[str, object]] = []
 
@@ -173,7 +174,7 @@ async def test_live_azure_responses(tmp_path: Path) -> None:
         events.append((kind, data))
 
     context = TurnContext(TurnRequest.model_validate(body), tmp_path, collect)
-    await AzureModelAdapter().run(context, [])
+    await run_luna_probe(AzureModelAdapter(), context)
     assert sum(kind == "usage" for kind, _ in events) == 1
     messages = [data for kind, data in events if kind == "agent_message"]
     deltas = [data for kind, data in events if kind == "agent_message_delta"]

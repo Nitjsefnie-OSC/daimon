@@ -1,3 +1,4 @@
+import { defaultModelVersion, validateModelDeploymentName } from '../models.bicep'
 import { validateNamePrefix } from '../names.bicep'
 import { validateChartStorage } from '../chart-storage.bicep'
 
@@ -27,7 +28,7 @@ param modelDeploymentName string = modelName
 param modelCapacity int = 1
 @allowed(['DataZoneStandard', 'GlobalStandard'])
 param modelSku string = 'DataZoneStandard'
-param modelVersion string = '2026-09-29'
+param modelVersion string = defaultModelVersion(modelName)
 @allowed([false])
 param enablePrivateNetworking bool = false
 param appEnvironment object = {}
@@ -36,6 +37,7 @@ param secretNames object = {}
 param serviceSecretNames object = {}
 param postgresFirewallRules array = []
 
+var checkedModelDeploymentName = validateModelDeploymentName(modelName, modelDeploymentName)
 var checkedNamePrefix = validateNamePrefix(namePrefix)
 var checkedChartStorage = validateChartStorage(chartStorage, secretNames, serviceSecretNames.?mcp ?? {})
 
@@ -58,7 +60,7 @@ module stack '../main.bicep' = {
     vaultPurgeProtection: vaultPurgeProtection
     services: services
     modelName: modelName
-    modelDeploymentName: modelDeploymentName
+    modelDeploymentName: checkedModelDeploymentName
     modelCapacity: modelCapacity
     modelSku: modelSku
     modelVersion: modelVersion

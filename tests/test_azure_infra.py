@@ -452,7 +452,9 @@ def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) ->
         params = template["parameters"]
         assert not any(name.startswith("gpt5") for name in params)
         assert params["modelName"]["defaultValue"] == "gpt-6.1-sol"
-        assert params["modelVersion"]["defaultValue"] == "2026-09-29"
+        assert params["modelVersion"]["defaultValue"] == (
+            "[__bicep.defaultModelVersion(parameters('modelName'))]"
+        )
         assert params["modelDeploymentName"]["defaultValue"] == "[parameters('modelName')]"
         assert params["modelSku"]["defaultValue"] == "DataZoneStandard"
         assert params["modelSku"]["allowedValues"] == ["DataZoneStandard", "GlobalStandard"]
@@ -460,7 +462,12 @@ def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) ->
         assert params["modelCapacity"]["minValue"] == 1
         module = next(r for r in template["resources"] if r["name"] == module_name)
         for name in names:
-            assert module["properties"]["parameters"][name]["value"] == f"[parameters('{name}')]"
+            expected = (
+                "[variables('checkedModelDeploymentName')]"
+                if name == "modelDeploymentName"
+                else f"[parameters('{name}')]"
+            )
+            assert module["properties"]["parameters"][name]["value"] == expected
     deployment = next(
         r
         for r in templates["modules/ai.bicep"]["resources"]
@@ -478,5 +485,84 @@ def test_model_parameters_flow_through_azd_and_ai(templates: dict[str, dict]) ->
     }
     assert (
         templates["main.bicep"]["outputs"]["harnessEnvironment"]["value"]["AZURE_OPENAI_DEPLOYMENT"]
-        == "[if(parameters('deployAi'), parameters('modelDeploymentName'), '')]"
+        == "[if(parameters('deployAi'), variables('checkedModelDeploymentName'), '')]"
     )
+
+
+def test_bicep_production_model_defaults_agree(templates: dict[str, dict]) -> None:
+    from mux.profiles import backend_selection
+
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        assert templates[entrypoint]["parameters"]["modelName"]["defaultValue"] == (
+            backend_selection("selfhosted").model
+        )
+
+
+@pytest.mark.parametrize(
+    "model,version",
+    [("gpt-6.1-sol", "2026-09-29"), ("gpt-6-luna", "2026-09-22"), ("custom-model", "")],
+)
+def test_default_model_versions_evaluate_offline(templates, tmp_path, model, version):
+    source = tmp_path / "models.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure/models.bicep", tmp_path)
+    source.write_text(
+        f"using none\nimport {{ knownModelVersion }} from '{relative}'\n"
+        f"param version = knownModelVersion('{model}')\n"
+    )
+    target = tmp_path / "models.json"
+    result = subprocess.run(
+        ["bicep", "build-params", str(source), "--outfile", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["parameters"]["version"]["value"] == version
+
+
+def test_azd_model_name_uses_env_with_sol_default():
+    parameters = json.loads((ROOT / "deploy/azure/azd/main.parameters.json").read_text())
+    assert parameters["parameters"]["modelName"]["value"] == "${AZURE_MODEL_NAME=gpt-6.1-sol}"
+    # Leave the version unset so the production mapping follows a Luna selection.
+    assert "modelVersion" not in parameters["parameters"]
+
+
+@pytest.mark.parametrize(
+    "model,deployment,valid",
+    [
+        ("gpt-6.1-sol", "gpt-6-luna", False),
+        ("gpt-6-luna", "gpt-6.1-sol", False),
+        ("another-model", "gpt-6-luna", False),
+        ("gpt-6-luna", "gpt-6-luna", True),
+        ("gpt-6.1-sol", "gpt-6.1-sol", True),
+        ("gpt-6-luna", "custom-smoke-alias", True),
+    ],
+)
+def test_model_alias_guard_offline(templates, tmp_path, model, deployment, valid):
+    source = tmp_path / "alias.bicepparam"
+    relative = os.path.relpath(ROOT / "deploy/azure/models.bicep", tmp_path)
+    source.write_text(
+        f"using none\nimport {{ isValidModelDeploymentName }} from '{relative}'\n"
+        f"param valid = isValidModelDeploymentName('{model}', '{deployment}')\n"
+    )
+    target = tmp_path / "alias.json"
+    result = subprocess.run(
+        ["bicep", "build-params", str(source), "--outfile", str(target)],
+        capture_output=True,
+        text=True,
+    )
+    assert result.returncode == 0, result.stderr
+    assert json.loads(target.read_text())["parameters"]["valid"]["value"] is valid
+    for entrypoint in ("main.bicep", "azd/main.bicep"):
+        template = templates[entrypoint]
+        assert template["variables"]["checkedModelDeploymentName"] == (
+            "[__bicep.validateModelDeploymentName(parameters('modelName'), "
+            "parameters('modelDeploymentName'))]"
+        )
+        validator = next(
+            definition
+            for group in template["functions"]
+            for name, definition in group["members"].items()
+            if name == "validateModelDeploymentName"
+        )
+        assert "isValidModelDeploymentName(" in validator["output"]["value"]
+        assert "fail('modelDeploymentName is a reserved model name" in validator["output"]["value"]
