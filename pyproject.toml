@@ -344,7 +344,7 @@ type = "forbidden"
 source_modules = ["daimon.core"]
 forbidden_modules = ["daimon.testing"]
 
-# Expand package members explicitly so mux.conformance is excluded while the
+# Expand package members explicitly so mux.testing is excluded while the
 # mux initializer itself remains covered. The boundary regression inventories
 # mux siblings so a new top-level package cannot silently escape this list.
 [[tool.importlinter.contracts]]
@@ -357,7 +357,7 @@ source_modules = [
     "mux.drivers", "mux.drivers.**", "mux.errors",
     "mux.profiles", "mux.profiles.**", "mux.state", "mux.state.**",
 ]
-forbidden_modules = ["mux.conformance", "mux.conformance.**", "daimon.testing", "daimon.testing.**"]
+forbidden_modules = ["mux.testing", "mux.testing.**", "daimon.testing", "daimon.testing.**"]
 as_packages = false
 
 [[tool.importlinter.contracts]]
