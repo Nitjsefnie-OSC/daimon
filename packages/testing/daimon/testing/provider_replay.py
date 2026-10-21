@@ -20,8 +20,8 @@ from typing import Literal, NoReturn, Protocol
 import httpx
 from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
 from daimon.testing.ma_transport import RecordedRequest
-from mux.drivers.gemini.transport import SDKTransport as GeminiTransport
-from mux.drivers.openai.transport import SDKTransport as OpenAITransport
+from mux.drivers.gemini import SDKTransport as GeminiTransport
+from mux.drivers.openai import SDKTransport as OpenAITransport
 from pydantic import BaseModel, ConfigDict, Field, JsonValue, model_validator
 
 type Backend = Literal["openai", "gemini"]

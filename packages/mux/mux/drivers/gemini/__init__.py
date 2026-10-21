@@ -42,7 +42,7 @@ from mux.drivers.gemini.skill_deployment import (
     verify_retained_deployments,
 )
 from mux.drivers.gemini.storage import Records, Storage
-from mux.drivers.gemini.transport import Transport
+from mux.drivers.gemini.transport import SDKTransport, Transport
 from mux.errors import UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
 from mux.state.store import StateStore
@@ -184,6 +184,7 @@ __all__ = [
     "RetainedSkillDeployments",
     "SkillBundlePublisher",
     "Storage",
+    "SDKTransport",
     "Transport",
     "compile_agent",
     "compile_environment",
