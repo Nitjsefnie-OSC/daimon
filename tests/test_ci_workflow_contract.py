@@ -99,6 +99,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "report-host",
         "mux",
         "harness",
+        "harness-conformance",
     }
     # No status override: GitHub's default needs gate skips after failure/skip.
     assert not any(status in deploy["if"] for status in ("always()", "failure()", "cancelled()"))

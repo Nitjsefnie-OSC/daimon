@@ -237,6 +237,7 @@ jobs:
           - { suite: report-host, paths: apps/report-host }
           - { suite: harness, paths: apps/harness }
           - { suite: mux, paths: packages/mux }
+          - { suite: harness-conformance, paths: tests/harness_conformance }
     steps:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-daimon
