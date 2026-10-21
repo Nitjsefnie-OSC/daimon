@@ -15,11 +15,10 @@ from typing import Any, cast
 import anthropic
 import httpx
 from anthropic import AsyncAnthropic
-from daimon.core.turn import run_turn
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock
-from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent, run_turn_on_leg
 
 from .conftest import make_agent_message, make_end_turn, make_requires_action, make_status_idle
 
@@ -89,7 +88,7 @@ async def test_a_stuck_session_is_interrupted_and_the_turn_runs() -> None:
     fa.beta.sessions.retrieve_statuses = ["idle"] * 20
     _refuse_messages(fa, times=1)
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
         user_message="are you there?",
@@ -112,7 +111,7 @@ async def test_a_session_still_stuck_after_the_interrupt_says_start_a_new_thread
     fa.beta.sessions.retrieve_statuses = ["idle"] * 20
     _refuse_messages(fa, times=2)
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
         user_message="are you there?",
@@ -152,7 +151,7 @@ async def test_a_failed_interrupt_still_ends_the_turn_through_the_normal_failure
     events.send = send  # type: ignore[method-assign]
     lc = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
         user_message="are you there?",
@@ -179,7 +178,7 @@ async def test_stop_during_recovery_ends_the_turn_as_stopped() -> None:
     asyncio.get_running_loop().call_later(0.2, cancel.set)
 
     final = await asyncio.wait_for(
-        run_turn(
+        run_turn_on_leg(
             anthropic=cast(AsyncAnthropic, fa),
             session_id="sess_1",
             user_message="are you there?",
@@ -224,7 +223,7 @@ async def test_a_failed_recovery_never_opens_another_stream() -> None:
 
     events.send = send  # type: ignore[method-assign]
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
         user_message="are you there?",
@@ -253,7 +252,7 @@ async def test_the_retry_waits_until_ma_has_taken_the_interrupt() -> None:
     fa.beta.sessions.retrieve_statuses = ["idle"] * 20
     _refuse_messages(fa, times=1, interrupt_lag_s=0.6)
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         anthropic=cast(AsyncAnthropic, fa),
         session_id="sess_1",
         user_message="are you there?",
@@ -282,7 +281,7 @@ async def test_an_idle_with_no_idle_history_is_not_settled() -> None:
     asyncio.get_running_loop().call_later(1.2, cancel.set)
 
     final = await asyncio.wait_for(
-        run_turn(
+        run_turn_on_leg(
             anthropic=cast(AsyncAnthropic, fa),
             session_id="sess_1",
             user_message="are you there?",

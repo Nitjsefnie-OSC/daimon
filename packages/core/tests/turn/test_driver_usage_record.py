@@ -14,10 +14,9 @@ from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_event import (
     BetaManagedAgentsSpanModelRequestEndEvent,
 )
-from daimon.core.turn import run_turn
 from daimon.core.turn.posture import Billed, BillingExempt
 from daimon.testing.ma_models import ma_model_usage
-from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent, run_turn_on_leg
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
 
@@ -57,7 +56,7 @@ async def test_driver_invokes_billed_record_on_model_request_end_event() -> None
     async def fake_record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
         calls.append(event)
 
-    await run_turn(
+    await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_123",
         user_message="hi",
@@ -68,7 +67,7 @@ async def test_driver_invokes_billed_record_on_model_request_end_event() -> None
     )
 
     assert len(calls) == 1, "record invoked exactly once for the single model_request_end event"
-    assert calls[0] is mre, "record received the model_request_end event"
+    assert calls[0] == mre, "record received the model_request_end event"
 
 
 async def test_driver_does_not_invoke_billed_record_on_other_events() -> None:
@@ -85,7 +84,7 @@ async def test_driver_does_not_invoke_billed_record_on_other_events() -> None:
     async def fake_record(*, event: BetaManagedAgentsSpanModelRequestEndEvent) -> None:
         calls.append(event)
 
-    await run_turn(
+    await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -112,7 +111,7 @@ async def test_driver_propagates_billed_record_exception() -> None:
         raise RuntimeError("metering down")
 
     with pytest.raises(RuntimeError, match="metering down"):
-        await run_turn(
+        await run_turn_on_leg(
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -132,7 +131,7 @@ async def test_driver_billing_exempt_invokes_no_recorder() -> None:
         ]
     ]
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -158,7 +157,7 @@ async def test_driver_billing_exempt_logs_exactly_once_per_turn_with_multiple_ev
     ]
 
     with structlog.testing.capture_logs() as logs:
-        await run_turn(
+        await run_turn_on_leg(
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -184,7 +183,7 @@ async def test_run_turn_without_billing_raises_type_error() -> None:
     ]
 
     with pytest.raises(TypeError):
-        await run_turn(  # type: ignore[call-arg]
+        await run_turn_on_leg(  # type: ignore[call-arg]
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",

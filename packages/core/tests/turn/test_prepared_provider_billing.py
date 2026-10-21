@@ -25,6 +25,7 @@ from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderAc
 from daimon.core.turn.run import prepared_billing, run_prepared_turn_impl
 from daimon.core.turn.state import TurnState
 from daimon.core.usage_billing import ObservationBilled
+from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
 from daimon.testing.turn_fakes import RecordingLifecycle
@@ -330,6 +331,10 @@ async def test_anthropic_prepared_turn_never_forwards_a_provider_action_callback
     db_session_factory: async_sessionmaker[AsyncSession],
     configured: bool,
 ) -> None:
+    async with db_session_factory() as session:
+        # The mux path binds the session in a slot whose tenant column references this row.
+        await make_tenant(session, id=TENANT)
+        await session.commit()
     selected = admitted()
     if configured:
         selected = replace(

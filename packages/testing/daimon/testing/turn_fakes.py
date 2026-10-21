@@ -23,6 +23,7 @@ from dataclasses import dataclass, field
 from datetime import datetime
 from decimal import Decimal
 from pathlib import Path
+from types import SimpleNamespace
 from typing import Any, cast
 
 import anthropic
@@ -35,11 +36,12 @@ from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAg
 from daimon.core.config import McpSettings, TurnSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
+from daimon.core.turn import run_turn
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
-from daimon.testing.turn_leg import MUX_LEG, turn_leg
+from daimon.testing.turn_leg import MUX_LEG, leg_scope, turn_leg
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # --- Stream scripts --------------------------------------------------------
@@ -168,8 +170,13 @@ class FakeEventsResource:
     streams: list[_FakeEventStream] = field(default_factory=list["_FakeEventStream"])
 
     async def stream(
-        self, *, session_id: str, timeout: float | httpx.Timeout | anthropic.NotGiven | None = None
+        self,
+        *,
+        session_id: str,
+        timeout: float | httpx.Timeout | anthropic.NotGiven | None = None,
+        event_deltas: object = None,
     ) -> _FakeEventStream:
+        del event_deltas  # the mux codec asks for message previews; the scripts carry full events
         if not self.stream_scripts:
             raise AssertionError("FakeEventsResource: no stream_scripts left")
         script = self.stream_scripts.pop(0)
@@ -198,8 +205,10 @@ class FakeEventsResource:
             events.reverse()
         return _FakeEventList(events)
 
-    async def send(self, session_id: str, *, events: list[dict[str, Any]]) -> None:
+    async def send(self, session_id: str, *, events: list[dict[str, Any]]) -> SimpleNamespace:
         self.sent_events.append((session_id, list(events)))
+        # The SDK returns a `SendEventsResponse`; the mux codec reads `.data` (None: queued).
+        return SimpleNamespace(data=None)
 
 
 class _FakeEventStream:
@@ -328,6 +337,13 @@ class FakeAnthropic:
     """
 
     beta: FakeBeta = field(default_factory=FakeBeta)
+
+
+async def run_turn_on_leg(**kwargs: Any) -> TurnState:  # noqa: ANN401 - forwards run_turn's keywords
+    """`run_turn` with the selected leg's path and authorized scope, for direct driver tests."""
+    kwargs.setdefault("path", turn_leg().path)
+    kwargs.setdefault("scope", leg_scope())
+    return await run_turn(**kwargs)
 
 
 # --- Error constructors (SDK exception shape) -----------------------------

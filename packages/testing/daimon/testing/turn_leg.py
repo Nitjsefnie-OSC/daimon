@@ -15,6 +15,7 @@ suffix) so a reader sees the pin and the other leg is not silently converted.
 from __future__ import annotations
 
 from daimon.core.config import TurnSettings, load_turn_settings
+from mux.contracts.ids import Scope
 
 LEGACY_LEG = TurnSettings(path="legacy")
 MUX_LEG = TurnSettings(path="mux", channel_backends=True)
@@ -27,6 +28,24 @@ def turn_leg() -> TurnSettings:
     test run onto a leg the command line did not ask for.
     """
     return load_turn_settings(_env_file=None)
+
+
+LEG_SCOPE = Scope(
+    tenant_id="leg-test-tenant",
+    account_id="leg-test-account",
+    principal_id="test-host",
+    authorization_id="offline-admitted-turn",
+)
+
+
+def leg_scope() -> Scope | None:
+    """The authorized scope a direct driver call carries on this leg.
+
+    The mux path refuses a turn without the caller's authorized scope; the legacy
+    path takes none. A test that calls the driver directly passes this, so one
+    test body exercises whichever path the leg selected.
+    """
+    return LEG_SCOPE if is_mux_leg() else None
 
 
 def is_mux_leg() -> bool:

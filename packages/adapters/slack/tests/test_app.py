@@ -76,6 +76,35 @@ from yarl import URL
 from .harness import make_orchestrate_app
 
 
+async def _seed_thread_session(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    *,
+    tenant_id: uuid.UUID,
+    thread_id: str,
+    external_user_id: str,
+    ma_session_id: str,
+) -> ThreadSessionRow:
+    """A real live mapping row for `external_user_id`'s account.
+
+    The mux path re-reads the mapping from the database before it binds the turn, so a
+    mocked-out store must hand back a row that exists, not a free-standing one.
+    """
+    from daimon.core.stores.identity import get_or_create_platform_principal
+
+    async with db_session_factory.begin() as session:
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=tenant_id, platform="slack", external_id=external_user_id
+        )
+        return await create_thread_session(
+            session,
+            tenant_id=tenant_id,
+            platform="slack",
+            thread_id=thread_id,
+            account_id=principal.account_id,
+            ma_session_id=ma_session_id,
+        )
+
+
 @pytest.mark.parametrize("other_team,other_channel", [("T_A", "C_B"), ("T_B", "C_A")])
 async def test_same_thread_timestamp_in_two_channels_keeps_turns_separate(
     fake_slack_web_client: Any,
@@ -1722,18 +1751,12 @@ async def test_orchestrate_queue_coalesce_when_thread_in_flight_adds_hourglass_a
     # The patched store returns the same validated Pydantic type the real
     # store returns, so a field the production code reads is a real value
     # or a loud failure, never an auto-generated mock attribute.
-    now = datetime.now(UTC)
-    fake_thread_session_row = ThreadSessionRow(
-        id=uuid.uuid4(),
+    fake_thread_session_row = await _seed_thread_session(
+        db_session_factory,
         tenant_id=tenant_id,
-        platform="slack",
         thread_id=thread_ts,
-        account_id=uuid.uuid4(),
+        external_user_id="U_TEST_A",
         ma_session_id="sess-coalesce-001",
-        watermark_message_id=None,
-        status="live",
-        created_at=now,
-        updated_at=now,
     )
 
     with (
@@ -1998,8 +2021,13 @@ async def test_drain_partitions_queued_mentions_by_author_when_two_users_queue_i
             session, tenant_id=tenant_id, platform="slack", external_id="U_TEST_A"
         )
     resolved_authors: list[str] = []
-    fake_row = MagicMock()
-    fake_row.id = uuid.uuid4()
+    fake_row = await _seed_thread_session(
+        db_session_factory,
+        tenant_id=tenant_id,
+        thread_id=thread_ts,
+        external_user_id="U_TEST_A",
+        ma_session_id="sess-partition-001",
+    )
 
     with (
         patch(
@@ -3050,18 +3078,12 @@ async def test_run_thread_turn_two_turns_same_session_chain_sweeps_serially(
         # The patched store returns the same validated Pydantic type the real
         # store returns, so a field the production code reads is a real value
         # or a loud failure, never an auto-generated mock attribute.
-        now = datetime.now(UTC)
-        fake_thread_session_row = ThreadSessionRow(
-            id=uuid.uuid4(),
+        fake_thread_session_row = await _seed_thread_session(
+            db_session_factory,
             tenant_id=tenant_id,
-            platform="slack",
             thread_id=thread_ts,
-            account_id=uuid.uuid4(),
+            external_user_id="U_TEST_CHAIN",
             ma_session_id="sess-chain-001",
-            watermark_message_id=None,
-            status="live",
-            created_at=now,
-            updated_at=now,
         )
         mock_create_ts.return_value = fake_thread_session_row
         mock_resolve_agent.return_value = "agent_sweep_id"
@@ -5948,11 +5970,17 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
             "text": "<@U_BOT> hello",
         }
 
-    _fake_session = ma_session(
-        id="sess-ceiling-release-001",
-        agent=ma_session_agent(id="agent_test_id"),
-        environment_id="env_test_id",
-    )
+    created_sessions = 0
+
+    async def _create_session(*args: Any, **kwargs: Any) -> Any:
+        # One session per mention: the mux path binds a session id to exactly one slot.
+        nonlocal created_sessions
+        created_sessions += 1
+        return ma_session(
+            id=f"sess-ceiling-release-{created_sessions:03d}",
+            agent=ma_session_agent(id="agent_test_id"),
+            environment_id="env_test_id",
+        )
 
     async def _sleepy_run_turn(*, lifecycle: Any, **kwargs: Any) -> TurnState:
         await asyncio.sleep(5.0)
@@ -5977,7 +6005,7 @@ async def test_ceiling_breach_releases_tenant_slot_and_thread_flag(
             mock_create_session = stack.enter_context(
                 patch("daimon.core.turn.prepare.create_session", new_callable=AsyncMock)
             )
-            mock_create_session.return_value = _fake_session
+            mock_create_session.side_effect = _create_session
             mock_turn_deadline = stack.enter_context(
                 patch("daimon.adapters.slack.app.turn_deadline")
             )

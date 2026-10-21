@@ -457,10 +457,14 @@ async def _run_turn_with_stalled_card_retire(
         BetaManagedAgentsSessionStatusIdleEvent,
     )
     from daimon.core.tool_safety import ToolSafetyPolicy
-    from daimon.core.turn import run_turn
     from daimon.core.turn.approvals import interactive_decider
     from daimon.core.turn.posture import BillingExempt, PolicyApproval
-    from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+    from daimon.testing.turn_fakes import (
+        FakeAnthropic,
+        RecordingLifecycle,
+        YieldEvent,
+        run_turn_on_leg,
+    )
 
     monkeypatch.setattr(driver_mod, "CLEANUP_BUDGET_S", 0.2)
     at = datetime.now(UTC)
@@ -499,7 +503,7 @@ async def _run_turn_with_stalled_card_retire(
     ]
     started = asyncio.get_running_loop().time()
     final = await asyncio.wait_for(
-        run_turn(
+        run_turn_on_leg(
             anthropic=fa,  # type: ignore[arg-type]
             session_id="sess_1",
             user_message="file a bug",
