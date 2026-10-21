@@ -2996,7 +2996,7 @@ import asyncio
 import anthropic
 import httpx
 from daimon.core.turn.run import _archive_orphaned_session
-from daimon.testing.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_models import ma_session
 
 async def handler(_request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json=ma_session(id="sess_orphan").model_dump(mode="json"))

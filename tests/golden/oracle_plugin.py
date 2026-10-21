@@ -381,7 +381,10 @@ def pytest_runtest_setup(item: Any) -> None:
 
     for module in tuple(sys.modules.values()):
         name = getattr(module, "__name__", "")
-        if not (name.startswith(("daimon.", "jwt.")) or name == item.module.__name__):
+        # mux.testing holds the MA fakes that used to live in daimon.testing.
+        if not (
+            name.startswith(("daimon.", "jwt.", "mux.testing.")) or name == item.module.__name__
+        ):
             continue
         if (
             getattr(module, "datetime", None) is datetime

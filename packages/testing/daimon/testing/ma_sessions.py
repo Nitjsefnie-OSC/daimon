@@ -13,7 +13,7 @@ fake MUST be last, since `make_fake_ma_handler` never raises `NotHandled`;
 unmatched requests fall through to its own 404, which would otherwise
 swallow requests meant for this handler):
 
-    from daimon.testing.ma import (
+    from mux.testing.drivers.anthropic.ma import (
         FakeMAState,
         build_fake_anthropic,
         combine_handlers,
