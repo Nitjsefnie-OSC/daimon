@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- `DAIMON_TURN__PATH` defaults to `mux`, so turns run through the Events/Sessions ports. Set `DAIMON_TURN__PATH=legacy` to keep the previous path; an empty value now selects `mux`. `DAIMON_TURN__CHANNEL_BACKENDS` stays off by default, so channels with no backend configuration behave as before and configured channels are still not read. CI adds a legacy leg beside the mux leg.
+
 - Attach shared selfhosted skill pins only when an authorized editor adds them; unrelated saves cannot authorize another editor’s unowned pins.
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.

@@ -164,9 +164,9 @@ callback, settlement and normalized export. See `../testing/docs/conformance/REA
 
 `AnthropicManagedAgents` registers an `AnthropicEvents` port over the
 host's existing SDK client; an explicitly injected Events implementation still
-wins. The host bridge is experimental and requires `DAIMON_TURN__PATH=mux`;
-unset or empty selects the unchanged `legacy` path. No database writes or
-client retry settings are added by the bridge.
+wins. The host bridge runs when `DAIMON_TURN__PATH=mux`, the default (unset
+or empty also selects `mux`); `legacy` selects the previous direct-SDK path.
+No client retry settings are added by the bridge.
 Sessions lifecycle remains a separately injected port.
 
 The Events port checks host resource authorization before sending, listing,
