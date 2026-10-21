@@ -17,12 +17,31 @@ from mux.drivers.gemini.core import (
     GeminiEnvironments,
     GeminiEvents,
     GeminiSessions,
+    compile_agent,
+    compile_environment,
     page_values,
+)
+from mux.drivers.gemini.deployment import (
+    configured_catalog_transport,
+    configured_transport,
+    downscoped_storage_token,
+)
+from mux.drivers.gemini.flash import (
+    FLASH_MODELS,
+    FLASH_PRIMARY,
+    FlashAccounting,
+    FlashAttempt,
+    FlashTransport,
 )
 from mux.drivers.gemini.mcp_auth import GCSSecretResolver, MCPSecretResolver
 from mux.drivers.gemini.resources import GeminiArtifacts, GeminiSkills
-from mux.drivers.gemini.skill_deployment import SkillBundlePublisher
-from mux.drivers.gemini.storage import Storage
+from mux.drivers.gemini.skill_deployment import (
+    GCSBundleDeployment,
+    RetainedSkillDeployments,
+    SkillBundlePublisher,
+    verify_retained_deployments,
+)
+from mux.drivers.gemini.storage import Records, Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import UnsupportedCapability
 from mux.profiles.gemini import INLINE_REUSE as PROFILE
@@ -142,4 +161,34 @@ class GeminiManagedAgents:
         raise UnsupportedCapability((namespace,), PROFILE.profile_id)
 
 
-__all__ = ["GeminiCatalogAdapter", "GeminiManagedAgents", "MCPSecretResolver"]
+__all__ = [
+    "AgentCatalogTransport",
+    "FLASH_MODELS",
+    "FLASH_PRIMARY",
+    "FlashAccounting",
+    "FlashAttempt",
+    "FlashTransport",
+    "GCSBundleDeployment",
+    "GCSSecretResolver",
+    "GeminiAgents",
+    "GeminiArtifacts",
+    "GeminiCatalogAdapter",
+    "GeminiEnvironments",
+    "GeminiEvents",
+    "GeminiManagedAgents",
+    "GeminiSessions",
+    "GeminiSkills",
+    "GeminiUsage",
+    "MCPSecretResolver",
+    "Records",
+    "RetainedSkillDeployments",
+    "SkillBundlePublisher",
+    "Storage",
+    "Transport",
+    "compile_agent",
+    "compile_environment",
+    "configured_catalog_transport",
+    "configured_transport",
+    "downscoped_storage_token",
+    "verify_retained_deployments",
+]

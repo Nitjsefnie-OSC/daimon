@@ -6,6 +6,8 @@ from contextlib import AsyncExitStack
 from dataclasses import replace
 
 import httpx
+import mux.drivers.gemini as gemini_transport
+import mux.drivers.openai as openai_transport
 import pytest
 from daimon.core.config import AnthropicSettings, DatabaseSettings, Settings, TurnSettings
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
@@ -15,9 +17,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import bind_session_impl
 from daimon.core.turn.runtime_manifest import read_preparation_counterpart
 from daimon.testing.isolated_sdk import build_async_openai, build_gemini_client
-from mux.drivers.gemini import deployment as gemini_transport
 from mux.drivers.gemini.transport import SDKTransport as GeminiSDKTransport
-from mux.drivers.openai import deployment as openai_transport
 from mux.drivers.openai.transport import SDKTransport
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import async_sessionmaker

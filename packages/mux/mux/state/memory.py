@@ -387,3 +387,11 @@ class MemoryStateStore:
             staged.outbox[row.key] = current.model_copy(update={"applied": True})
             self._commit("mark_outbox_applied", staged)
             return True
+
+
+__all__ = [
+    "CrashPoint",
+    "MemoryStateData",
+    "MemoryStateStore",
+    "SimulatedCrash",
+]

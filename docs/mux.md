@@ -317,6 +317,31 @@ not zero. `input_tokens` includes the cached and cache-write counts, and
 provider's own usage record unchanged. A later revision of the same
 observation corrects it, and the corrections are applied as a delta.
 
+## Public import paths
+
+Every public module declares `__all__`, and each public name is reachable
+from one module. `packages/mux/tests/test_public_exports.py` checks that every
+listed name exists and has no second path.
+
+| Import from | For |
+| --- | --- |
+| `mux.contracts` | `Contract` and `FrozenMap`, the base types defined in the private `_base` module |
+| `mux.contracts.<module>` | the contract types in the Layout table above, each from the module that defines it |
+| `mux.errors` | the error taxonomy (the stable path for `mux.contracts.errors`) |
+| `mux.state.<module>` | the state protocol and rules |
+| `mux.profiles` | the declared profiles and their lookups |
+| `mux.drivers` | `isolated_ssl_context` |
+| `mux.drivers.anthropic`, `mux.drivers.openai`, `mux.drivers.gemini` | the driver factory and the host-injection API: transports, credential and secret schemas, resource ports, payload and record helpers |
+
+Import a driver's names from its package, not from a submodule such as
+`mux.drivers.anthropic.transport`. Submodules and `_`-prefixed modules are
+implementation files and may move. One import-linter contract keeps Daimon's
+own code to this rule. The selfhosted driver is not yet covered, and three
+generic names stay on their submodules: openai `KEY` and `reserved`, and gemini
+`credential`. Two intentional second paths exist: `mux.errors` and
+`mux.contracts.errors`, and `RequiredAction` in `mux.contracts.events` and
+`mux.contracts.actions`.
+
 ## Dependencies and import rules
 
 `daimon-mux` depends on `pydantic` and `httpx`. Each driver's SDK is an
@@ -332,6 +357,7 @@ Import-linter contracts in the root `pyproject.toml` hold the boundaries:
 | Only mux.drivers.anthropic imports the anthropic SDK | `mux` → `anthropic`, except from `mux.drivers.anthropic` |
 | Only mux.drivers.openai imports the openai SDK | `mux` → `openai`, except from `mux.drivers.openai` |
 | Only mux.drivers.gemini imports the google.genai SDK | `mux` → `google`, except from `mux.drivers.gemini` |
+| Daimon product code imports provider drivers through their packages | `daimon.core`, `daimon.adapters` → submodules of `mux.drivers.anthropic`, `.openai`, `.gemini` and `mux.contracts._base`, with three named exceptions |
 
 The tests run in CI as the `pytest-mux` job (`uv run pytest packages/mux`).
 

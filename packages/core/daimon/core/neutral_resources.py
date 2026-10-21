@@ -55,7 +55,7 @@ from daimon.core.stores.neutral_catalog import (
     PostgresNeutralCatalog,
     SkillVersion,
 )
-from mux.contracts._base import Contract, FrozenMap
+from mux.contracts import Contract, FrozenMap
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision, Scope, SkillRef
@@ -1665,7 +1665,7 @@ def resolve_worker_spec(
             and resource.resource.kind == "memory_store"
         )
     )
-    from mux.drivers.anthropic.sessions_lifecycle import MemoryMount, SessionResourceConfig
+    from mux.drivers.anthropic import MemoryMount, SessionResourceConfig
 
     for resource in resources:
         if resource.native is None:

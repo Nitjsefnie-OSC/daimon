@@ -57,15 +57,17 @@ from daimon.core.turn.runtime_manifest import (
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import AgentSpec, EnvironmentSpec, ToolSpec
-from mux.drivers.gemini.catalog import GeminiCatalogAdapter
-from mux.drivers.gemini.core import compile_agent, compile_environment
-from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAccounting
-from mux.drivers.gemini.skill_deployment import (
+from mux.drivers.gemini import (
+    FLASH_PRIMARY,
+    FlashAccounting,
     GCSBundleDeployment,
+    GeminiCatalogAdapter,
     RetainedSkillDeployments,
+    Storage,
+    compile_agent,
+    compile_environment,
     verify_retained_deployments,
 )
-from mux.drivers.gemini.storage import Storage
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import (
     INLINE_REUSE,
@@ -482,7 +484,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             raise ScopeViolation(
                 "skill-deployment", "invalid explicit storage credential"
             ) from None
-        from mux.drivers.gemini.deployment import downscoped_storage_token
+        from mux.drivers.gemini import downscoped_storage_token
 
         if plan.gcs_mount_bucket is None or plan.gcs_mount_prefix is None:
             raise AdmissionDenied(reason="backend_unsupported")
@@ -554,7 +556,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         secret = os.environ.get(plan.api_key_env)
         if secret is None or not secret.strip():
             raise AdmissionDenied(reason="backend_unsupported")
-        from mux.drivers.gemini.deployment import configured_catalog_transport, configured_transport
+        from mux.drivers.gemini import configured_catalog_transport, configured_transport
 
         return GeminiTransportRuntime(
             configured_transport(api_key=secret, protect_storage_credentials=True)

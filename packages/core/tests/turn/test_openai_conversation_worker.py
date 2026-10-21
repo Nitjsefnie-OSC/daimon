@@ -10,6 +10,7 @@ from pathlib import Path
 from uuid import UUID
 
 import httpx
+import mux.drivers.openai as deployment
 import pytest
 from daimon.core.authz import Subject
 from daimon.core.channel_backend import AgentBackendService, BackendActor
@@ -25,7 +26,6 @@ from daimon.core.turn.runtime_manifest import read_frozen_root
 from daimon.core.turn.runtimes import build_channel_runtime
 from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.resources import AgentSpec
-from mux.drivers.openai import deployment
 from mux.drivers.openai.transport import SDKTransport
 
 from .test_fleet_native_dispatch import _settled

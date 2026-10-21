@@ -743,7 +743,7 @@ async def claimed_openai_worker(
         api_key="offline",
         base_url="https://openai.invalid/v1",
     ) as sdk:
-        from mux.drivers.openai import deployment as native_transport
+        import mux.drivers.openai as native_transport
 
         monkeypatch.setattr(
             native_transport, "configured_transport", lambda **kwargs: SDKTransport(sdk)

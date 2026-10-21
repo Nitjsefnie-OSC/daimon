@@ -1276,3 +1276,18 @@ qualified server/tool identity.
 The dynamic-session pool audience requires `session_pool=true`; transport
 requests require a nonempty session ID. The pool container must independently
 validate Entra tokens for that audience and allowlist the invoking host principal.
+
+## Import paths
+
+Each public module declares `__all__`; `tests/test_public_exports.py` checks
+that the names exist and that no name has a second public path. Import contract
+types from the module that defines them (`mux.contracts.ports`,
+`mux.contracts.resources`, ...), `Contract` and `FrozenMap` from `mux.contracts`,
+errors from `mux.errors`, and driver names from the driver package
+(`from mux.drivers.anthropic import AnthropicManagedAgents`), never from a
+driver submodule. The root import-linter contract "Daimon product code imports
+provider drivers through their packages" holds this for Daimon. The selfhosted
+driver is not covered yet. The exceptions are openai `KEY` and `reserved` and
+gemini `credential` (generic names), and the two documented second paths
+`mux.errors` / `mux.contracts.errors` and `RequiredAction` in
+`mux.contracts.events` / `mux.contracts.actions`.
