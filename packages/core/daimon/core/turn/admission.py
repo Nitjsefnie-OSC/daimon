@@ -101,6 +101,7 @@ from daimon.core.turn.errors import (
     SessionBusyError,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import Scope, ThreadRef
@@ -186,6 +187,10 @@ class Admission:
     source_sealed: bool = False
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
+    # The channel the turn is held to (`daimon.core.turn_hold`): the requester is
+    # from another organisation, or the channel is shared with one. Its session
+    # gets a credential bound to that channel. None for an ordinary turn.
+    hold: TurnHold | None = None
     private_dm_id: str | None = None
     # The channel and thread the turn runs in, and every sealed id that seals
     # them (the channel and a thread sealed on its own): stamped on the session
