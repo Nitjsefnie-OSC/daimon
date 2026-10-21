@@ -29,7 +29,7 @@ app = create_app(home=Path(os.environ["PROBE_HOME"]))
 assert app.state.supervisor.adapter.key == secrets[0]
 assert app.state.supervisor.operator_credentials["HARNESS_MCP_CRED_TEST"] == secrets[2]
 assert not any(name in os.environ for name in ("AZURE_OPENAI_API_KEY", "HARNESS_TOKEN", "HARNESS_MCP_CRED_TEST"))
-request = TurnRequest(session_id="s", turn_id="t", idempotency_key="k", model="m", instructions="", input=[], mcp_servers=[], skills=[], limits={"max_tool_calls": 1, "deadline_s": 5})
+request = TurnRequest(session_id="s", turn_id="t", idempotency_key="k", model="gpt-6-luna", instructions="", input=[], mcp_servers=[], skills=[], limits={"max_tool_calls": 1, "deadline_s": 5})
 context = TurnContext(request, Path(os.environ["PROBE_HOME"]), discard_event)
 command = "env; cat /proc/%d/environ 2>/dev/null; cat /proc/%d/cmdline 2>/dev/null; dd if=/proc/%d/mem of=/dev/null bs=1 count=1 2>/dev/null || echo memory-protected; echo writable > allowed.txt" % (os.getpid(), os.getpid(), os.getpid())
 request.skills = [InlineSkill(name="analysis", files={"SKILL.md": "readable-skill"})]
@@ -60,14 +60,16 @@ app.state.supervisor.journal.close()
 
 
 @pytest.mark.parametrize("hidepid", ["0", "1", "2", "invisible"])
-@pytest.mark.parametrize("exempt_group", [False, True])
-def test_proc_mount_requires_hidden_pids_without_exempt_group(tmp_path, hidepid, exempt_group):
+@pytest.mark.parametrize("exempt_group", [None, 10001, 60002])
+def test_proc_mount_requires_reserved_verifier_group(tmp_path, hidepid, exempt_group):
     from daimon_harness.isolation import proc_hides_other_users
 
     mountinfo = tmp_path / "mountinfo"
-    options = f"rw,hidepid={hidepid}" + (",gid=10001" if exempt_group else "")
+    options = f"rw,hidepid={hidepid}" + (f",gid={exempt_group}" if exempt_group else "")
     mountinfo.write_text(f"25 24 0:22 / /proc rw,nosuid - proc proc {options}\n")
-    assert proc_hides_other_users(mountinfo) == (hidepid in {"2", "invisible"} and not exempt_group)
+    assert proc_hides_other_users(mountinfo) == (
+        hidepid in {"2", "invisible"} and exempt_group == 60002
+    )
 
 
 def test_multi_mode_refuses_unsafe_proc_tmp_and_missing_uid_switch(tmp_path, monkeypatch):
@@ -82,7 +84,7 @@ def test_multi_mode_refuses_unsafe_proc_tmp_and_missing_uid_switch(tmp_path, mon
     mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw\n")
     with pytest.raises(RuntimeError, match="hidepid"):
         isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))
-    mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw,hidepid=2\n")
+    mountinfo.write_text("25 24 0:22 / /proc rw - proc proc rw,hidepid=2,gid=60002\n")
     scratch.chmod(0o1777)
     with pytest.raises(RuntimeError, match="not writable"):
         isolation.validate_session_mode(mountinfo=mountinfo, shared_roots=(scratch,))

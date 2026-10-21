@@ -8,6 +8,7 @@ import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import Literal, Protocol
+from urllib.parse import urlencode
 from uuid import NAMESPACE_URL, uuid5
 
 from pydantic import ValidationError
@@ -50,6 +51,7 @@ class TurnTools(Protocol):
 
 
 ToolsResolver = Callable[[Scope, AgentSpec], Awaitable[TurnTools]]
+HighWater = Callable[[ResourceRef], Awaitable[int]]
 
 
 def segment(value: str) -> str:
@@ -116,6 +118,7 @@ class SelfHostedEvents:
         deadline_s: float = 300,
         skill_resolver: SkillResolver | None = None,
         tools_resolver: ToolsResolver | None = None,
+        high_water: HighWater | None = None,
     ) -> None:
         self._c, self._sessions = context, sessions
         self._deployment = deployment
@@ -123,6 +126,8 @@ class SelfHostedEvents:
         self.unresolved_turns: dict[ResourceRef, set[str]] = {}
         self._skill_resolver = skill_resolver
         self._tools_resolver = tools_resolver
+        self.high_water = high_water
+        self._high_water: dict[ResourceRef, int] = {}
         if max_tool_calls < 0 or deadline_s <= 0:
             raise ValueError("invalid turn limits")
         self._model, self._max_tool_calls, self._deadline_s = model, max_tool_calls, deadline_s
@@ -134,7 +139,7 @@ class SelfHostedEvents:
         self._cancels: dict[tuple[ResourceRef, str], CancelReceipt] = {}
         self._stream_cursors: dict[ResourceRef, int] = {}
 
-    def _remember(self, ref: ResourceRef, raw: wire.Event) -> Event:
+    def _remember(self, ref: ResourceRef, raw: wire.Event) -> Event | None:
         if raw.session_id != ref.id:
             raise ScopeViolation(ref.id, "harness replay contains a foreign session")
         history = self._history.setdefault(ref, {})
@@ -147,6 +152,13 @@ class SelfHostedEvents:
                 if old.seq != raw.seq and old.type == "usage":
                     prior = usage(old, ref)
                     if prior.id == observation.id:
+                        if prior.model_dump(
+                            exclude={"observed_at", "native_meter"}
+                        ) == observation.model_dump(exclude={"observed_at", "native_meter"}):
+                            # Keep the raw seq for continuity, but deliver and
+                            # account for this logical model response only once.
+                            history[raw.seq] = raw
+                            return None
                         raise ProviderError(
                             "upstream", retryable=False, native_code="duplicate_usage"
                         )
@@ -171,6 +183,19 @@ class SelfHostedEvents:
         self._normalized.setdefault(ref, {})[raw.seq] = normalized
         return normalized
 
+    async def cursor(self, session: ResourceRef) -> int:
+        persisted = await self.high_water(session) if self.high_water is not None else 0
+        value = max(
+            persisted,
+            self._high_water.get(session, 0),
+            self._stream_cursors.get(session, 0),
+            max(self._history.get(session, {}), default=0),
+        )
+        if not 0 <= value <= 2**53:
+            raise ValueError("invalid session high-water")
+        self._high_water[session] = value
+        return value
+
     async def replay(
         self, scope: Scope, ref: ResourceRef, *, deadline: datetime | None = None
     ) -> tuple[tuple[Event, ...], bool]:
@@ -184,11 +209,16 @@ class SelfHostedEvents:
         ):
             raise ContinuityLost(binding.id, ("environment changed since session creation",))
         self._c.check_environment(environment)
-        after = max(self._history.get(ref, {}), default=0)
+        after = await self.cursor(ref)
+        replay_after = max(self._history.get(ref, {}), default=0)
+        query = {"after_seq": after}
+        if replay_after < after:
+            query["replay_after_seq"] = replay_after
         raw = await self._c.transport.request(
             "GET",
-            f"/v0/sessions/{segment(ref.id)}/events?after_seq={after}",
+            f"/v0/sessions/{segment(ref.id)}/events?{urlencode(query)}",
             session_id=ref.id,
+            after_seq=after,
             deadline=deadline,
         )
         try:
@@ -205,7 +235,8 @@ class SelfHostedEvents:
             if event.seq <= last:
                 raise ProviderError("upstream", retryable=False, native_code="unordered_replay")
             if event.seq not in self._history.get(ref, {}):
-                result.append(self._remember(ref, event))
+                if remembered := self._remember(ref, event):
+                    result.append(remembered)
             elif self._history[ref][event.seq] != event:
                 raise ContinuityLost(ref.id, ("harness changed a committed event",))
             last = event.seq
@@ -248,6 +279,7 @@ class SelfHostedEvents:
                 "state": "requires_action" if actions else state,
                 "active_root_turn": active,
                 "required_actions": tuple(actions.values()),
+                "gaps": tuple(event.id for event in events if event.type == "session.history_gap"),
                 "taken_at": datetime.now(UTC),
             }
         )
@@ -439,8 +471,9 @@ class SelfHostedEvents:
             try:
                 raw = await self._c.transport.request(
                     "POST",
-                    "/v0/turns",
+                    f"/v0/turns?after_seq={await self.cursor(session)}",
                     session_id=session.id,
+                    after_seq=await self.cursor(session),
                     body=request.model_dump(mode="json"),
                     mcp_authorization=mcp_authorization,
                 )
@@ -520,9 +553,11 @@ class SelfHostedEvents:
                 try:
                     await self._c.transport.request(
                         "POST",
-                        f"/v0/turns/{segment(turn_id)}/actions",
+                        f"/v0/turns/{segment(turn_id)}/actions"
+                        f"?after_seq={await self.cursor(session)}",
                         body=body.model_dump(mode="json", exclude_unset=True),
                         session_id=session.id,
+                        after_seq=await self.cursor(session),
                     )
                 except ProviderError as error:
                     if not error.retryable:
@@ -561,6 +596,9 @@ class SelfHostedEvents:
     ) -> AsyncIterator[Event]:
         self._c.binding(scope, session)
         cursor = int(after or "0")
+        if not 0 <= cursor <= 2**53:
+            raise ValueError("invalid session cursor")
+        self._high_water[session] = max(self._high_water.get(session, 0), cursor)
         # Each HTTP request is bounded by the transport. An idle reader may
         # wait for a later turn, whose execution and cleanup have their own limits.
         initial, complete = await self.replay(
@@ -667,7 +705,11 @@ class SelfHostedEvents:
         status = "already_stopped"
         if not ended:
             raw = await self._c.transport.request(
-                "POST", f"/v0/turns/{segment(turn_id)}/cancel", body={}, session_id=session.id
+                "POST",
+                f"/v0/turns/{segment(turn_id)}/cancel?after_seq={await self.cursor(session)}",
+                body={},
+                session_id=session.id,
+                after_seq=await self.cursor(session),
             )
             result = wire.CancelResponse.model_validate(raw)
             status = "requested" if result.cancelled else "outcome_unknown"
