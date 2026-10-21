@@ -8,6 +8,7 @@ import json
 import secrets
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextvars import ContextVar
+from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
@@ -20,7 +21,7 @@ from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic.transport import single_attempt_mutation
 from mux.errors import ProviderError, ScopeViolation
 from mux.state.journal import JournalAppend, JournalEntry, is_authoritative
-from mux.state.lease import Lease, Slot, StaleFence
+from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.operations import OperationRecord, SendClaimed, request_digest
 from mux.state.store import StateStore, binding_slot
 from pydantic import BaseModel, JsonValue
@@ -36,6 +37,36 @@ current_persistence: ContextVar[TurnPersistence | None] = ContextVar(
 
 class UncertainSend(Exception):
     """A prior claim may have reached the provider; replay, never resend it."""
+
+
+class LeaseWaitCancelled(Exception):
+    """The turn's cancel signal fired while it waited for the thread's lease."""
+
+
+class BindingSuperseded(ScopeViolation):
+    """The binding changed while the turn queued for its lease.
+
+    Raised only for a turn that waits: its holder may have replaced the session
+    it was prepared against, and the caller adopts that replacement.
+    """
+
+
+@dataclass(frozen=True)
+class LeaseWait:
+    """Wait for a busy thread lease instead of refusing the turn.
+
+    `timeout_s` is the patience of this one wait, measured on the event loop's
+    monotonic clock; the caller derives it from the turn's own ceiling, so a
+    waiting turn never outlives the bound a running one has. Whether the lease
+    is free is always the store's call (the Postgres store compares against the
+    database clock), so a holder that dies frees the slot when its TTL lapses.
+    `cancel` is the turn's cancel signal, honoured while waiting.
+    """
+
+    timeout_s: float
+    cancel: asyncio.Event | None = None
+    poll_initial_s: float = 0.05
+    poll_max_s: float = 1.0
 
 
 class TurnPersistence:
@@ -62,6 +93,7 @@ class TurnPersistence:
         ttl: timedelta = timedelta(minutes=5),
         renew_interval_s: float = 60.0,
         send_timeout_s: float = 120.0,
+        lease_wait: LeaseWait | None = None,
     ) -> None:
         slot = binding_slot(binding) if binding is not None else slot
         if slot is None:
@@ -94,6 +126,8 @@ class TurnPersistence:
         self._renew_interval_s = renew_interval_s
         self._send_timeout_s = send_timeout_s
         self._lease: Lease | None = None
+        self._lease_wait = lease_wait
+        self.lease_acquired = False
 
     @property
     def slot(self) -> Slot:
@@ -134,9 +168,13 @@ class TurnPersistence:
             raise ScopeViolation(self.operation_key, "turn does not hold its binding's lease")
         return self._lease
 
-    async def _check_binding(self) -> None:
+    async def _check_binding(self, *, queued: bool = False) -> None:
         persisted = await self.store.get_binding(self._slot)
         if persisted != self._binding:
+            if queued:
+                raise BindingSuperseded(
+                    self.operation_key, "turn binding changed while the turn waited for its lease"
+                )
             raise ScopeViolation(
                 self.operation_key, "turn binding is not the current persisted binding"
             )
@@ -148,20 +186,54 @@ class TurnPersistence:
                 self._fence(), now=self._now(), ttl=self._ttl
             )
 
+    async def _acquire_lease(self) -> Lease:
+        """Take the binding's lease; with `lease_wait`, queue behind a live holder.
+
+        Each poll is one store acquisition, so a lease the holder released or
+        let expire is taken by whichever waiter polls next. Nothing is held
+        while waiting: a cancelled or timed-out waiter has nothing to release.
+        """
+        wait = self._lease_wait
+        loop = asyncio.get_running_loop()
+        give_up = loop.time() + wait.timeout_s if wait is not None else 0.0
+        delay = wait.poll_initial_s if wait is not None else 0.0
+        while True:
+            try:
+                return await self.store.acquire_lease(
+                    self._slot,
+                    holder=self._holder,
+                    turn_id=self.operation_key,
+                    now=self._now(),
+                    ttl=self._ttl,
+                )
+            except LeaseBusy:
+                if wait is None:
+                    raise
+            if wait.cancel is not None and wait.cancel.is_set():
+                raise LeaseWaitCancelled(self.operation_key)
+            patience = give_up - loop.time()
+            if patience <= 0:
+                raise TimeoutError(f"{self._slot.describe()} stayed leased by another turn")
+            await self._sleep_or_cancel(min(delay, patience), wait.cancel)
+            delay = min(delay * 2, wait.poll_max_s)
+
+    @staticmethod
+    async def _sleep_or_cancel(delay: float, cancel: asyncio.Event | None) -> None:
+        if cancel is None:
+            await asyncio.sleep(delay)
+            return
+        with contextlib.suppress(TimeoutError):
+            await asyncio.wait_for(cancel.wait(), timeout=delay)
+
     async def run[T](self, pump: Callable[[], Coroutine[Any, Any, T]]) -> T:
         await self._check_binding()
-        self._lease = await self.store.acquire_lease(
-            self._slot,
-            holder=self._holder,
-            turn_id=self.operation_key,
-            now=self._now(),
-            ttl=self._ttl,
-        )
+        self._lease = await self._acquire_lease()
+        self.lease_acquired = True
         work: asyncio.Task[T] | None = None
         renew: asyncio.Task[None] | None = None
         try:
             # A binding CAS while acquisition waited must not route a stale turn.
-            await self._check_binding()
+            await self._check_binding(queued=self._lease_wait is not None)
             work = asyncio.create_task(pump(), name="turn.mux_pump")
             renew = asyncio.create_task(self._renew(), name="turn.mux_lease")
             done, _ = await asyncio.wait((work, renew), return_when=asyncio.FIRST_COMPLETED)

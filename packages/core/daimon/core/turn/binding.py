@@ -9,7 +9,7 @@ from daimon.core.stores.thread_sessions import get_live_thread_session, get_thre
 from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.outcomes import current_outcome
-from daimon.core.turn.persistence import TurnPersistence
+from daimon.core.turn.persistence import LeaseWait, TurnPersistence
 from daimon.core.turn.prepare import admitted_session_scope
 from mux.contracts.ids import ChannelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -31,6 +31,7 @@ async def prepared_persistence(
     session_ref: ResourceRef | None = None,
     scope: Scope | None = None,
     fleet_capture: bool = False,
+    lease_wait: LeaseWait | None = None,
 ) -> TurnPersistence:
     """Adopt existing native ids; publish ownership through put_binding only.
 
@@ -86,6 +87,7 @@ async def prepared_persistence(
             source_agent_id=admission.agent.id,
             session_ref=session_ref,
             fleet_capture=fleet_capture,
+            lease_wait=lease_wait,
         )
     channel_id = admission.origin_channel_id or ""
     if mapping_id is not None:
@@ -184,4 +186,5 @@ async def prepared_persistence(
         source_agent_id=admission.agent.id,
         session_ref=session_ref,
         fleet_capture=fleet_capture,
+        lease_wait=lease_wait,
     )

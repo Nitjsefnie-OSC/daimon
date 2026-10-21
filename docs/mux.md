@@ -1074,6 +1074,16 @@ already published by shared-thread preparation, with an accountless slot.
 The writer's admitted tenant/account remains the operation owner. Legacy turns
 perform none of these StateStore reads or writes.
 
+A prepared turn that finds the lease held by another running turn on the same
+thread waits for it, polling the store with a short backoff, rather than raising
+`LeaseBusy`. The wait is bounded by what is left of the turn's ceiling, and a
+turn that exhausts it ends through the ordinary ceiling outcome without retiring
+the thread's session mapping. Stop ends the wait as an interrupt. The store
+decides whether the lease is free, so a holder that dies frees the slot when its
+TTL lapses. If the holder replaced the session while the turn waited, the turn
+adopts that replacement through the same recovery that heals a dead session.
+Callers that use `TurnPersistence` directly keep the immediate `LeaseBusy`.
+
 An input, action decision, cancel or archive persists its intent and wins
 `claim_send` before provider mutation. Claimed Anthropic mutations use a
 single native attempt even when the shared client has its production retry

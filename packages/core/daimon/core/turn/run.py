@@ -76,6 +76,7 @@ from daimon.core.turn.lifecycle import (
 )
 from daimon.core.turn.outbound import scrubbed_for
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
+from daimon.core.turn.persistence import BindingSuperseded, LeaseWait, TurnPersistence
 from daimon.core.turn.posture import Billed, BillingPosture, UsageRecorder
 from daimon.core.turn.prepare import (
     ContinuityOutcome,
@@ -1047,6 +1048,9 @@ async def run_prepared_turn_impl(
     active_record_cell: list[UsageRecorder | ObservationRecorder] = [prepared._record]  # pyright: ignore[reportPrivateUsage]
 
     active_admission_cell: list[Admission] = [prepared.admission]
+    # The mux persistence of the attempt now running; while it waits for a
+    # thread lease held by another turn, this turn runs nothing on its mapping.
+    active_persistence_cell: list[TurnPersistence | None] = [None]
 
     # A replacement session's first user message opens with daimon's framing
     # for the work it inherited (`daimon.core.handoff_context`). Empty for
@@ -1060,6 +1064,7 @@ async def run_prepared_turn_impl(
         session_id: str,
         mapping_id: uuid.UUID | None,
         session_ref: ResourceRef | None = None,
+        attempt_cancel: asyncio.Event = cancel,
     ) -> AsyncIterator[None]:
         if (deps.turn_path or load_turn_settings().path) == "legacy":
             yield
@@ -1076,7 +1081,13 @@ async def run_prepared_turn_impl(
             session_ref=session_ref,
             scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
             fleet_capture=deps.fleet_enabled and prepared._source is not None,  # pyright: ignore[reportPrivateUsage]
+            # Overlapping turns on one thread queue behind the running one, for
+            # at most what this turn has left of its ceiling.
+            lease_wait=LeaseWait(
+                timeout_s=remaining_s(effective_deadline, now=now()), cancel=attempt_cancel
+            ),
         )
+        active_persistence_cell[0] = persistence
         with persistence.activate():
             yield
 
@@ -1120,37 +1131,48 @@ async def run_prepared_turn_impl(
             )
 
         first_attempt = _DeferredFailureLifecycle(inner=lifecycle)
-        async with persisted(prepared.admission, ma_session_id, mapping_id, prepared.session_ref):
-            state = await run_turn(
-                **_turn_port_kwargs(
-                    deps,
-                    prepared.admission,
-                    ma_session_id,
-                    tenant_id=tenant_id,
-                    provider_backend=prepared.backend,
-                    provider_session=prepared.session_ref,
-                    provider_runtime=prepared.runtime,
-                    provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
-                ),
-                anthropic=deps.anthropic,
-                session_id=ma_session_id,
-                user_message=_with_prefix(prefix, user_message),
-                lifecycle=first_attempt,
-                cancel=cancel,
-                render_interval_s=render_interval_s,
-                billing=prepared_billing(prepared, tenant_id=tenant_id),
-                tool_confirmation=tool_confirmation,
-                **action_kwargs,
-                image_blocks=image_blocks,
-                system_blocks=prepared.continuity.system_blocks,
-                before_send=checked_send
-                if before_send is not None or root_intent is not None or worker_finished is not None
-                else decide_before_send(deps, prepared.admission),
-                send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
-            )
+        superseded: BindingSuperseded | None = None
+        try:
+            async with persisted(
+                prepared.admission, ma_session_id, mapping_id, prepared.session_ref
+            ):
+                state = await run_turn(
+                    **_turn_port_kwargs(
+                        deps,
+                        prepared.admission,
+                        ma_session_id,
+                        tenant_id=tenant_id,
+                        provider_backend=prepared.backend,
+                        provider_session=prepared.session_ref,
+                        provider_runtime=prepared.runtime,
+                        provider_scope=prepared._scope,  # pyright: ignore[reportPrivateUsage]
+                    ),
+                    anthropic=deps.anthropic,
+                    session_id=ma_session_id,
+                    user_message=_with_prefix(prefix, user_message),
+                    lifecycle=first_attempt,
+                    cancel=cancel,
+                    render_interval_s=render_interval_s,
+                    billing=prepared_billing(prepared, tenant_id=tenant_id),
+                    tool_confirmation=tool_confirmation,
+                    **action_kwargs,
+                    image_blocks=image_blocks,
+                    system_blocks=prepared.continuity.system_blocks,
+                    before_send=checked_send
+                    if before_send is not None
+                    or root_intent is not None
+                    or worker_finished is not None
+                    else decide_before_send(deps, prepared.admission),
+                    send_guard=lambda: session_mutation_fence(deps.sessionmaker, ma_session_id),
+                )
+        except BindingSuperseded as error:
+            # The holder replaced this turn's session while it queued: the recovery
+            # below adopts that replacement instead of running on the stale one.
+            superseded = error
+            state = TurnState(error=TurnError(kind="upstream", message=str(error)))
 
         if not (
-            _is_dead_session(state)
+            (superseded is not None or _is_dead_session(state))
             and before_send is None
             and worker_finished is None
             and mapping_id is not None
@@ -1159,6 +1181,8 @@ async def run_prepared_turn_impl(
                 or prepared.admission.backend_revision.profile == "anthropic.managed_agents"
             )
         ):
+            if superseded is not None:
+                raise superseded
             await first_attempt.flush_held_failure()
             return RunOutcome(
                 state=state,
@@ -1280,7 +1304,10 @@ async def run_prepared_turn_impl(
             )
             try:
                 async with persisted(
-                    recovery.admission or prepared.admission, new_session_id, new_mapping_id
+                    recovery.admission or prepared.admission,
+                    new_session_id,
+                    new_mapping_id,
+                    attempt_cancel=fresh_cancel,
                 ):
                     recovered_state = await run_turn(
                         **_turn_port_kwargs(
@@ -1348,7 +1375,11 @@ async def run_prepared_turn_impl(
                 deadline=effective_deadline.isoformat(),
             )
 
-            if active_mapping_id is not None:
+            persistence = active_persistence_cell[0]
+            queued = persistence is not None and not persistence.lease_acquired
+            if active_mapping_id is not None and not queued:
+                # A turn still queued behind another never ran on this mapping,
+                # and its holder is using it: only a turn that ran retires it.
                 async with deps.sessionmaker() as session:
                     await mark_dead(session, id=active_mapping_id)
                     await session.commit()

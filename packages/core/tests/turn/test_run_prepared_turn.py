@@ -2737,6 +2737,146 @@ async def test_two_turns_recovering_one_dead_session_leave_one_live_row(
     )
 
 
+async def _run_turn_behind_a_busy_lease(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+    *,
+    thread_id: str,
+    cancel: asyncio.Event,
+    deadline: datetime | None,
+    stop_after_s: float | None = None,
+) -> tuple[RunOutcome, list[ThreadSession], list[str]]:
+    """Run one mux turn whose thread lease is always held by another turn."""
+    from daimon.core.stores.mux_state import PostgresStateStore
+    from mux.state.lease import LeaseBusy
+
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    row = await make_thread_session(
+        db_session,
+        tenant=tenant,
+        account=account,
+        platform="discord",
+        thread_id=thread_id,
+        ma_session_id="sess_live",
+    )
+    await db_session.commit()
+    router = _router(session_bodies=[], dead_session_ids=set())
+    requests: list[str] = []
+
+    async def busy(self: object, slot: Any, **_: object) -> NoReturn:
+        raise LeaseBusy(slot.describe(), "another-turn")
+
+    monkeypatch.setattr(PostgresStateStore, "acquire_lease", busy)
+
+    async def handler(request: httpx.Request) -> httpx.Response:
+        requests.append(f"{request.method} {request.url.path}")
+        return router.dispatch(request)
+
+    engine = build_test_engine(
+        os.environ["DAIMON_DATABASE__TEST_URL"], db_schema, poolclass=NullPool
+    )
+    try:
+        sessionmaker = async_sessionmaker(bind=engine, expire_on_commit=False)
+        deps = dataclasses.replace(
+            _deps(sessionmaker=sessionmaker, router=router),
+            turn_path="mux",
+            channel_backends=True,
+            anthropic=anthropic.AsyncAnthropic(
+                api_key="test",
+                http_client=httpx.AsyncClient(
+                    transport=httpx.MockTransport(handler), base_url="https://api.anthropic.com"
+                ),
+                max_retries=0,
+            ),
+        )
+        agent = ma_agent(id="ag_1", tenant_id=tenant.id)
+        env = ma_environment(id="env_1", tenant_id=tenant.id)
+        prepared = _prepared_turn(
+            deps=deps,
+            admission=_admission(account_id=account.id, agent=agent, env=env),
+            tenant_id=tenant.id,
+            external_user_id="user-1",
+            ma_session_id="sess_live",
+            mapping_id=row.id,
+            session_account_id=account.id,
+        )
+        if stop_after_s is not None:
+            asyncio.get_running_loop().call_later(stop_after_s, cancel.set)
+        outcome = await run_prepared_turn(
+            deps,
+            prepared,
+            tenant_id=tenant.id,
+            platform="discord",
+            thread_id=thread_id,
+            external_user_id="user-1",
+            user_message="hello",
+            lifecycle=RecordingLifecycle(),
+            cancel=cancel,
+            reseed_user_message=_reseed,
+            recovery_lifecycle=_recovery_lifecycle,
+            render_interval_s=0.001,
+            deadline=deadline,
+        )
+        async with sessionmaker() as s:
+            rows = list(
+                (await s.execute(select(ThreadSession).where(ThreadSession.tenant_id == tenant.id)))
+                .scalars()
+                .all()
+            )
+    finally:
+        await engine.dispose()
+    return outcome, rows, requests
+
+
+async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring_the_session(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """On the mux path a turn that finds the thread's lease held waits for it, at
+    most until its own ceiling, then ends through the ordinary ceiling outcome. It
+    never ran on the mapping, whose holder is using it, so the mapping stays live."""
+    started = asyncio.get_running_loop().time()
+    outcome, rows, requests = await _run_turn_behind_a_busy_lease(
+        db_session,
+        db_schema,
+        monkeypatch,
+        thread_id="thread-queued-ceiling",
+        cancel=asyncio.Event(),
+        deadline=datetime.now(UTC) + timedelta(seconds=0.5),
+    )
+    waited = asyncio.get_running_loop().time() - started
+
+    assert outcome.state.error is not None and outcome.state.error.kind == "ceiling"
+    assert outcome.state.termination == TerminationReason.CEILING
+    assert 0.4 <= waited < 5, "the wait is bounded by the turn's ceiling"
+    assert [(r.ma_session_id, r.status) for r in rows] == [("sess_live", "live")]
+    assert not [r for r in requests if r.startswith("POST")], "a queued turn sends nothing"
+
+
+async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
+    db_session: AsyncSession,
+    db_schema: str,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    outcome, rows, requests = await _run_turn_behind_a_busy_lease(
+        db_session,
+        db_schema,
+        monkeypatch,
+        thread_id="thread-queued-stop",
+        cancel=asyncio.Event(),
+        deadline=None,
+        stop_after_s=0.2,
+    )
+
+    assert outcome.state.termination == TerminationReason.INTERRUPTED
+    assert not outcome.recovered
+    assert [(r.ma_session_id, r.status) for r in rows] == [("sess_live", "live")]
+    assert not [r for r in requests if r.startswith("POST")]
+
+
 # Both ceiling tests below aim the real turn ceiling at `link_replacement`, which they
 # make sleep 30s, so the ceiling lands after the replacement session exists. Everything
 # before it (the first attempt, the 404, transcript read, session and memory-store
