@@ -4,7 +4,6 @@ from collections.abc import Mapping
 from datetime import UTC, datetime, timedelta, timezone
 
 import pytest
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.contracts.actions import NativeInput, UserMessage, UserToolResult
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import NativePart, TextPart, ToolResultPayload
@@ -31,6 +30,7 @@ from mux.errors import (
     UnsupportedCapability,
 )
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from pydantic import JsonValue
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")

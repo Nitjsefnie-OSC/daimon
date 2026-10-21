@@ -151,9 +151,9 @@ async def owned_preview(db_preflight, db_committing_engine):
     from daimon.core.config import TurnSettings
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-    from daimon.testing.ma import list_response
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma import list_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
@@ -638,8 +638,9 @@ async def test_real_sdk_create_and_desired_snapshot_use_the_same_opt_in_tools(se
         session_tools,
     )
     from daimon.core.sessions import create_session
-    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     native = ma_agent(
         tools=[
@@ -751,8 +752,9 @@ async def test_real_sdk_refresh_preserves_default_bytes_and_the_selected_gate(ow
     from daimon.core.session_compat import ReplaceToolsAndMcpServers
     from daimon.core.session_snapshot import desired_snapshot, hash_tools, session_tools
     from daimon.core.session_update_ops import AppliedOps, apply_update_ops
-    from daimon.testing.ma_models import ma_agent, ma_session
-    from daimon.testing.ma_transport import ScriptedReply
+    from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     service, backend_agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
     native = ma_agent(

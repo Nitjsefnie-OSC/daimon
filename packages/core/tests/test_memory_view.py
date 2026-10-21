@@ -15,7 +15,7 @@ from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.identity import find_platform_principal
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     combine_handlers,

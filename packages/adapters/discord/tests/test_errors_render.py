@@ -31,7 +31,7 @@ from daimon.core.notebooks.publish import NotebookRateLimitError
 from daimon.core.setup_conversations import get_setup_responder
 from daimon.core.stores.access_policy import AccessPolicyUnreadable
 from daimon.core.stores.direct_messages import DirectMessageBusy
-from daimon.testing.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.exc import DBAPIError
 from structlog.testing import capture_logs
 

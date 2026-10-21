@@ -82,14 +82,22 @@ type = "forbidden"
 source_modules = ["mux.contracts", "mux.profiles", "mux.errors", "mux.state"]
 forbidden_modules = ["anthropic", "openai", "google", "mux.drivers"]
 
-# Each SDK is imported by its own driver and nowhere else in mux. The ignores
-# name drivers that do not exist yet, so unmatched ignores stay silent.
+# Each SDK is imported by its own driver, by that provider's test doubles under
+# `mux.testing.drivers.<provider>`, and by `mux.testing.isolated_sdk` (the one
+# module that builds SDK clients for every provider), and nowhere else in mux.
+# Unmatched ignores stay silent.
 [[tool.importlinter.contracts]]
 name = "Only mux.drivers.anthropic imports the anthropic SDK"
 type = "forbidden"
 source_modules = ["mux"]
 forbidden_modules = ["anthropic"]
-ignore_imports = ["mux.drivers.anthropic -> anthropic", "mux.drivers.anthropic.** -> anthropic"]
+ignore_imports = [
+    "mux.drivers.anthropic -> anthropic",
+    "mux.drivers.anthropic.** -> anthropic",
+    "mux.testing.drivers.anthropic -> anthropic",
+    "mux.testing.drivers.anthropic.** -> anthropic",
+    "mux.testing.isolated_sdk -> anthropic",
+]
 unmatched_ignore_imports_alerting = "none"
 
 [[tool.importlinter.contracts]]
@@ -97,7 +105,13 @@ name = "Only mux.drivers.openai imports the openai SDK"
 type = "forbidden"
 source_modules = ["mux"]
 forbidden_modules = ["openai"]
-ignore_imports = ["mux.drivers.openai -> openai", "mux.drivers.openai.** -> openai"]
+ignore_imports = [
+    "mux.drivers.openai -> openai",
+    "mux.drivers.openai.** -> openai",
+    "mux.testing.drivers.openai -> openai",
+    "mux.testing.drivers.openai.** -> openai",
+    "mux.testing.isolated_sdk -> openai",
+]
 unmatched_ignore_imports_alerting = "none"
 
 [[tool.importlinter.contracts]]
@@ -105,7 +119,13 @@ name = "Only mux.drivers.gemini imports the google.genai SDK"
 type = "forbidden"
 source_modules = ["mux"]
 forbidden_modules = ["google"]
-ignore_imports = ["mux.drivers.gemini -> google", "mux.drivers.gemini.** -> google"]
+ignore_imports = [
+    "mux.drivers.gemini -> google",
+    "mux.drivers.gemini.** -> google",
+    "mux.testing.drivers.gemini -> google",
+    "mux.testing.drivers.gemini.** -> google",
+    "mux.testing.isolated_sdk -> google",
+]
 unmatched_ignore_imports_alerting = "none"
 
 [[tool.importlinter.contracts]]
@@ -344,7 +364,7 @@ type = "forbidden"
 source_modules = ["daimon.core"]
 forbidden_modules = ["daimon.testing"]
 
-# Expand package members explicitly so mux.conformance is excluded while the
+# Expand package members explicitly so mux.testing is excluded while the
 # mux initializer itself remains covered. The boundary regression inventories
 # mux siblings so a new top-level package cannot silently escape this list.
 [[tool.importlinter.contracts]]
@@ -357,7 +377,7 @@ source_modules = [
     "mux.drivers", "mux.drivers.**", "mux.errors",
     "mux.profiles", "mux.profiles.**", "mux.state", "mux.state.**",
 ]
-forbidden_modules = ["mux.conformance", "mux.conformance.**", "daimon.testing", "daimon.testing.**"]
+forbidden_modules = ["mux.testing", "mux.testing.**", "daimon.testing", "daimon.testing.**"]
 as_packages = false
 
 [[tool.importlinter.contracts]]

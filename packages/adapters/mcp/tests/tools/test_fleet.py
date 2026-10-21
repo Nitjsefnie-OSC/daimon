@@ -40,7 +40,6 @@ from daimon.testing.db import db_committing_engine as db_committing_engine
 from daimon.testing.db import db_committing_pool as db_committing_pool
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from daimon.testing.pytest_plugin import db_preflight as db_preflight
 from fastmcp import Client, FastMCP
 from fastmcp.exceptions import ToolError
@@ -49,6 +48,7 @@ from fastmcp.server.middleware import Middleware, MiddlewareContext
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import AgentSpec
 from mux.profiles import backend_selection
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

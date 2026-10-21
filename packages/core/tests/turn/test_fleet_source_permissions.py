@@ -25,11 +25,11 @@ from daimon.core.stores import agent_memory_stores
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.turn.admission import AdmissionGrant
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, Scope, ThreadRef
 from mux.contracts.resources import MCPConnection, ResourceBinding, ToolSpec
 from mux.profiles import backend_selection
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
@@ -504,9 +504,9 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captu
     from daimon.core.config import McpSettings
     from daimon.core.mux_compat import sdk_agent
     from daimon.core.sessions import create_session
-    from daimon.testing.ma import MARouter
-    from daimon.testing.ma_models import ma_session
     from mux.drivers.anthropic.resources.agents import agent_payload
+    from mux.testing.drivers.anthropic.ma import MARouter
+    from mux.testing.drivers.anthropic.ma_models import ma_session
     from pydantic import SecretStr
 
     source, _, _, _, policy, _ = captured

@@ -23,10 +23,10 @@ from daimon.core.turn.openai_deployment import OpenAIDeployment
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.runtime_manifest import read_frozen_root
 from daimon.core.turn.runtimes import build_channel_runtime
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.resources import AgentSpec
 from mux.drivers.openai import deployment
 from mux.drivers.openai.transport import SDKTransport
+from mux.testing.isolated_sdk import build_async_openai
 
 from .test_fleet_native_dispatch import _settled
 from .test_frozen_preparation import default_source_turn

@@ -39,9 +39,7 @@ from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiSto
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtimes import build_channel_runtime
-from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_tenant
-from daimon.testing.isolated_sdk import build_gemini_client
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -64,6 +62,8 @@ from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord, Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import ScopeViolation
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.isolated_sdk import build_gemini_client
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -1730,9 +1730,9 @@ async def test_normal_fleet_factories_load_real_installed_native_tariffs(
     from daimon.core.turn import runtimes
     from daimon.testing.asgi import asgi_lifespan
     from daimon.testing.db import build_test_engine
-    from daimon.testing.ma import build_stub_anthropic
     from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
     from google.genai import Client
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
     from openai import AsyncOpenAI
 
     settings = Settings.model_validate(

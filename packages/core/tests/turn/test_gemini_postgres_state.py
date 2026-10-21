@@ -523,7 +523,6 @@ async def test_account_purge_previews_and_deletes_records_but_retains_financial_
 async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_session(
     postgres_state, refused, monkeypatch
 ):
-    from daimon.testing.drivers.gemini.fake import FakeTransport
     from mux.contracts.actions import UserMessage
     from mux.contracts.events import TextPart
     from mux.contracts.extensions import ExtensionConfig
@@ -532,6 +531,7 @@ async def test_post_dispatch_outcome_waits_past_busy_bound_without_wedging_sessi
     from mux.drivers.gemini import GeminiManagedAgents
     from mux.errors import ProviderError
     from mux.state.memory import MemoryStateStore
+    from mux.testing.drivers.gemini.fake import FakeTransport
 
     from .test_gemini_codec import interaction
 

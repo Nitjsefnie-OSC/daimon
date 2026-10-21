@@ -45,9 +45,9 @@ from daimon.core.stores.thread_sessions import (
     get_thread_session_by_id,
 )
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response, session_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, list_response, session_response
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -150,7 +150,7 @@ def _register_slack_defaults(
 def _make_runtime(
     sessionmaker: async_sessionmaker[AsyncSession], router: MARouter, *, fernet_key: str
 ) -> SlackRuntime:
-    from daimon.testing.ma import build_fake_anthropic
+    from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
     settings = MagicMock()
     settings.crypto.keys = (SecretStr(fernet_key),)

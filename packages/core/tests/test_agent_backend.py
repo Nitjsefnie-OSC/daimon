@@ -276,9 +276,9 @@ def test_factory_uses_existing_flags() -> None:
 async def test_public_loader_uses_actual_scoped_sdk_projection_and_never_updates(owned) -> None:
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.testing.ma import list_response
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma import list_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, agent, _, sessions = owned
     native = ma_agent(
@@ -703,7 +703,7 @@ async def test_scoped_source_reuse_projects_actual_sdk_retrieve_without_extra_re
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, agent, _, sessions = owned
     native = ma_agent(
@@ -730,7 +730,7 @@ async def test_scoped_source_reuse_refuses_unbound_or_inactive_source_without_ex
 ):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, agent, _, sessions = owned
     payload = ma_agent(
@@ -786,7 +786,7 @@ async def test_retained_and_disabled_resolution_need_no_fabricated_source(owned)
 async def test_source_loader_retains_full_sdk_intent_without_serializing_it(owned):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, prior, _, sessions = owned
     payload = ma_agent(
@@ -834,7 +834,7 @@ async def test_source_loader_retains_full_sdk_intent_without_serializing_it(owne
 async def test_source_projection_missing_unused_sdk_date_keeps_existing_preview(owned):
     from daimon.core.channel_backend import load_backend_agent
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     _, prior, _, sessions = owned
     payload = ma_agent(

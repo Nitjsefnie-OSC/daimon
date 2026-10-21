@@ -60,14 +60,14 @@ from daimon.core.stores.domain import (
 )
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     build_fake_anthropic,
     build_stub_anthropic,
     list_response,
 )
-from daimon.testing.turn_fakes import deps_for
 from pydantic import HttpUrl
 from sqlalchemy import text as sql_text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

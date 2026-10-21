@@ -426,7 +426,7 @@ async def test_terminal_unmatched_request_start_is_unknown_without_invented_toke
 
 @pytest.mark.parametrize("fixture_id", ["C06", "C10", "C15", "C16"])
 async def test_real_driver_passes_existing_mux_conformance_probes(fixture_id):
-    from daimon.testing.conformance.runner import Adapter, Scenario, ScriptedTransport, run_fixture
+    from mux.testing.conformance.runner import Adapter, Scenario, ScriptedTransport, run_fixture
 
     class ConformanceHarness(Harness):
         mutation_count = 0

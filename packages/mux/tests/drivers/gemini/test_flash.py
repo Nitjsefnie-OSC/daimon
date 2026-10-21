@@ -4,28 +4,15 @@ from collections.abc import Mapping
 from datetime import UTC, datetime
 
 import pytest
-from daimon.testing.drivers.gemini.fake import FakeTransport
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec
-from mux.drivers.gemini.flash import FLASH_MODELS, FLASH_PRIMARY, FlashAttempt, FlashTransport
+from mux.drivers.gemini.flash import FLASH_MODELS, FLASH_PRIMARY, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError
 from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.testing.drivers.gemini.accounting import Accounting
+from mux.testing.drivers.gemini.fake import FakeTransport
 from pydantic import JsonValue
-
-
-class Accounting:
-    def __init__(self) -> None:
-        self.held: list[ModelRef] = []
-        self.receipts: list[FlashAttempt] = []
-
-    async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
-        assert attempt == len(self.held) + 1
-        self.held.append(model)
-
-    async def after_attempt(self, *, receipt: FlashAttempt) -> None:
-        assert receipt.model == self.held[-1]
-        self.receipts.append(receipt)
 
 
 def request() -> Mapping[str, JsonValue]:

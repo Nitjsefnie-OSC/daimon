@@ -91,7 +91,9 @@ from daimon.core.turn.prepare import (
 )
 from daimon.core.usage_sweep import settle_stamped_session
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
     NotHandled,
@@ -100,8 +102,7 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
-from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import Connection, event, select, text
 from sqlalchemy.ext.asyncio import (
     AsyncEngine,
@@ -2694,7 +2695,8 @@ async def _changed_channel_agent(
     """
     from daimon.core.turn.admission import admit
     from daimon.testing.factories import make_ledger_entry, make_tenant_config
-    from daimon.testing.ma import MARouter, resolved_agent_env_router
+    from daimon.testing.ma import resolved_agent_env_router
+    from mux.testing.drivers.anthropic.ma import MARouter
 
     tenant = await make_tenant(db_session)
     await make_tenant_config(

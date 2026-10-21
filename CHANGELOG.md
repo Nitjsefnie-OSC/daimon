@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Ship mux's offline test doubles and conformance kits as `mux.testing` inside `daimon-mux` (moved from `daimon.testing`), and run the mux tests in CI against an environment with only `daimon-mux` installed.
+
 - Attach shared selfhosted skill pins only when an authorized editor adds them; unrelated saves cannot authorize another editor’s unowned pins.
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.

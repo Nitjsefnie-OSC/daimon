@@ -36,15 +36,15 @@ from daimon.core.turn.admission import (
     admit,
 )
 from daimon.core.turn.deps import TurnDeps
-from daimon.testing.ma import (
+from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
-    resolved_agent_env_router,
     skill_response,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

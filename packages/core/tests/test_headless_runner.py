@@ -67,14 +67,15 @@ from daimon.core.headless_runner import run_turn
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
     session_response,
     sse_response,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage, ma_session
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 

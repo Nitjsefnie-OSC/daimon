@@ -60,13 +60,8 @@ from daimon.testing.factories import (
     make_tenant,
     make_tenant_config,
 )
-from daimon.testing.ma import (
-    MARouter,
-    build_fake_anthropic,
-    make_fake_memory_store_handler,
-    resolved_agent_env_router,
-)
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
+from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, CapabilityRequirement, ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.resources import ProviderBinding
@@ -76,6 +71,12 @@ from mux.errors import (
     MigrationUnsupported,
     UnsupportedCapability,
 )
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    make_fake_memory_store_handler,
+)
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import event
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 

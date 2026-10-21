@@ -287,8 +287,8 @@ async def test_non_list_tools_are_refused_before_native_io(tools: JsonValue) -> 
 async def test_sdk_submits_the_cheap_named_worker_with_low_agent_budget() -> None:
     from contextlib import AsyncExitStack
 
-    from daimon.testing.isolated_sdk import build_gemini_client
     from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+    from mux.testing.isolated_sdk import build_gemini_client
 
     captured: list[httpx.Request] = []
 
@@ -329,11 +329,11 @@ async def test_sdk_submits_the_cheap_named_worker_with_low_agent_budget() -> Non
 async def test_sdk_model_output_cap_is_verified_in_actual_request_bytes(defect: str | None) -> None:
     from contextlib import AsyncExitStack
 
-    from daimon.testing.isolated_sdk import build_gemini_client
     from mux.contracts.ids import ModelRef
     from mux.contracts.resources import AgentSpec
     from mux.drivers.gemini.core import compile_agent
     from mux.errors import UnsupportedCapability
+    from mux.testing.isolated_sdk import build_gemini_client
 
     captured: list[httpx.Request] = []
 
@@ -379,10 +379,9 @@ async def test_sdk_model_output_cap_is_verified_in_actual_request_bytes(defect: 
 async def test_sdk_output_cap_never_downgrades_on_refusal_or_fallback(failure: int) -> None:
     from contextlib import AsyncExitStack
 
-    from daimon.testing.isolated_sdk import build_gemini_client
     from mux.drivers.gemini.flash import FLASH_MODELS, FlashTransport
-
-    from .test_flash import Accounting
+    from mux.testing.drivers.gemini.accounting import Accounting
+    from mux.testing.isolated_sdk import build_gemini_client
 
     captured: list[httpx.Request] = []
 
@@ -423,7 +422,7 @@ async def test_sdk_output_cap_never_downgrades_on_refusal_or_fallback(failure: i
 async def test_sdk_counts_full_worker_prompt_including_system_and_cache(count):
     from contextlib import AsyncExitStack
 
-    from daimon.testing.isolated_sdk import build_gemini_client
+    from mux.testing.isolated_sdk import build_gemini_client
 
     captured = []
 

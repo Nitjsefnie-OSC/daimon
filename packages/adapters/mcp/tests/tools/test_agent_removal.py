@@ -24,16 +24,16 @@ from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill, upsert_user_skill
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     build_no_retry_anthropic,
     json_body,
     list_response,
 )
-from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _ALLOW_ALL: dict[str, Any] = {"enabled": True, "permission_policy": {"type": "always_allow"}}

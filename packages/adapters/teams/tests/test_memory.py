@@ -14,7 +14,7 @@ from daimon.core.scope import ChannelScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.agent_memory_stores import insert_memory_store
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     combine_handlers,

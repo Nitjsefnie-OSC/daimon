@@ -12,8 +12,6 @@ from daimon.core.turn.driver import run_turn
 from daimon.core.turn.gemini import PROFILE, GeminiTurnIO
 from daimon.core.turn.io import TurnConnectionLost
 from daimon.core.turn.posture import BillingExempt
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.extensions import ExtensionConfig
@@ -23,6 +21,8 @@ from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.transport import Object, OwnedStream
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="host", authorization_id="offline")
 CHANNEL = ChannelRef(tenant_id="t", platform="test", channel_id="c")

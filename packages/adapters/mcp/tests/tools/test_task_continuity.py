@@ -38,10 +38,11 @@ from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -1319,7 +1320,7 @@ async def test_queued_work_follows_the_carry_rule_for_the_callers_old_session(
         MA_METADATA_KEY_SEALED,
         MA_METADATA_KEY_THREAD,
     )
-    from daimon.testing.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)

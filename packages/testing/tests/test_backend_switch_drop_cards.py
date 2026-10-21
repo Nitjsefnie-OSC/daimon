@@ -116,9 +116,10 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
         make_tenant,
         make_thread_session,
     )
-    from daimon.testing.ma import MARouter, list_response
-    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-    from daimon.testing.ma_transport import ScriptedTransport
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma import MARouter, list_response
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     platform: str = request.param

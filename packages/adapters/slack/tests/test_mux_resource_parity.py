@@ -15,7 +15,7 @@ from daimon.adapters.slack import credential_submissions as credentials
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.testing.ma_models import ma_agent
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 
 @pytest.mark.parametrize("status", ["success", "retry", "exhausted"])

@@ -21,8 +21,8 @@ from daimon.core.stores.domain import ChatPlatform, Role
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

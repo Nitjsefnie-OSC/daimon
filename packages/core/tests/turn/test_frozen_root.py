@@ -39,13 +39,14 @@ from daimon.core.turn.runtime_manifest import freeze_prepared_root, read_frozen_
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, send_events_response, sse_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
 from mux.contracts.resources import ProviderBinding
 from mux.errors import OperationConflict, ScopeViolation
 from mux.state.store import binding_slot
+from mux.testing.drivers.anthropic.ma import MARouter, send_events_response, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import async_sessionmaker
 from structlog.testing import capture_logs
@@ -1643,8 +1644,8 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
     from daimon.core.turn.admission import admit
     from daimon.core.turn.prepare import bind_session_impl
     from daimon.core.turn.runtime_manifest import read_frozen_preparation
-    from daimon.testing.ma import make_fake_memory_store_handler
     from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+    from mux.testing.drivers.anthropic.ma import make_fake_memory_store_handler
 
     deps, original, _, _, _, _, old_binding, _ = recorded_fresh_root
     tenant_id = original.admission.grant.tenant_id

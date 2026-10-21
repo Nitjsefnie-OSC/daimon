@@ -6,32 +6,6 @@ from pathlib import Path
 
 import pytest
 import yaml
-from daimon.testing.conformance.default_capability import (
-    BASH_RESULT,
-    DEFAULT_SKILLS,
-    DEFAULT_TOOLS,
-    FINAL_MESSAGE,
-    PROMPT,
-    DefaultCapabilityReplayEvents,
-    DefaultManifest,
-    NamedSkill,
-    check_turn,
-    request_metadata,
-    skill_text,
-)
-from daimon.testing.conformance.recording import Recorder, Replay, Tape
-from daimon.testing.conformance.runner import (
-    ConformanceFailure,
-    PendingKind,
-    replay_default_capability,
-    run_default_capability,
-)
-from daimon.testing.drivers.gemini.default_capability import (
-    BUILTIN_MAPPING,
-    PENDING,
-    PendingTransport,
-    adapter,
-)
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart, ToolUsePayload
 from mux.contracts.extensions import ExtensionConfig
@@ -48,6 +22,32 @@ from mux.drivers.gemini.bundles import MAX_BUNDLE_BYTES
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.transport import Object
 from mux.errors import UnsupportedCapability
+from mux.testing.conformance.default_capability import (
+    BASH_RESULT,
+    DEFAULT_SKILLS,
+    DEFAULT_TOOLS,
+    FINAL_MESSAGE,
+    PROMPT,
+    DefaultCapabilityReplayEvents,
+    DefaultManifest,
+    NamedSkill,
+    check_turn,
+    request_metadata,
+    skill_text,
+)
+from mux.testing.conformance.recording import Recorder, Replay, Tape
+from mux.testing.conformance.runner import (
+    ConformanceFailure,
+    PendingKind,
+    replay_default_capability,
+    run_default_capability,
+)
+from mux.testing.drivers.gemini.default_capability import (
+    BUILTIN_MAPPING,
+    PENDING,
+    PendingTransport,
+    adapter,
+)
 from pydantic import BaseModel, JsonValue
 
 pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")

@@ -7,9 +7,6 @@ from datetime import UTC, datetime
 
 import httpx
 import pytest
-from daimon.testing.drivers.gemini.conformance_hooks import recover_send
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.isolated_sdk import build_gemini_client
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -19,6 +16,9 @@ from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.transport import SDKTransport
 from mux.errors import OperationConflict, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import CrashPoint, MemoryStateStore, SimulatedCrash
+from mux.testing.drivers.gemini.conformance_hooks import recover_send
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.isolated_sdk import build_gemini_client
 
 pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
 

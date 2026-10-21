@@ -20,10 +20,9 @@ from daimon.adapters.teams import card
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
-from daimon.testing import build_fake_anthropic, ma_session
-from daimon.testing.ma import MARouter, sse_response
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (

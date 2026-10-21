@@ -24,8 +24,6 @@ from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionRequester
 from daimon.core.turn.run import _turn_port_kwargs
-from daimon.testing.isolated_sdk import build_async_openai
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import deps_for as deps_for
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
@@ -36,6 +34,8 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.isolated_sdk import build_async_openai
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conformance_support import (

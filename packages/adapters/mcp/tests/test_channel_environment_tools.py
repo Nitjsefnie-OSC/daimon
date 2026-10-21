@@ -24,10 +24,11 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, TenantScopeRef
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_read import get_scope
-from daimon.testing import EMPTY_CLOUD_CONFIG, ma_environment
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_environment
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import EMPTY_CLOUD_CONFIG
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 CHANNEL = "111111111111111111"
