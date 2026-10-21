@@ -29,7 +29,7 @@ from daimon.core.turn.runtime_manifest import (
 from daimon.core.turn.runtimes import scope_channel_runtimes
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.turn_fakes import deps_for
+from daimon.testing.turn_fakes import deps_for_pinned_mux
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Revision, Scope
 from mux.contracts.resources import Agent
@@ -99,7 +99,7 @@ async def consent_request(owned, request):
         )
         request = ProviderPreparationRequest(
             deps=replace(
-                deps_for(client, sessions),
+                deps_for_pinned_mux(client, sessions),
                 agent_backends=True,
                 channel_backends=True,
                 mcp=McpSettings.model_validate(

@@ -581,11 +581,11 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captu
         from daimon.core.turn.admission import Admission
         from daimon.core.turn.prepare import DEFAULT_MA_CAPABILITIES, ProviderPreparationRequest
         from daimon.core.turn.runtime_manifest import prepare_source
-        from daimon.testing.turn_fakes import deps_for
+        from daimon.testing.turn_fakes import deps_for_pinned_mux
         from mux.contracts.config import ConfigRevision
 
         deps = replace(
-            deps_for(client, owned[3]),
+            deps_for_pinned_mux(client, owned[3]),
             agent_backends=True,
             channel_backends=True,
             mcp=settings or McpSettings(),
@@ -710,7 +710,7 @@ async def test_recorded_i7_heterogeneous_grant_prepares_all_four_workers(
     from daimon.core.turn.admission import Admission
     from daimon.core.turn.prepare import DEFAULT_MA_CAPABILITIES, ProviderPreparationRequest
     from daimon.core.turn.runtime_manifest import prepare_source
-    from daimon.testing.turn_fakes import deps_for
+    from daimon.testing.turn_fakes import deps_for_pinned_mux
     from mux.contracts.config import ConfigRevision
 
     plan = json.loads(
@@ -785,7 +785,7 @@ async def test_recorded_i7_heterogeneous_grant_prepares_all_four_workers(
             prepared = await prepare_source(
                 ProviderPreparationRequest(
                     deps=replace(
-                        deps_for(client, owned[3]),
+                        deps_for_pinned_mux(client, owned[3]),
                         agent_backends=True,
                         channel_backends=True,
                         turn_path="mux",

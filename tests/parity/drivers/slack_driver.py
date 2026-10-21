@@ -98,6 +98,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.turn_leg import turn_leg
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -323,6 +324,7 @@ class SlackDriver:
     ) -> SlackRuntime:
         settings = MagicMock()
         settings.crypto.keys = (SecretStr(fernet_key),)
+        settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.slack = SlackSettings(
             signing_secret=SecretStr("parity-signing-secret"),
             app_token=SecretStr("xapp-parity-test"),

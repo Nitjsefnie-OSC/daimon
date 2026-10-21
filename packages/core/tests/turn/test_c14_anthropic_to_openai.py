@@ -49,7 +49,7 @@ from mux.state.lease import Slot
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_openai_host import Wire
-from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, deps_for
+from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, deps_for_pinned_mux
 
 
 async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_refuses(
@@ -170,7 +170,7 @@ async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_re
             ),
         )
         deps = replace(
-            deps_for(anthropic, db_session_factory),
+            deps_for_pinned_mux(anthropic, db_session_factory),
             channel_backends=True,
             state_store=store,
             turn_runtimes={PROFILE: runtime},

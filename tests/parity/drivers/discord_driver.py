@@ -79,6 +79,7 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.testing import ma_session
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.turn_fakes import deps_for
+from daimon.testing.turn_leg import turn_leg
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -317,6 +318,7 @@ class DiscordDriver:
         settings = MagicMock()
         settings.agent_identity.enabled = True
         settings.mcp = McpSettings()
+        settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.billing.markup = Decimal("1.0")
         settings.billing.signup_credit = Decimal("0")
         settings.crypto.keys = []

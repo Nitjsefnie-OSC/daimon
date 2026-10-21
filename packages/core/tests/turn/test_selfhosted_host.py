@@ -17,6 +17,7 @@ from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_im
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, prepare_selfhosted
 from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
+from daimon.testing.turn_leg import MUX_LEG
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.ports import Agents, Environments
@@ -118,8 +119,14 @@ class Resources:
         return self.value
 
 
+@pytest.fixture
+def pinned_leg():
+    """The leg `composed` builds on: mux here; test_turn_leg_selfhosted overrides it."""
+    return MUX_LEG
+
+
 @pytest.fixture(params=["memory", "postgres"])
-async def composed(request, db_committing_engine, db_clean, monkeypatch):
+async def composed(request, db_committing_engine, db_clean, monkeypatch, pinned_leg):
     from daimon.core.stores.mux_state import PostgresStateStore
     from daimon.testing.factories import make_tenant
     from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -206,8 +213,7 @@ async def composed(request, db_committing_engine, db_clean, monkeypatch):
             environments=environments,
         )
         deps = replace(
-            deps_for(None, db_session_factory),
-            channel_backends=True,
+            deps_for(None, db_session_factory, leg=pinned_leg),
             state_store=store,
             turn_runtimes={PROFILE: runtime},
         )

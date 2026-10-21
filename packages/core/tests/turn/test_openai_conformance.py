@@ -68,7 +68,15 @@ from sqlalchemy.ext.asyncio import (
 )
 
 from .test_openai_host import SESSION_ID, Wire
-from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission, deps_for
+from .test_provider_dispatch import (
+    ACCOUNT,
+    PROFILE,
+    REVISION,
+    SCOPE,
+    TENANT,
+    admission,
+    deps_for_pinned_mux,
+)
 
 NEW_SESSION = "replacement-openai-session"
 
@@ -198,7 +206,7 @@ async def native_host(
             ),
         )
         deps = replace(
-            deps_for(None, db_session_factory),
+            deps_for_pinned_mux(None, db_session_factory),
             channel_backends=True,
             state_store=store,
             turn_runtimes={PROFILE: runtime},
