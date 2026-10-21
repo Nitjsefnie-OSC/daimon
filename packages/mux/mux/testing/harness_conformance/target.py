@@ -35,6 +35,11 @@ def default_mcp_tool_name(server: str, tool: str) -> str:
     return f"{server}__{tool}"
 
 
+def identity_tool_name(name: str) -> str:
+    """How the model sees a built-in tool (``bash``, ``read``, ``write``, ``edit``)."""
+    return name
+
+
 @dataclass
 class HarnessTarget:
     """A running harness plus the handles the kit uses to drive and observe it."""
@@ -44,6 +49,8 @@ class HarnessTarget:
     model: ModelScripter
     restart: RestartHook | None = None
     mcp_tool_name: Callable[[str, str], str] = default_mcp_tool_name
+    tool_name: Callable[[str], str] = identity_tool_name
+    """Maps a built-in tool name to the name the model sees, for engines that prefix them."""
     session_id: str = field(default_factory=lambda: f"conf-{uuid4().hex[:12]}")
     timeout_s: float = 20
     http_transport: httpx.AsyncBaseTransport | None = None
@@ -123,6 +130,10 @@ class CaseContext:
                 "tool_policy": tool_policy or {},
             }
         )
+
+    def tool(self, name: str) -> str:
+        """The model-visible name of a built-in tool."""
+        return self.target.tool_name(name)
 
     def script(self, *steps: Step) -> None:
         self.target.model.script(steps, conversation=self.conversation)

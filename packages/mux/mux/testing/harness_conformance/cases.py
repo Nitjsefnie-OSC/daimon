@@ -69,6 +69,8 @@ async def turn_lifecycle(ctx: CaseContext) -> None:
     parts = run.of("agent_message")[-1].data["parts"]
     check(parts == [{"type": "text", "text": "hello world"}], f"agent_message parts {parts}")
     check(all(e.session_id == ctx.session_id for e in run.events), "wrong session_id on an event")
+    recovery = {"history_gap", "checkpoint_warning"} & set(run.types)
+    check(not recovery, f"an ordinary turn carried recovery events: {sorted(recovery)}")
     [seen] = ctx.model_requests()
     check("LIFECYCLE-INSTRUCTIONS" in seen.instructions, "model did not receive the instructions")
     check("lifecycle-input" in seen.text(), "model did not receive the user input")
@@ -122,7 +124,7 @@ async def idempotent_replay(ctx: CaseContext) -> None:
 
 
 async def events_by_sequence(ctx: CaseContext) -> None:
-    ctx.script(call_tool("write", WRITE_CALL, call_id="seq-call"), say("saved"))
+    ctx.script(call_tool(ctx.tool("write"), WRITE_CALL, call_id="seq-call"), say("saved"))
     run = await ctx.run_turn()
     check(run.outcome == "completed", f"outcome {run.outcome}")
     full = (await ctx.client.events(ctx.session_id, 0)).events
@@ -137,12 +139,98 @@ async def events_by_sequence(ctx: CaseContext) -> None:
         check([e.seq for e in page.events] == expected, f"after_seq={cursor} returned wrong events")
     tail = await ctx.client.events(ctx.session_id, full[-1].seq)
     check(tail.events == [] and tail.complete, "nothing after the last event, and complete is true")
-    ahead = await ctx.client.events(ctx.session_id, full[-1].seq + 1000)
-    check(ahead.events == [], "after_seq beyond the log returned events")
+
+
+MAX_CURSOR = 2**53
+
+
+async def _session_tail(ctx: CaseContext) -> list[Event]:
+    return (await ctx.client.events(ctx.session_id, 0)).events
+
+
+async def _last_seq(ctx: CaseContext) -> int:
+    """The session's last event seq; 0 for a session this run has not used yet."""
+    events = await _session_tail(ctx)
+    return events[-1].seq if events else 0
+
+
+async def cursor_fence_and_gap(ctx: CaseContext) -> None:
+    """``after_seq`` is also a fence: a cursor ahead of the log is a recorded history gap.
+
+    The harness never numbers an event at or below a cursor it has seen. A cursor beyond its
+    log is announced once as ``history_gap`` (from the next local seq through the cursor), numbered
+    ``cursor + 1``. ``replay_after_seq`` only lowers where the read starts, never the fence.
+    """
+    ctx.script(say("fence setup"))
+    await ctx.run_turn()
+    full = await _session_tail(ctx)
+    last = full[-1].seq
+    exact = await ctx.client.events(ctx.session_id, last)
+    check(exact.events == [], "a cursor at the last event must return nothing, not a gap")
+
+    fence = last + 1000
+    page = (await ctx.client.events(ctx.session_id, fence)).events
+    check(
+        [e.type for e in page] == ["history_gap"], f"cursor ahead returned {[e.type for e in page]}"
+    )
+    gap = page[0]
+    expected = {"from_seq": last + 1, "to_seq": fence, "reason": "sandbox_restored"}
+    check(gap.data == expected, f"history_gap data {gap.data}, expected {expected}")
+    check(gap.seq == fence + 1, f"history_gap numbered {gap.seq}, expected {fence + 1}")
+    again = (await ctx.client.events(ctx.session_id, fence)).events
+    check([e.seq for e in again] == [gap.seq], "the same fence announced the gap again")
+
+    everything = await _session_tail(ctx)
+    check(_strictly_increasing(everything), "sequence not strictly increasing after a gap")
+    check(sum(e.type == "history_gap" for e in everything) == 1, "more than one history_gap")
+    start = full[-3].seq
+    replay = await ctx.client.events(ctx.session_id, fence, replay_after_seq=start)
+    check(
+        [e.seq for e in replay.events] == [e.seq for e in everything if e.seq > start],
+        "replay_after_seq did not select the replay start",
+    )
+    lower = await ctx.client.events(ctx.session_id, 0, replay_after_seq=fence + 500)
+    check(
+        [e.seq for e in lower.events] == [e.seq for e in everything],
+        "replay above after_seq lowered nothing",
+    )
+    for bad in (-1, MAX_CURSOR + 1):
+        answer = await ctx.client.events_response(ctx.session_id, bad)
+        check(answer.status_code == 422, f"after_seq={bad} answered {answer.status_code}, not 422")
+    answer = await ctx.client.events_response(ctx.session_id, 0, replay_after_seq=-1)
+    check(answer.status_code == 422, f"replay_after_seq=-1 answered {answer.status_code}")
+
+
+async def post_cursor_fence(ctx: CaseContext) -> None:
+    """A POST carries the same fence: a stale one is harmless, one ahead of the log opens a gap."""
+    ctx.script(say("stale fence"), say("ahead fence"))
+    high = await _last_seq(ctx)
+
+    stale = ctx.turn_request()
+    check((await ctx.client.submit(stale, after_seq=0)).status_code == 202, "stale fence refused")
+    run = await ctx.client.wait_ended(ctx.session_id, stale.turn_id)
+    check(run[-1].data["outcome"] == "completed", f"outcome {run[-1].data}")
+    check(min(e.seq for e in run) > high, "a stale after_seq renumbered events at or below the log")
+
+    ahead_fence = await _last_seq(ctx) + 500
+    ahead = ctx.turn_request()
+    check(
+        (await ctx.client.submit(ahead, after_seq=ahead_fence)).status_code == 202,
+        "fence ahead of the log refused",
+    )
+    run = await ctx.client.wait_ended(ctx.session_id, ahead.turn_id)
+    check(min(e.seq for e in run) > ahead_fence, "turn events were numbered at or below the fence")
+    gaps = [e for e in await _session_tail(ctx) if e.type == "history_gap" and e.seq > ahead_fence]
+    check(
+        len(gaps) == 1 and gaps[0].seq == ahead_fence + 1,
+        f"expected one history_gap at {ahead_fence + 1}, got {[g.seq for g in gaps]}",
+    )
+    bad = await ctx.client.submit(ctx.turn_request(), after_seq=MAX_CURSOR + 1)
+    check(bad.status_code == 422, f"after_seq above the maximum answered {bad.status_code}")
 
 
 async def _ask_for_approval(ctx: CaseContext, call_id: str) -> tuple[str, str, list[Event]]:
-    ctx.script(call_tool("write", WRITE_CALL, call_id=call_id), say("finished"))
+    ctx.script(call_tool(ctx.tool("write"), WRITE_CALL, call_id=call_id), say("finished"))
     request = ctx.turn_request(tool_policy={"write": "ask"})
     await ctx.start(request)
     events = await ctx.client.wait_event(ctx.session_id, request.turn_id, "requires_action")
@@ -221,7 +309,7 @@ async def cancel_turn(ctx: CaseContext) -> None:
 async def usage_per_model_request(ctx: CaseContext) -> None:
     first = Usage(input_tokens=100, cached_input_tokens=25, output_tokens=10, reasoning_tokens=4)
     second = Usage(input_tokens=200, cached_input_tokens=50, output_tokens=20, reasoning_tokens=0)
-    ctx.script(call_tool("write", WRITE_CALL, usage=first), say("done", usage=second))
+    ctx.script(call_tool(ctx.tool("write"), WRITE_CALL, usage=first), say("done", usage=second))
     run = await ctx.run_turn()
     check(run.outcome == "completed", f"outcome {run.outcome}")
     starts, usages = run.of("model_request_started"), run.of("usage")
@@ -290,13 +378,12 @@ async def mcp_delivery(ctx: CaseContext) -> None:
 async def no_builtin_tools(ctx: CaseContext) -> None:
     ctx.script(say("with builtins"), say("without builtins"))
     await ctx.run_turn(ctx.turn_request())
+    builtins = {ctx.tool(name) for name in BUILTIN_TOOLS}
     offered = set(ctx.model_requests()[0].tool_names)
-    check(
-        offered >= BUILTIN_TOOLS, f"default turn should offer built-ins, offered {sorted(offered)}"
-    )
+    check(builtins <= offered, f"default turn should offer built-ins, offered {sorted(offered)}")
     none = {name: "deny" for name in BUILTIN_TOOLS}
     await ctx.run_turn(ctx.turn_request(tool_policy=none))  # type: ignore[arg-type]
-    leaked = BUILTIN_TOOLS & set(ctx.model_requests()[1].tool_names)
+    leaked = builtins & set(ctx.model_requests()[1].tool_names)
     check(not leaked, f"built-in tools reached the model with tools=[]: {sorted(leaked)}")
 
 
@@ -306,7 +393,7 @@ async def restart_without_rerun(ctx: CaseContext) -> None:
     marker = f"RAN-ONCE-{uuid4().hex[:8]}"
     command = f"echo {marker} >> conformance-marker.txt; sleep 10; echo finished"
     # No second step: a model call after the restart would find the script exhausted.
-    ctx.script(call_tool("bash", {"command": command}, call_id="slow-call"))
+    ctx.script(call_tool(ctx.tool("bash"), {"command": command}, call_id="slow-call"))
     request = ctx.turn_request("restart-input")
     await ctx.start(request)
     before = await ctx.client.wait_event(ctx.session_id, request.turn_id, "tool_use")
@@ -333,7 +420,8 @@ async def restart_without_rerun(ctx: CaseContext) -> None:
     check(len(ctx.model_requests()) == 1, "replay after restart called the model")
 
     ctx.script(
-        call_tool("bash", {"command": "cat conformance-marker.txt"}, call_id="cat-call"), say("ok")
+        call_tool(ctx.tool("bash"), {"command": "cat conformance-marker.txt"}, call_id="cat-call"),
+        say("ok"),
     )
     follow = await ctx.run_turn(ctx.turn_request("what ran"))
     seen = text_of(tool_result(follow.events, "cat-call").data["output"])
@@ -361,6 +449,8 @@ CASES: tuple[Case, ...] = (
     Case("approval_client_result", approval_client_result),
     Case("action_rejections", action_rejections),
     Case("cancel_turn", cancel_turn),
+    Case("cursor_fence_and_gap", cursor_fence_and_gap),
+    Case("post_cursor_fence", post_cursor_fence),
     Case("usage_per_model_request", usage_per_model_request),
     Case("skills_delivery", skills_delivery),
     Case("mcp_delivery", mcp_delivery),

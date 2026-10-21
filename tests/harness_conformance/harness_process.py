@@ -15,14 +15,21 @@ import socket
 from pathlib import Path
 
 import uvicorn
+from daimon_harness.codex_adapter import CodexModelAdapter
 from daimon_harness.model_adapter import AzureModelAdapter, ModelAdapter
 from daimon_harness.runtime import TurnContext
 from daimon_harness.service import create_app
 from pydantic import JsonValue
 
 
-def real_loop_adapter(fake_model_url: str) -> ModelAdapter:
-    """The harness's real model loop (AzureModelAdapter.run), aimed at the fake model.
+def real_loop_adapter(
+    fake_model_url: str, loop: str = "agents_sdk", codex_binary: str = ""
+) -> ModelAdapter:
+    """A real harness model loop, aimed at the fake model.
+
+    ``agents_sdk`` is ``AzureModelAdapter``; ``codex`` is ``CodexModelAdapter`` (a subclass that
+    reuses the same endpoint and key capture, sending Responses requests to
+    ``<endpoint>/openai/responses`` through its loopback relay).
 
     Why this shape: test mode refuses an ``AzureModelAdapter`` instance and any
     ``AZURE_OPENAI_API_KEY`` in the environment, and the production adapter reads its endpoint
@@ -35,10 +42,13 @@ def real_loop_adapter(fake_model_url: str) -> ModelAdapter:
     """
     os.environ["AZURE_OPENAI_ENDPOINT"] = fake_model_url
     os.environ["AZURE_OPENAI_API_KEY"] = "offline-placeholder"
+    if codex_binary:
+        os.environ["HARNESS_CODEX_BINARY"] = codex_binary
     try:
-        sdk = AzureModelAdapter()
+        sdk = CodexModelAdapter() if loop == "codex" else AzureModelAdapter()
     finally:
-        del os.environ["AZURE_OPENAI_ENDPOINT"], os.environ["AZURE_OPENAI_API_KEY"]
+        for name in ("AZURE_OPENAI_ENDPOINT", "AZURE_OPENAI_API_KEY", "HARNESS_CODEX_BINARY"):
+            os.environ.pop(name, None)
 
     class RealLoop:
         async def run(self, context: TurnContext, history: list[JsonValue]) -> list[JsonValue]:
@@ -47,8 +57,9 @@ def real_loop_adapter(fake_model_url: str) -> ModelAdapter:
     return RealLoop()
 
 
-async def serve(home: Path, fake_model_url: str, token: str) -> None:
-    app = create_app(home=home, token=token, adapter=real_loop_adapter(fake_model_url))
+async def serve(home: Path, fake_model_url: str, token: str, loop: str, codex_binary: str) -> None:
+    adapter = real_loop_adapter(fake_model_url, loop, codex_binary)
+    app = create_app(home=home, token=token, adapter=adapter)
     listener = socket.socket()
     listener.bind(("127.0.0.1", 0))
     server = uvicorn.Server(uvicorn.Config(app, log_level="error", lifespan="on"))
@@ -66,8 +77,10 @@ def main() -> None:
     parser.add_argument("--home", type=Path, required=True)
     parser.add_argument("--fake-model-url", required=True)
     parser.add_argument("--token", required=True)
+    parser.add_argument("--loop", choices=["agents_sdk", "codex"], default="agents_sdk")
+    parser.add_argument("--codex-binary", default="")
     args = parser.parse_args()
-    asyncio.run(serve(args.home, args.fake_model_url, args.token))
+    asyncio.run(serve(args.home, args.fake_model_url, args.token, args.loop, args.codex_binary))
 
 
 if __name__ == "__main__":

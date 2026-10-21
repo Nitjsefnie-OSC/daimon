@@ -11,7 +11,7 @@ import asyncio
 import os
 import signal
 import sys
-from collections.abc import AsyncIterator
+from collections.abc import AsyncIterator, Callable
 from pathlib import Path
 
 import pytest
@@ -19,6 +19,16 @@ from mux.testing.fake_model_server import FakeModelServer
 from mux.testing.fake_model_server.runner import serve
 from mux.testing.harness_conformance import CASES, HarnessTarget, run_conformance
 
+CODEX_BINARY_VARIABLE = "HARNESS_CODEX_BINARY"
+LOOPS = ["agents_sdk", "codex"]
+# How each loop names tools to the model. Codex exposes every harness tool as `harness_<name>`.
+MODEL_NAMES: dict[str, dict[str, Callable[..., str]]] = {
+    "agents_sdk": {},
+    "codex": {
+        "tool_name": lambda name: f"harness_{name}",
+        "mcp_tool_name": lambda server, tool: f"harness_{server}__{tool}",
+    },
+}
 PROCESS = Path(__file__).with_name("harness_process.py")
 TOKEN = "conformance-token"  # not a secret: the harness listens on loopback only
 SCRUBBED_PREFIXES = (
@@ -46,8 +56,8 @@ def offline_environment() -> dict[str, str]:
 class HarnessProcess:
     """One harness child process on a fixed home; ``restart`` kills it and starts another."""
 
-    def __init__(self, home: Path, fake_model_url: str, log: Path) -> None:
-        self.home, self.fake_model_url, self.log = home, fake_model_url, log
+    def __init__(self, home: Path, fake_model_url: str, log: Path, loop: str) -> None:
+        self.home, self.fake_model_url, self.log, self.loop = home, fake_model_url, log, loop
         self.process: asyncio.subprocess.Process | None = None
 
     async def start(self) -> str:
@@ -61,6 +71,10 @@ class HarnessProcess:
                 self.fake_model_url,
                 "--token",
                 TOKEN,
+                "--loop",
+                self.loop,
+                "--codex-binary",
+                os.environ.get(CODEX_BINARY_VARIABLE, ""),
                 stdout=asyncio.subprocess.PIPE,
                 stderr=stderr,
                 env=offline_environment(),
@@ -83,24 +97,40 @@ class HarnessProcess:
         return await self.start()
 
 
+@pytest.fixture(scope="module", params=LOOPS)
+def loop(request: pytest.FixtureRequest) -> str:
+    """Each model loop gets its own harness, fake model and full run of the cases."""
+    name = str(request.param)
+    if name == "codex" and not Path(os.environ.get(CODEX_BINARY_VARIABLE, "")).is_file():
+        pytest.skip(f"{CODEX_BINARY_VARIABLE} does not point at the pinned Codex 0.162.1 binary")
+    return name
+
+
 @pytest.fixture(scope="module")
-async def fake_model() -> AsyncIterator[tuple[str, FakeModelServer]]:
+async def fake_model(loop: str) -> AsyncIterator[tuple[str, FakeModelServer]]:
     async with serve() as running:
         yield running
 
 
 @pytest.fixture(scope="module")
 async def target(
-    fake_model: tuple[str, FakeModelServer], tmp_path_factory: pytest.TempPathFactory
+    loop: str,
+    fake_model: tuple[str, FakeModelServer],
+    tmp_path_factory: pytest.TempPathFactory,
 ) -> AsyncIterator[HarnessTarget]:
     url, fake = fake_model
     root = tmp_path_factory.mktemp("harness")
-    harness = HarnessProcess(root / "home", url, root / "harness.log")
+    harness = HarnessProcess(root / "home", url, root / "harness.log", loop)
     (root / "home").mkdir()
     base_url = await harness.start()
     try:
         yield HarnessTarget(
-            base_url=base_url, token=TOKEN, model=fake, restart=harness.restart, timeout_s=30
+            base_url=base_url,
+            token=TOKEN,
+            model=fake,
+            restart=harness.restart,
+            timeout_s=30,
+            **MODEL_NAMES[loop],
         )
     finally:
         await harness.kill()

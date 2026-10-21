@@ -294,3 +294,19 @@ async def test_control_surface_scripts_and_reads_back(http: httpx.AsyncClient) -
 async def test_unknown_route_and_method(http: httpx.AsyncClient) -> None:
     assert (await http.get("/nope")).status_code == 404
     assert (await http.get("/v1/responses")).status_code == 405
+
+
+async def test_responses_instructions_include_leading_developer_messages(
+    server: FakeModelServer, openai_client: AsyncOpenAI
+) -> None:
+    server.script([say("ok")])
+    await openai_client.responses.create(
+        model="m",
+        instructions="field text",
+        input=[
+            {"role": "developer", "content": "developer text"},
+            {"role": "user", "content": "user text"},
+        ],
+    )
+    [recorded] = server.requests
+    assert recorded.instructions == "field text\ndeveloper text"

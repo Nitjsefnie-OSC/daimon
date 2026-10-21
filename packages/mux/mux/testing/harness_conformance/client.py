@@ -74,16 +74,35 @@ class HarnessClient:
         response.raise_for_status()
         return HealthResponse.model_validate(response.json())
 
-    async def submit(self, request: TurnRequest, *, sse: bool = False) -> httpx.Response:
-        """POST a turn. JSON acceptance (202) by default; ``sse`` reads the whole stream."""
+    async def submit(
+        self, request: TurnRequest, *, sse: bool = False, after_seq: int | None = None
+    ) -> httpx.Response:
+        """POST a turn. JSON acceptance (202) by default; ``sse`` reads the whole stream.
+
+        ``after_seq`` is the client's fence: the harness never numbers a new event at or below it.
+        """
         accept = "text/event-stream" if sse else "application/json"
+        query = "" if after_seq is None else f"?after_seq={after_seq}"
         return await self.request(
-            "POST", "/v0/turns", json=request.model_dump(mode="json"), headers={"Accept": accept}
+            "POST",
+            "/v0/turns" + query,
+            json=request.model_dump(mode="json"),
+            headers={"Accept": accept},
         )
 
-    async def events(self, session_id: str, after_seq: int = 0) -> EventsResponse:
-        response = await self.request(
-            "GET", f"/v0/sessions/{session_id}/events?after_seq={after_seq}"
+    async def events_response(
+        self, session_id: str, after_seq: int = 0, *, replay_after_seq: int | None = None
+    ) -> httpx.Response:
+        query = f"after_seq={after_seq}"
+        if replay_after_seq is not None:
+            query += f"&replay_after_seq={replay_after_seq}"
+        return await self.request("GET", f"/v0/sessions/{session_id}/events?{query}")
+
+    async def events(
+        self, session_id: str, after_seq: int = 0, *, replay_after_seq: int | None = None
+    ) -> EventsResponse:
+        response = await self.events_response(
+            session_id, after_seq, replay_after_seq=replay_after_seq
         )
         response.raise_for_status()
         return EventsResponse.model_validate(response.json())

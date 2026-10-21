@@ -242,7 +242,7 @@ jobs:
       - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
       - uses: ./.github/actions/setup-daimon
       - name: Install pinned Codex controller (harness)
-        if: matrix.suite == 'harness'
+        if: matrix.suite == 'harness' || matrix.suite == 'harness-conformance'
         run: |
           codex_dir=$(mktemp -d)
           curl --fail --location --retry 3 \

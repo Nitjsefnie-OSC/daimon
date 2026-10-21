@@ -119,7 +119,15 @@ class RecordedRequest(BaseModel):
         """System prompt text, whichever field the API carries it in."""
         body = self.body
         if self.api == "responses":
-            return str(body.get("instructions") or "")
+            # An engine may send its system prompt as `instructions` or as a leading
+            # developer/system input message; both are the same thing to a test.
+            leading = [as_dict(item) for item in as_list(body.get("input"))]
+            parts = [str(body.get("instructions") or "")] + [
+                _content_text(item.get("content"))
+                for item in leading
+                if item.get("role") in {"system", "developer"}
+            ]
+            return "\n".join(part for part in parts if part)
         if self.api == "anthropic_messages":
             system = body.get("system") or ""
             if isinstance(system, str):

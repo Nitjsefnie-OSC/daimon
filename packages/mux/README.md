@@ -1336,7 +1336,8 @@ async with serve() as (url, fake):  # point the engine's model base URL at `url`
 ```
 
 `mux.testing.harness_conformance` checks any `daimon-harness/0` service over HTTP: turn
-lifecycle, idempotent replay and 409 on key reuse, events by sequence, approvals, cancel, restart
+lifecycle, idempotent replay and 409 on key reuse, events by sequence, the `after_seq` fence and
+`history_gap` for a cursor ahead of the log, `replay_after_seq`, approvals, cancel, restart
 without re-run, usage per model request, skills, MCP and built-in tool projection. Each case
 reports PASS, SKIP with a reason, or FAIL.
 
@@ -1356,4 +1357,6 @@ configured:
 python -m mux.testing.harness_conformance --harness-url http://127.0.0.1:8088 --token "$HARNESS_TOKEN" --fake-port 9099
 ```
 
-`tests/harness_conformance` runs the kit against `apps/harness` offline in CI.
+`HarnessTarget.tool_name` and `mcp_tool_name` map tool names for engines that prefix them.
+`tests/harness_conformance` runs the kit against `apps/harness` offline in CI, once per model
+loop (the Codex loop runs when `HARNESS_CODEX_BINARY` points at the pinned binary).

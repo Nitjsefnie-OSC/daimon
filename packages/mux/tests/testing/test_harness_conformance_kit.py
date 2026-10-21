@@ -175,3 +175,14 @@ def test_report_lists_every_case_with_its_verdict() -> None:
 def test_case_names_are_unique() -> None:
     names = [case.name for case in CASES]
     assert len(names) == len(set(names))
+
+
+async def test_target_maps_builtin_and_mcp_tool_names() -> None:
+    from mux.testing.harness_conformance.target import CaseContext
+
+    target = target_with(
+        health_handler(enforce_auth=True), tool_name=lambda name: f"harness_{name}"
+    )
+    context = CaseContext(target, None, "x")  # type: ignore[arg-type]
+    assert context.tool("write") == "harness_write"
+    assert target.mcp_tool_name("srv", "echo") == "srv__echo"
