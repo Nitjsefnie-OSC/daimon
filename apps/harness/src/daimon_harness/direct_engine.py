@@ -444,7 +444,8 @@ def responses_usage(response: Response) -> Usage | None:
     usage = response.usage
     input_tokens = getattr(usage, "input_tokens", None)
     output_tokens = getattr(usage, "output_tokens", None)
-    if not isinstance(input_tokens, int) or not isinstance(output_tokens, int):
+    # type() rather than isinstance(): a JSON boolean is not a token count.
+    if type(input_tokens) is not int or type(output_tokens) is not int:
         return None
     return Usage(
         input_tokens=input_tokens,

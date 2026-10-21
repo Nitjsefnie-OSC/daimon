@@ -9,8 +9,8 @@ default, and `create_app` still builds `AzureModelAdapter`.
 | engine | file | loop on | lines (all / code) |
 |---|---|---|---|
 | current | `model_adapter.py` | OpenAI Agents SDK 0.20.0 | 507 / 462 |
-| `PydanticAIAdapter` | `pydantic_engine.py` | `pydantic-ai-slim` 1.107.9 | 619 / 513 |
-| `DirectResponsesAdapter`, `DirectAnthropicAdapter` | `direct_engine.py` | `openai` and `anthropic` clients, no framework | 647 / 516 (about 110 for the Anthropic path) |
+| `PydanticAIAdapter` | `pydantic_engine.py` | `pydantic-ai-slim` 1.107.9 | 628 / 519 |
+| `DirectResponsesAdapter`, `DirectAnthropicAdapter` | `direct_engine.py` | `openai` and `anthropic` clients, no framework | 655 / 521 (about 110 for the Anthropic path) |
 
 Both engines keep the shell's guarantees: a durable `model_request_started`
 before model I/O and exactly one usage or `usage_unavailable` record per
@@ -23,7 +23,7 @@ per-session UID; cancellation that never re-runs an interrupted tool.
 ## Results (offline, scripted models only)
 
 - Full harness suite with both engines' tests:
-  `pytest apps/harness/tests -n 2` gives 288 passed, 5 skipped (the baseline
+  `pytest apps/harness/tests -n 2` gives 290 passed, 5 skipped (the baseline
   without them is 163 passed, 3 skipped). The skips are live-provider tests.
 - Given the same scripted Azure Responses traffic, both new engines put
   the same requests on the wire as the current engine. The direct engine also
@@ -47,8 +47,8 @@ Pydantic AI:
   `server/*` tool is refused like today instead of failing the run.
 - A pinned model profile: the default profile for `gpt-6-luna` turns off
   encrypted reasoning content and rewrites MCP tool schemas.
-- Its own check that the response carried integer input and output token
-  counts: Pydantic AI 1.107.9 turns a missing or partial `usage` object into
+- Its own check that the response carried integer (not boolean) input and
+  output token counts: Pydantic AI 1.107.9 turns a missing or partial `usage` object into
   zeros, which would have been journalled as measured usage (found in review;
   the current engine already refuses these).
 - `retries=0`, `output_retries=0` and a raw-argument validator, so bad tool

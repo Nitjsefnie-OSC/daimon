@@ -126,8 +126,9 @@ class CapturingResponsesModel(OpenAIResponsesModel):
 def reports_token_counts(response: Response) -> bool:
     """The SDK does not validate responses; 1.107.9 turns absent counts into zeros."""
     usage = response.usage
+    # type() rather than isinstance(): a JSON boolean is not a token count.
     return all(
-        isinstance(getattr(usage, field, None), int) for field in ("input_tokens", "output_tokens")
+        type(getattr(usage, field, None)) is int for field in ("input_tokens", "output_tokens")
     )
 
 

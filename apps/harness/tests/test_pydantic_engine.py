@@ -218,6 +218,7 @@ MALFORMED_USAGE: dict[str, object] = {
     "empty_usage": {},
     "no_output_tokens": {"input_tokens": 12},
     "null_input_tokens": {"input_tokens": None, "output_tokens": 8},
+    "boolean_tokens": {"input_tokens": False, "output_tokens": True, "total_tokens": 1},
 }
 
 
