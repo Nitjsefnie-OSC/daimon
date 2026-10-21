@@ -121,8 +121,11 @@ _BALANCE_BLOCKED_TEXT = (
 _CAP_BLOCKED_TEXT = "You've used your monthly limit.\n\nAsk the team running Daimon to raise it."
 
 
-def _register_slack_defaults(mock: AioResponsesMock) -> None:
+def _register_slack_defaults(mock: AioResponsesMock, *, team_id: str) -> None:
     """Canned ok=True responses for the Slack Web API methods a turn touches.
+
+    The requester is a member of `team_id`, the workspace the turn runs in: a
+    turn only runs for someone `users.info` places in the host workspace.
 
     Mirrors `packages/adapters/slack/tests/conftest.py`'s
     `_register_slack_defaults` -- duplicated here rather than imported since
@@ -133,7 +136,12 @@ def _register_slack_defaults(mock: AioResponsesMock) -> None:
         _USERS_INFO_PATTERN,
         payload={
             "ok": True,
-            "user": {"is_admin": False, "is_owner": False, "is_primary_owner": False},
+            "user": {
+                "is_admin": False,
+                "is_owner": False,
+                "is_primary_owner": False,
+                "team_id": team_id,
+            },
         },
         repeat=True,
     )
@@ -407,7 +415,7 @@ class SlackDriver:
             AioResponsesMock() as mock,
             patch("daimon.core.turn.prepare.create_session") as mock_create_session,
         ):
-            _register_slack_defaults(mock)
+            _register_slack_defaults(mock, team_id=workspace_id)
             mock_create_session.return_value = ma_session(
                 id="sess_parity_test",
                 agent_id="ag_parity_test",
