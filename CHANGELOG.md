@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Agent edits now reach an open self-hosted conversation at its next message: changed instructions, model, tools, skills or MCP servers apply on the same session, so workspace files stay. A turn already running finishes on its old configuration and its usage is metered at the model and tariff it used. Environment changes and archived agents still require a fresh session.
+
 - Attach shared selfhosted skill pins only when an authorized editor adds them; unrelated saves cannot authorize another editor’s unowned pins.
 
 - Load operator bindings for correctly configured self-hosted session pools while still requiring explicit pool routing on environments.

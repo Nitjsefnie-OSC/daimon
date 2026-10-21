@@ -10,16 +10,31 @@ import httpx
 import pytest
 from mux.contracts.actions import UserMessage, UserToolConfirmation
 from mux.contracts.events import TextPart
-from mux.contracts.ids import ModelRef, PageRequest, Revision, Scope
+from mux.contracts.ids import ModelRef, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.ports import Agents, Environments
-from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec, SessionSpec
-from mux.drivers.selfhosted import SelfHostedDriver
+from mux.contracts.resources import (
+    Agent,
+    AgentSpec,
+    Environment,
+    EnvironmentSpec,
+    MCPConnection,
+    SessionSpec,
+    SkillRef,
+    ToolSpec,
+)
+from mux.drivers.selfhosted import SelfHostedDriver, wire
 from mux.drivers.selfhosted.transport import (
     DirectTransport,
     FoundryInvocationsTransport,
     sandbox_id,
 )
-from mux.errors import OperationConflict, ProviderError, ScopeViolation
+from mux.errors import (
+    ContinuityLost,
+    OperationConflict,
+    ProviderError,
+    ScopeViolation,
+    UnsupportedCapability,
+)
 
 SCOPE = Scope(
     tenant_id="tenant", account_id="account", principal_id="person", authorization_id="grant"
@@ -1616,3 +1631,187 @@ async def test_mcp_invalid_or_widening_policy_refuses_before_harness_io(policy):
         with pytest.raises(UnsupportedCapability):
             await driver.events.send(SCOPE, session.ref, [MESSAGE], key="send")
         assert fake.executions == 0
+
+
+# Agent edits reach an open session at its next message (same harness session).
+
+
+async def edit_agent(driver, session, **spec_changes):
+    """Edit the stored agent to revision 2 and return the spec that asks for it."""
+    agents = driver.agents
+    agents.value = agents.value.model_copy(
+        update={
+            "revision": Revision(local=2),
+            "spec": agents.value.spec.model_copy(update=spec_changes),
+        }
+    )
+    current = await driver.sessions.spec(SCOPE, session.ref)
+    return current.model_copy(update={"agent_revision": Revision(local=2), "config_revision": 2})
+
+
+async def apply_edit(driver, session, desired, key="update"):
+    plan = await driver.sessions.plan_update(SCOPE, session.ref, desired)
+    assert plan.action == "in_place", plan.unmet
+    receipt = await driver.sessions.apply_update(
+        SCOPE, plan, expected=plan.expected_revision, key=key
+    )
+    assert receipt.applies == "next_turn"
+    return plan
+
+
+async def resolve_skill(scope, skill):
+    return wire.InlineSkill(name=skill.id, files={"SKILL.md": "skill " + skill.id})
+
+
+EDITS = {
+    "instructions": (
+        {"system": "edited instructions"},
+        lambda body: body["instructions"] == "edited instructions",
+    ),
+    "tools": (
+        {"tools": (ToolSpec(name="bash", kind="builtin", permission="ask"),)},
+        lambda body: body["tool_policy"]["bash"] == "ask" and body["tool_policy"]["read"] == "deny",
+    ),
+    "skills": (
+        {"skills": (SkillRef(id="analysis"),)},
+        lambda body: [skill["name"] for skill in body["skills"]] == ["analysis"],
+    ),
+    "mcp": (
+        {"mcp_servers": (MCPConnection(name="docs", url="https://mcp.example/docs"),)},
+        lambda body: [server["name"] for server in body["mcp_servers"]] == ["docs"],
+    ),
+}
+
+
+@pytest.mark.parametrize("edit", list(EDITS))
+async def test_agent_edit_reaches_next_turn_on_same_session(edit):
+    changes, applied = EDITS[edit]
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake, skill_resolver=resolve_skill)
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="first")
+        first = fake.request
+        assert first["instructions"] == "test instructions"
+        desired = await edit_agent(driver, session, **changes)
+        # Until the pin advances the edited agent is refused, as before.
+        with pytest.raises(ContinuityLost, match="agent changed"):
+            await driver.events.send(SCOPE, session.ref, [MESSAGE], key="blocked")
+        await apply_edit(driver, session, desired)
+        advanced = (await driver.sessions.retrieve(SCOPE, session.ref)).binding
+        assert advanced.generation == session.binding.generation + 1
+        assert advanced.config_revision == 2
+        assert advanced.id == session.binding.id
+        assert advanced.native_refs["session"] == session.binding.native_refs["session"]
+        assert advanced.native_refs["sandbox"] == session.binding.native_refs["sandbox"]
+        assert Revision.model_validate_json(advanced.native_refs["agent_revision_pin"]).local == 2
+        await driver.events.send(SCOPE, session.ref, [MESSAGE], key="second")
+        second = fake.request
+        assert applied(second)
+        assert second["session_id"] == first["session_id"] == session.ref.id
+        assert second["turn_id"] != first["turn_id"]
+        assert fake.executions == 2
+
+
+async def test_agent_edit_does_not_disturb_a_turn_already_running():
+    fake = Harness("approval")
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        running = await driver.events.send(SCOPE, session.ref, [MESSAGE], key="first")
+        old_request = fake.request
+        await apply_edit(driver, session, await edit_agent(driver, session, system="edited"))
+        # The turn finishes on what it started with: the approval needs no new request.
+        await driver.events.send(
+            SCOPE,
+            session.ref,
+            [UserToolConfirmation(action_id="approval", decision="allow")],
+            key="approve",
+            expected_turn=running.turn_id,
+        )
+        events = [e async for e in await driver.events.open_stream(SCOPE, session.ref, after="0")]
+        assert events[-1].type == "session.turn_ended"
+        assert old_request["instructions"] == "test instructions"
+        assert fake.executions == 1
+        usage = await driver.usage.reconcile(SCOPE, session.ref)
+        assert [u.model.id for u in usage] == ["gpt-6-luna"]
+
+
+async def test_agent_edit_update_is_idempotent_and_unchanged_agent_is_reuse():
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        unchanged = await driver.sessions.spec(SCOPE, session.ref)
+        assert (await driver.sessions.plan_update(SCOPE, session.ref, unchanged)).action == "reuse"
+        desired = await edit_agent(driver, session, system="edited")
+        plan = await apply_edit(driver, session, desired)
+        once = (await driver.sessions.retrieve(SCOPE, session.ref)).binding
+        await driver.sessions.apply_update(
+            SCOPE, plan, expected=plan.expected_revision, key="again"
+        )
+        assert (await driver.sessions.retrieve(SCOPE, session.ref)).binding == once
+        with pytest.raises(OperationConflict):
+            await driver.sessions.apply_update(
+                SCOPE, plan, expected=Revision(local=9), key="wrong-expectation"
+            )
+        assert (await driver.sessions.plan_update(SCOPE, session.ref, desired)).action == "reuse"
+
+
+def foreign_ref(kind):
+    return ResourceRef(
+        id="other-" + kind,
+        kind=kind,
+        provider="selfhosted",
+        account_scope_id="tenant",
+        tenant_id=SCOPE.tenant_id,
+        account_id=None,
+    )
+
+
+async def archive_agent(driver, session):
+    driver.agents.value = driver.agents.value.model_copy(update={"lifecycle": "archived"})
+    return await edit_agent(driver, session)
+
+
+async def change_environment_revision(driver, session):
+    driver.environments.value = driver.environments.value.model_copy(
+        update={"revision": Revision(local=2)}
+    )
+    return await edit_agent(driver, session, system="edited")
+
+
+@pytest.mark.parametrize(
+    ("make_desired", "unmet"),
+    [
+        (
+            lambda driver, session: _with(driver, session, agent=foreign_ref("agent")),
+            "agent_identity",
+        ),
+        (
+            lambda driver, session: _with(driver, session, environment=foreign_ref("environment")),
+            "environment_identity",
+        ),
+        (
+            lambda driver, session: _with(driver, session, state_mode="fresh"),
+            "session_update_options",
+        ),
+        (archive_agent, "agent_archived"),
+        (change_environment_revision, "environment_revision"),
+    ],
+)
+async def test_agent_edit_refusals_keep_the_session_as_it_was(make_desired, unmet):
+    fake = Harness()
+    async with httpx.AsyncClient(transport=httpx.MockTransport(fake.handle)) as client:
+        driver, session = await setup(client, fake)
+        desired = await make_desired(driver, session)
+        plan = await driver.sessions.plan_update(SCOPE, session.ref, desired)
+        assert plan.action == "refuse" and plan.unmet == (unmet,)
+        with pytest.raises(UnsupportedCapability):
+            await driver.sessions.apply_update(
+                SCOPE, plan, expected=plan.expected_revision, key="refused"
+            )
+        assert (await driver.sessions.spec(SCOPE, session.ref)).agent_revision == Revision(local=1)
+        assert driver.events._c.binding(SCOPE, session.ref) == session.binding
+
+
+async def _with(driver, session, **changes):
+    current = await driver.sessions.spec(SCOPE, session.ref)
+    return current.model_copy(update=changes)
