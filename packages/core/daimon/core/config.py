@@ -1234,6 +1234,24 @@ class McpCredentialBinding(BaseModel):
         return value
 
 
+class HarnessAuthBinding(McpCredentialBinding):
+    """Operator authority for a harness bearer variable or Entra audience."""
+
+    name: str = Field(min_length=1)
+    auth_mode: Literal["bearer_env", "entra"] = "bearer_env"
+
+    @model_validator(mode="after")
+    def valid_reference(self) -> HarnessAuthBinding:
+        from mux.drivers.selfhosted.config import HarnessConfig
+
+        HarnessConfig(harness_url=self.origin, auth_mode=self.auth_mode, auth_ref=self.name)
+        if self.auth_mode == "bearer_env" and not self.name.startswith(
+            "DAIMON_SELFHOSTED__HARNESS_TOKEN_"
+        ):
+            raise ValueError("Harness bearer binding requires an operator token variable")
+        return self
+
+
 class SelfHostedSettings(BaseModel):
     """Operator opt-in for the self-hosted turn runtime."""
 
@@ -1262,6 +1280,25 @@ class SelfHostedSettings(BaseModel):
         ),
     )
 
+    harness_auth_bindings: tuple[HarnessAuthBinding, ...] = Field(
+        default=(),
+        description=(
+            "JSON list of harness auth bindings: auth_mode (bearer_env or entra), name "
+            "(DAIMON_SELFHOSTED__HARNESS_TOKEN_* variable or exact Entra audience), "
+            "origin (exact HTTPS origin), tenants (UUID list). Unbound names and destinations "
+            "are refused before credential resolution. Wildcards require single_tenant."
+        ),
+    )
+
+    @field_validator("harness_auth_bindings")
+    @classmethod
+    def unique_harness_names(
+        cls, value: tuple[HarnessAuthBinding, ...]
+    ) -> tuple[HarnessAuthBinding, ...]:
+        if len({(binding.auth_mode, binding.name) for binding in value}) != len(value):
+            raise ValueError("Harness credential binding names must be unique")
+        return value
+
     mcp_credential_bindings: tuple[McpCredentialBinding, ...] = Field(
         default=(),
         description=(
@@ -1285,7 +1322,8 @@ class SelfHostedSettings(BaseModel):
     @model_validator(mode="after")
     def wildcard_requires_single_tenant(self) -> SelfHostedSettings:
         if not self.single_tenant and any(
-            b.tenants == ("*",) for b in self.mcp_credential_bindings
+            b.tenants == ("*",)
+            for b in (*self.mcp_credential_bindings, *self.harness_auth_bindings)
         ):
             raise ValueError(
                 "Wildcard MCP credential bindings require a single-tenant installation"
@@ -2244,3 +2282,21 @@ class _SelfHostedSettingsSource(BaseSettings):
 def load_selfhosted_settings(*, _env_file: str | None = ".env") -> SelfHostedSettings:
     """Read the operator admission switch without constructing provider clients."""
     return _SelfHostedSettingsSource(_env_file=_env_file).selfhosted  # pyright: ignore[reportCallIssue]
+
+
+class _BillingSettingsSource(BaseSettings):
+    """Tariff discovery without unrelated provider or database configuration."""
+
+    billing: BillingSettings = Field(default_factory=BillingSettings)
+    model_config = SettingsConfigDict(
+        env_prefix="DAIMON_",
+        env_nested_delimiter="__",
+        env_file=".env",
+        extra="ignore",
+        hide_input_in_errors=True,
+    )
+
+
+def load_billing_settings(*, _env_file: str | None = ".env") -> BillingSettings:
+    """Read billing policy without constructing a host or provider clients."""
+    return _BillingSettingsSource(_env_file=_env_file).billing  # pyright: ignore[reportCallIssue]

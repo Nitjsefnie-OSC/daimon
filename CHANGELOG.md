@@ -16,6 +16,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Include async managed-identity transport in the harness image and finish subprocess cleanup when cancellation arrives during launch.
 
 - Preserve SDK header masking and redact harness/model credentials in debug logs; complete turn finalization before acknowledging cancellation.
+- Bound selfhosted Entra audiences to operator-approved origins and tenants. Fixed approval handling through the turn runner, preserved explicit agent confirmation and stored MCP rules, and resumed session history and usage replay from durable cursors.
+
+- Bind self-hosted harness bearer tokens to operator-approved origins and tenants, preserve MCP approval identity, and enforce host tool-safety policy. Reuse Entra credentials and HTTP connections, cancel abandoned harness work, and reconcile late usage without a lifetime-session usage bound.
 
 - Verify self-hosted skill pins using their declared content or ZIP representation, preserve held-version mount names, and load pinned channel bundles for other channel members. Explicit custom skills may use built-in names. Wildcard MCP credentials require single-tenant opt-in; private HTTP MCP destinations require operator exceptions.
 - Refuse shared writable scratch in multi-session harnesses, kill detached tool descendants at completion, and reap orphan processes with tini.
@@ -44,7 +47,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 - Added selfhosted tariff admission and request settlement APIs with dated Azure model tariff history and frozen admission snapshots. Runtimes must call the admission gate before paid work; these APIs alone do not wire turn refusal. Unknown usage stays pending with reasons in the paginated `daimon usage pending` report. Deployment/model aliases share the admitted underlying-model identity across corrections. Corrupt tariff context keeps corrections durable and pending; accepted clock lag across midnight uses the frozen admission date. Native settlement requires measured completeness.
 - Added host-side preparation for self-hosted MCP servers and complete text/binary skill bundles, with scoped credential references, explicit unsupported-skill skips, and revocable caller-bound MCP credentials kept outside turn bodies. Runtime integration remains opt-in.
 
-- Reserved the opt-in `selfhosted.loop` profile for the self-hosted harness. Runtime admission remains closed while the driver is being implemented.
+- Added opt-in self-hosted harness chat turns with exact tenant/channel grants, persistent caller sessions, price admission before HTTP, request-level metering, MCP tools and turn credential cleanup.
 - Added offline-validated Azure Bicep infrastructure and an azd entrypoint for staged Container Apps deployment, PostgreSQL, Key Vault, Blob, ACR and Azure OpenAI/Foundry.
 - Added the opt-in `selfhosted.loop` HTTP driver with direct and Foundry invocation transports, durable event polling, approvals, cancellation and measured model-request usage. Resource ports are supplied by the host. MCP permissions are scoped by server, narrowed tool sets deny omitted tools, and credentialed MCP servers require a scoped host resolver. Completed turns remain readable with the default cursor, and pending approvals recover after connection errors. `DAIMON_SELFHOSTED__ADMISSION_ENABLED` defaults to false; enabling it preserves required usage checks.
 

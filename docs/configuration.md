@@ -1015,6 +1015,15 @@ Operator-authorized exact hostnames or IP literals for credential-free HTTP MCP
 connections to private, link-local or metadata destinations. Empty by default. Loopback
 remains allowed; credential-bearing connections still require HTTPS.
 
+### `DAIMON_SELFHOSTED__HARNESS_AUTH_BINDINGS`
+
+`tuple[HarnessAuthBinding, ...]` · optional · default unset
+
+JSON list of harness auth bindings: auth_mode (bearer_env or entra), name
+(DAIMON_SELFHOSTED__HARNESS_TOKEN_* variable or exact Entra audience), origin (exact
+HTTPS origin), tenants (UUID list). Unbound names and destinations are refused before
+credential resolution. Wildcards require single_tenant.
+
 ### `DAIMON_SELFHOSTED__MCP_CREDENTIAL_BINDINGS`
 
 `tuple[McpCredentialBinding, ...]` · optional · default unset

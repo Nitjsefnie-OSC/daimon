@@ -1338,10 +1338,14 @@ verified regional/contract Azure rates. There is no built-in Azure tariff or
 public OpenAI fallback.
 
 `require_selfhosted_price` provides a refusal gate; the runtime **must call it
-before paid work**. These settings and the reserved profile do not wire that
-gate or enable execution. The runtime must also call `admit_selfhosted_usage`
-(which calls the gate) before model I/O, using the durable input/send idempotency
-key. Admission commits the deployment, underlying model, tariff identity
+before paid work**. The registered `selfhosted.loop` core runtime checks this
+before every harness HTTP call and commits `admit_selfhosted_usage` before the
+turn POST. It derives the admission key from the durable wire turn id and uses
+the same key for streaming usage, replay and reconciliation. The operator must
+explicitly enable selfhosted admission and grant the channel configuration in
+the runtime manifest; tariff settings alone do not enable execution. The
+manifest requires a nonnegative `infrastructure_usd` cost per request, including
+an explicit zero when infrastructure is funded separately. Admission commits the deployment, underlying model, tariff identity
 (model plus effective date), rates and authorized session in the existing
 operation store. Repeating that admission key retrieves its original snapshot.
 
@@ -1404,6 +1408,11 @@ reports gaps: it provides no apply/repair command. Runtime journal replay owns
 reconciliation. A missing admitted tariff needs authoritative original admission
 evidence; admitting a new tariff after the request does not repair it.
 
+The runtime advances a per-binding replay cursor only after recording the
+receipts through that position. Later turns read from that cursor, while a
+recovered invocation retains its original baseline. Reconciliation therefore
+processes new receipts without re-recording lifetime session usage.
+
 The Anthropic usage sweep is not a selfhosted recovery path. The harness journals
 request intention before model I/O. On reconcile, an unmatched intention becomes
 an unknown observation with the same stable request ID. Retain it pending until
@@ -1428,3 +1437,10 @@ observations is unresolved; turn completion does not supply token counts.
 Operators must reconcile these pending observations against provider usage
 before final settlement. The window between receiving provider usage and
 committing the usage event remains a known reconciliation gap.
+
+Self-hosted turn cleanup attempts bounded harness cancellation when the host
+reader ends before a terminal event. The frozen tariff admission remains durable.
+Replay records late receipts from earlier turns under their original turn
+admission key, including on a later invocation of the same session. A journaled
+model start without measured usage remains an unknown pending observation until
+its measured revision arrives; elapsed host deadlines do not discard it.
