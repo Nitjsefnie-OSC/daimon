@@ -2429,8 +2429,22 @@ def test_only_a_mounted_store_that_changes_is_a_memory_boundary(
     from daimon.core.session_snapshot import SessionSnapshot
 
     def snapshot(stores: tuple[str | None, str | None]) -> SessionSnapshot:
-        return SessionSnapshot.model_construct(
-            memory_store_id=stores[0], personal_memory_store_id=stores[1]
+        return SessionSnapshot(
+            ma_agent_id="agent_baseline",
+            model_id="claude-sonnet-5",
+            system_sha256="system-hash",
+            skills_sha256="skills-hash",
+            environment_id="env_baseline",
+            repo_url=None,
+            repo_branch=None,
+            memory_store_id=stores[0],
+            personal_memory_store_id=stores[1],
+            vault_id=None,
+            tools_sha256="tools-hash",
+            mcp_servers_sha256="mcp-hash",
+            env_sha256="env-hash",
+            agent_version=1,
+            agent_name="research-bot",
         )
 
     assert _leaves_memory_store(snapshot(recorded), snapshot(desired)) is leaves
