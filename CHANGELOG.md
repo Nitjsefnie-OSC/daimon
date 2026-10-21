@@ -7,11 +7,31 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Join harness tool workers before completing cancellation or accepting another turn, and retain reasoning alongside tool calls during context-overflow recovery.
+
+- Refuse tool-readable files on external harness mounts regardless of filename, and preserve usage while reporting all non-completed model response statuses as errors.
+
+- Restrict harness credentials to API keys or header-protected managed identity, refuse file-backed credentials, and preserve usage while marking incomplete model responses as errored.
+
+- Include async managed-identity transport in the harness image and finish subprocess cleanup when cancellation arrives during launch.
+
+- Preserve SDK header masking and redact harness/model credentials in debug logs; complete turn finalization before acknowledging cancellation.
+
 - Verify self-hosted skill pins using their declared content or ZIP representation, preserve held-version mount names, and load pinned channel bundles for other channel members. Explicit custom skills may use built-in names. Wildcard MCP credentials require single-tenant opt-in; private HTTP MCP destinations require operator exceptions.
+- Refuse shared writable scratch in multi-session harnesses, kill detached tool descendants at completion, and reap orphan processes with tini.
 
 - Bind self-hosted MCP credentials to operator-declared HTTPS origins and tenants, cap per-turn tokens at one hour, and recognize built-in skills without source metadata.
+- Bind the self-hosted harness to one session by default; require verified process and temporary-file isolation for multi-session service.
+
+- Require separate service/tool identities in the self-hosted harness, refuse unsigned gateway authentication, isolate file operations and redact SDK failure logs.
+
+### Added
+
+- A standalone Azure OpenAI harness runs local agent tools, MCP connections and skills, with durable event replay, approval decisions and cancellation. It supports direct HTTP and Foundry invocation envelopes; deployment details are in `apps/harness/README.md`.
 
 ### Changed
+
+- Hardened harness tool processes, caller authorization and MCP credential scoping; cache binary skill bundles and honor per-tool approval policies.
 
 - Harness tool policies accept explicit denial and validated built-in, MCP tool and server wildcard keys.
 

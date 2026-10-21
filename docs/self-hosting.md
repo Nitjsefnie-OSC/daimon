@@ -52,6 +52,12 @@ The record schema also accepts Foundry routing with
 `--transport foundry_invocations --agent-name <hosted-agent>` and
 `--project-endpoint <project-endpoint>`, with `--auth-mode entra` and
 `--auth-ref <audience>`. Both routing fields are required for that transport.
+The harness image runs tini as PID 1 to reap orphaned tool processes. Custom
+entrypoints must retain that reaper. Multi-session service additionally requires
+all shared scratch directories, including `/var/tmp` and `/dev/shm`, to deny tool
+UID writes; startup scans writable storage mounts and refuses unsafe directories.
+Tools use private per-session temporary directories.
+
 Current deployments use direct transport; the harness refuses unsigned Foundry
 gateway authentication. Direct `/v0/*` requests are the default transport. HTTPS is required outside
 loopback. `--allow-insecure-http` explicitly permits HTTP on internal service
@@ -283,6 +289,39 @@ repository's `uv.lock`. Its build checks every installed distribution against
 that lock, including platform markers, and starts the installed application
 directly so startup cannot resolve different packages. Build it from the
 repository root with `docker build -f apps/report-host/Dockerfile .`.
+
+### Self-hosted agent harness
+
+The standalone harness image runs the OpenAI Agents SDK against Azure OpenAI.
+Build it from the repository root with
+`docker build -f apps/harness/Dockerfile -t daimon-harness .`. Its dependencies
+are exported from `uv.lock`; the image includes NumPy, pandas, PyMC and
+PyMC-Marketing. Supply `HARNESS_TOKEN`, `AZURE_OPENAI_ENDPOINT` and either
+`AZURE_OPENAI_API_KEY` or ACA managed identity at runtime. The model credential
+uses only `ManagedIdentityCredential`, with `IDENTITY_ENDPOINT` and
+`IDENTITY_HEADER` required together and an optional `AZURE_CLIENT_ID`; these
+values are captured then scrubbed. File-backed credentials, certificate paths,
+projected workload tokens and tool-readable regular files on external mounts
+refuse startup. Mount checks use mountinfo rather than filenames and include
+read-only mounts. Only image/runtime system paths and isolated session storage
+are exempt. All non-completed Azure responses preserve usage but end as `errored`
+with the provider reason or error.
+Mount a
+persistent home directory at `/home/harness`; run one worker per HOME. The image
+starts as root, drops the service to UID 10000 and retains the capabilities needed
+to assign separate tool UIDs and work/skills directories to sessions. Production
+refuses a same-UID fallback. `HARNESS_SESSION_MODE=single` is the default: the
+first session ID binds persistently and all other IDs receive 409 `session_bound`.
+Use one custom container per session in Azure Container Apps dynamic sessions.
+Every tool receives a session-local HOME, cwd and TMPDIR. Multi-session mode
+requires verified `hidepid=2` process visibility, per-session UIDs and a shared
+`/tmp` that tools cannot write; otherwise startup refuses it.
+Use direct ACA transport with private ingress and
+bearer or Entra authentication; unsigned Foundry gateway mode refuses startup.
+Port 8088 serves authenticated `/v0/*` endpoints and `/invocations`. Model calls,
+tool execution and session files remain in the configured runtime and Azure
+model endpoint. The application README documents environment variables and
+Foundry deployment constraints.
 
 ### Running the processes by hand
 
