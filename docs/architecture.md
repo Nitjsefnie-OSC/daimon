@@ -38,6 +38,35 @@ orchestrator answer is delivered only after authoritative collection and
 required result reviews succeed. Default fleet settings create no card,
 service discovery or additional sender.
 
+Self-hosted channels use the opening message as the Discord thread title and
+stay mention-only on Discord and Teams, without the optional Anthropic
+participation classifier. Responder-change notices use a generic previous-agent
+label. Automatic Anthropic session-file sweeps are skipped on Discord, Slack
+and Teams; the self-hosted harness can deliver files through Daimon's MCP tools.
+Self-hosted MCP credentials refuse Anthropic-specific management operations
+before any provider request; provider-neutral tools remain available. Channel
+authorization resolves their execution identity from tenant-scoped local agent
+records, including agent rules. Isolation views, timer lists, current-place cards
+and tenant summaries use the same live local records and retain channel
+visibility boundaries. Cosmetic Slack identity lookup is skipped.
+Adapter turns and their child tasks inherit the same Anthropic prohibition.
+Queued continuations retain the thread concurrency lock but start a fresh provider
+context for each wake, then apply the requesting caller's own retained-backend
+guard. Draining another caller's timer never transfers the originating turn's
+provider prohibition. A guard denial defers the queued work for retry.
+Organic participation, adapter turns, handovers and continuation guards use one
+effective backend resolver with the thread and caller identity. It checks the
+retained backend binding before the channel's current selection. A retained self-hosted thread
+stays mention-only after a channel backend change; a retained Anthropic thread
+can still reply after its channel switches to self-hosted. New threads use the
+current channel selection. Discord `/here`, Slack `/here` and Teams `here`
+establish the backend context before loading their current-place cards, so
+self-hosted cards resolve local agent records without Anthropic requests.
+Timers and task continuations check self-hosted targets in local records and
+require an installed self-hosted runtime; an unavailable runtime produces a
+clear notice. Self-hosted responder notices omit the Hand over button, and
+previously posted buttons refuse without a provider lookup.
+
 With the mux turn path and channel backends enabled, an admin can choose **Model
 backend** in an agent's setup Details on Discord, Slack or Teams. The preview
 lists unsupported skills, connectors and capabilities, shared-thread limits,

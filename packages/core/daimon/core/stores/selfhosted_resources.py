@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from datetime import UTC, datetime
 from uuid import UUID
 
+from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.core._models import (
     Account,
     SelfHostedAgentRecord,
@@ -19,6 +20,8 @@ from daimon.core._models import (
     SelfHostedResourceOperation,
     Tenant,
 )
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_TENANT
+from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.stores.privacy_session_deletes import lock_account
 from mux.contracts.ids import Page, PageRequest, ResourceRef, Revision, Scope
 from mux.contracts.receipts import DeletionReceipt, Operation
@@ -44,6 +47,51 @@ from ulid import ULID
 
 _JSON: TypeAdapter[JsonValue] = TypeAdapter(JsonValue)
 Row = SelfHostedAgentRecord | SelfHostedEnvironmentRecord
+
+
+async def list_live_agent_facts(
+    session: AsyncSession, *, tenant_id: UUID
+) -> list[BetaManagedAgentsAgent]:
+    """Local policy facts in the shape used by routing and isolation readers.
+
+    Include every live record, without a page limit. Reserved metadata comes
+    from the row's tenant and configured name, never caller-supplied aliases.
+    These facts contain no provider-managed tools or skills.
+    """
+    rows = await session.scalars(
+        select(SelfHostedAgentRecord).where(
+            SelfHostedAgentRecord.tenant_id == tenant_id,
+            SelfHostedAgentRecord.archived_at.is_(None),
+        )
+    )
+    facts: list[BetaManagedAgentsAgent] = []
+    for row in rows:
+        spec = AgentSpec.model_validate(row.spec)
+        facts.append(
+            BetaManagedAgentsAgent.model_validate(
+                {
+                    "id": row.id,
+                    "type": "agent",
+                    "name": spec.name,
+                    "version": row.revision,
+                    "model": {"id": spec.model.id},
+                    "system": spec.system,
+                    "description": spec.description,
+                    "metadata": {
+                        **dict(spec.metadata or {}),
+                        MA_METADATA_KEY_NAME: spec.name,
+                        MA_METADATA_KEY_TENANT: str(tenant_id),
+                    },
+                    "tools": [],
+                    "mcp_servers": [],
+                    "skills": [],
+                    "created_at": row.created_at,
+                    "updated_at": row.updated_at,
+                    "archived_at": None,
+                }
+            )
+        )
+    return facts
 
 
 async def cleanup_expired_receipts(
@@ -463,6 +511,20 @@ class SelfHostedAgents(_Resources[AgentSpec, AgentPatch, Agent]):
     spec_type = AgentSpec
     result_type = Agent
     kind = "agent"
+
+    async def find_by_derived_uuid(self, scope: Scope, agent_id: UUID) -> Agent | None:
+        """Resolve a chat credential's execution identity among this tenant's live records."""
+        async with self.sessionmaker() as session:
+            rows = await session.scalars(
+                select(SelfHostedAgentRecord).where(
+                    SelfHostedAgentRecord.tenant_id == self._tenant(scope),
+                    SelfHostedAgentRecord.archived_at.is_(None),
+                )
+            )
+            for row in rows:
+                if derive_agent_uuid(tenant_id=self._tenant(scope), ma_agent_id=row.id) == agent_id:
+                    return self._result(scope, row)
+        return None
 
     async def list(self, scope: Scope, *, filters: AgentFilter, page: PageRequest) -> Page[Agent]:
         return await self._list(scope, filters=filters, page=page)

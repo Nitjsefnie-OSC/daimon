@@ -51,6 +51,26 @@ Slot arithmetic lives in `packages/core/daimon/core/cron.py`, whose
 `next_slot_at_or_after` converts into the routine's zone, steps one second
 past the reference instant so it cannot land on it, and returns UTC.
 
+Routines whose saved channel or delivery destination selects the self-hosted
+backend stop before provider resolution, with
+`last_error=selfhosted_routines_unsupported`. Headless routines currently require
+Anthropic Managed Agents; switching a channel to self-hosted does not silently
+run its scheduled prompts through Anthropic. Thread destinations also check the
+requesting caller's retained backend. Legacy thread destinations whose parent
+channel is unknown stop with `last_error=routine_destination_parent_unknown`;
+set their destination again to record the parent before running them.
+
+Timers and task continuations retain their thread's backend after a channel
+backend change, including Anthropic timers in channels switched to self-hosted.
+Each queued wake resolves its own provider guard, even when another caller's
+turn drains the queue. A provider guard denial releases the claim for retry and
+never discards the timer or counts as a failed attempt.
+
+Timers and task continuations in a self-hosted conversation resolve their
+target from tenant-scoped local records. They run through the conversation
+runtime when installed; otherwise they stop with a notice asking the person
+to send a message to continue. They never fall back to Anthropic resolution.
+
 ## Creating one
 
 Operators can opt into requiring a destination for the MCP `create_routine`

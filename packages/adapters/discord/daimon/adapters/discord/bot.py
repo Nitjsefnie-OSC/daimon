@@ -100,6 +100,7 @@ from daimon.adapters.discord.vision import (
     is_vision_image_attachment,
 )
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.anthropic_spend import spend_limit_error
 from daimon.core.billing_panel import fmt_usd
 from daimon.core.channel_budget_notice import drain_budget_notices
@@ -1046,6 +1047,7 @@ class DaimonBot(commands.Bot):
         thread: discord.Thread,
         tenant_id: uuid.UUID,
         lifecycle: DiscordTurnLifecycle | None = None,
+        selfhosted: bool = False,
     ) -> None:
         """Sweep the session's files onto the turn's answer, detached from the turn.
 
@@ -1055,7 +1057,9 @@ class DaimonBot(commands.Bot):
         once and never stranded, which a per-turn cutoff could not promise.
         Sweeps stay serialized per session.
         """
-        if not any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
+        if selfhosted or not any(
+            isinstance(block, ToolUseBlock) for block in outcome.state.content
+        ):
             return
         session_id = outcome.ma_session_id
         previous = self._output_sweeps.get(session_id)
@@ -4364,7 +4368,14 @@ class DaimonBot(commands.Bot):
                     thread, message_id=final_lifecycle.feedback_message_id
                 )
         self._schedule_output_sweep(
-            outcome, thread=thread, tenant_id=tenant_id, lifecycle=final_lifecycle
+            outcome,
+            thread=thread,
+            tenant_id=tenant_id,
+            lifecycle=final_lifecycle,
+            selfhosted=(
+                prepared.admission.backend_revision is not None
+                and prepared.admission.backend_revision.backend == "selfhosted"
+            ),
         )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)
@@ -4612,6 +4623,50 @@ class DaimonBot(commands.Bot):
         unprompted: bool = False,
         failure_surface: _TurnFailureSurface | None = None,
     ) -> None:
+        async with guard_selfhosted_channel(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="discord",
+            channel_id=str(
+                message.channel.parent_id
+                if isinstance(message.channel, discord.Thread)
+                else message.channel.id
+            ),
+            thread_id=str(message.channel.id)
+            if isinstance(message.channel, discord.Thread)
+            else None,
+            caller_id=str(message.author.id),
+            force=False,
+        ):
+            return await self._orchestrate_observed_guarded(
+                message,
+                guild_id,
+                tenant_id,
+                origins=origins,
+                content_override=content_override,
+                created_thread_ids=created_thread_ids,
+                attachments_override=attachments_override,
+                admitted_message_ids=admitted_message_ids,
+                query_messages=query_messages,
+                unprompted=unprompted,
+                failure_surface=failure_surface,
+            )
+
+    async def _orchestrate_observed_guarded(
+        self,
+        message: discord.Message,
+        guild_id: str,
+        tenant_id: uuid.UUID,
+        *,
+        origins: contextlib.AsyncExitStack | None = None,
+        content_override: str | None = None,
+        created_thread_ids: list[int] | None = None,
+        attachments_override: list[discord.Attachment] | None = None,
+        admitted_message_ids: tuple[str, ...] = (),
+        query_messages: tuple[discord.Message, ...] = (),
+        unprompted: bool = False,
+        failure_surface: _TurnFailureSurface | None = None,
+    ) -> None:
         """Core orchestration logic extracted for clean error boundary.
 
         ``created_thread_ids``, when provided, receives the id of a
@@ -4837,7 +4892,14 @@ class DaimonBot(commands.Bot):
                     else f"Chat with {_resolve_bot_display_name(self.runtime.settings)}",
                 )
                 try:
-                    if naming.enabled and opening_text:
+                    if (
+                        naming.enabled
+                        and opening_text
+                        and not (
+                            admission.backend_revision is not None
+                            and admission.backend_revision.backend == "selfhosted"
+                        )
+                    ):
                         async with contextlib.AsyncExitStack() as typing:
                             try:
                                 await typing.enter_async_context(message.channel.typing())
@@ -5153,21 +5215,30 @@ class DaimonBot(commands.Bot):
             # binding authorized this responder change (a handoff would have
             # resolved via config.thread_binding_kind == "handoff" instead),
             # so the copy offers the handoff rather than describing an error.
-            owner_name = await _resolve_agent_display_name(
-                self.runtime.anthropic, tenant_id=tenant_id, ma_agent_id=error.source_agent_id
-            )
+            owner_name = "the previous agent"
+            if (
+                admission.backend_revision is None
+                or admission.backend_revision.backend != "selfhosted"
+            ):
+                owner_name = await _resolve_agent_display_name(
+                    self.runtime.anthropic, tenant_id=tenant_id, ma_agent_id=error.source_agent_id
+                )
             error_text = render_error(
                 error,
                 request_id=generate_request_id(),
                 new_responder=agent.name,
                 owner=owner_name,
                 channel=f"<#{parent_channel_id}>",
-                offer_button=True,
+                offer_button=not agent.id.startswith("sh_agent_"),
             )
             # Local import: thread_handoff imports this module.
             from daimon.adapters.discord.thread_handoff import hand_over_view
 
-            view = hand_over_view(agent_id=agent.id, agent_name=agent.name)
+            view = (
+                None
+                if agent.id.startswith("sh_agent_")
+                else hand_over_view(agent_id=agent.id, agent_name=agent.name)
+            )
             summary, separator, remaining = error_text.partition("\nNew thread → ")
             responder, _, request_id_line = remaining.partition("\n`rid: ")
             handoff_embed = discord.Embed(
@@ -5725,7 +5796,14 @@ class DaimonBot(commands.Bot):
                 tenant_id=tenant_id, thread=thread, guild_id=guild_id
             )
         self._schedule_output_sweep(
-            outcome, thread=thread, tenant_id=tenant_id, lifecycle=final_lifecycle
+            outcome,
+            thread=thread,
+            tenant_id=tenant_id,
+            lifecycle=final_lifecycle,
+            selfhosted=(
+                prepared.admission.backend_revision is not None
+                and prepared.admission.backend_revision.backend == "selfhosted"
+            ),
         )
         if archive_after:
             await self._archive_after_outputs(outcome, thread)

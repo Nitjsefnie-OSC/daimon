@@ -97,6 +97,7 @@ from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.adapters.teams.tool_confirmation import TeamsConfirmationCards
 from daimon.adapters.teams.turn_hooks import turn_hooks
 from daimon.core.agent_identity import identity_enabled_for, is_builtin_agent
+from daimon.core.anthropic_guard import guard_selfhosted_channel
 from daimon.core.authz import Action, authorize, build_subject, build_turn_place
 from daimon.core.continuity.continuation import check_wake_responder, load_asking_agent_id
 from daimon.core.continuity.dispatch import dispatch_pending_continuations
@@ -158,7 +159,7 @@ from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
 from daimon.core.turn.prepare import ContinuityOutcome, bind_session
 from daimon.core.turn.protection import ProtectionState, protection_state
-from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import (
     QUEUE_TIMED_OUT_TEXT,
     holding,
@@ -1368,6 +1369,28 @@ class TeamsApp:
         reraise: bool,
         continuation: TaskContinuationRow | None,
     ) -> None:
+        async with guard_selfhosted_channel(
+            self.runtime.sessionmaker,
+            tenant_id=tenant_id,
+            platform="teams",
+            channel_id=inbound.channel_id,
+            thread_id=inbound.thread_id if inbound.kind != "dm" else None,
+            caller_id=inbound.user_id,
+            force=False,
+        ):
+            return await self._run_turn_observed_guarded(
+                inbound, tenant_id, handoff=handoff, reraise=reraise, continuation=continuation
+            )
+
+    async def _run_turn_observed_guarded(
+        self,
+        inbound: TeamsInbound,
+        tenant_id: uuid.UUID,
+        *,
+        handoff: HandoffFactory | None,
+        reraise: bool,
+        continuation: TaskContinuationRow | None,
+    ) -> None:
         """Turn body: admit → card → bind → marker → run → watermark. Mirrors Slack's.
 
         `reraise` (continuations) re-raises a refusal or failure after telling
@@ -1554,6 +1577,7 @@ class TeamsApp:
         *,
         direct_chat: bool,
         tenant_id: uuid.UUID,
+        selfhosted: bool = False,
     ) -> tuple[str, tuple[ExecuteAction, ...]]:
         """The notice for a refused bind, and the Hand over button when the agent changed."""
         name = agent.name
@@ -1562,21 +1586,24 @@ class TeamsApp:
         if isinstance(error, SessionBusyError):
             return render_current_work_must_finish(name, handoff=True), ()
         owner = "the previous agent"
-        with contextlib.suppress(anthropic.APIStatusError, ScopeViolation):
-            owner = (
-                await retrieve_agent(
-                    self.runtime.anthropic,
-                    error.source_agent_id,
-                    scope=resource_scope(tenant_id=str(tenant_id)),
-                )
-            ).name
+        if not selfhosted:
+            with contextlib.suppress(anthropic.APIStatusError, ScopeViolation):
+                owner = (
+                    await retrieve_agent(
+                        self.runtime.anthropic,
+                        error.source_agent_id,
+                        scope=resource_scope(tenant_id=str(tenant_id)),
+                    )
+                ).name
         text = render_responder_changed_without_handoff(
             new_responder=name,
             owner=owner,
             channel="this chat",
-            offer_button=True,
+            offer_button=not selfhosted,
             new_thread_hint=not direct_chat,
         )
+        if selfhosted:
+            return text, ()
         return text, (hand_over_button(agent_id=agent.id, agent_name=name),)
 
     async def _bind_and_run(
@@ -1614,7 +1641,14 @@ class TeamsApp:
             )
         except _BIND_REFUSALS as error:
             text, actions = await self._refusal(
-                error, admission.agent, direct_chat=inbound.kind == "dm", tenant_id=tenant_id
+                error,
+                admission.agent,
+                direct_chat=inbound.kind == "dm",
+                tenant_id=tenant_id,
+                selfhosted=(
+                    admission.backend_revision is not None
+                    and admission.backend_revision.backend == "selfhosted"
+                ),
             )
             await lifecycle.close_with_notice(text, actions=actions)
             if reraise:
@@ -1738,21 +1772,15 @@ class TeamsApp:
         if outcome.mapping_id is not None:
             markers.add(outcome.mapping_id)
         final = holder[-1]
-        if any(isinstance(block, ToolUseBlock) for block in outcome.state.content):
-            sweep = self.outputs.sweep(
-                inbound,
-                outcome.ma_session_id,
-                append=final.append_to_answer,
-                quiet_s=final.outputs_quiet_s(),
-            )
-            swept = self.spawn(sweep, name="teams.output-sweep")
-            self._held_controls[inbound.conversation_id] = final
-            controls = self.spawn(_controls_after(swept, final), name="teams.turn-controls")
-            controls.add_done_callback(
-                functools.partial(self._forget_controls, inbound.conversation_id, final)
-            )
-        else:
-            await final.release_controls()
+        await self._finish_outputs(
+            inbound,
+            outcome,
+            final,
+            selfhosted=(
+                admission.backend_revision is not None
+                and admission.backend_revision.backend == "selfhosted"
+            ),
+        )
         if outcome.continuity.state == "replaced_after_loss":
             kind: Literal["transcript", "history"] = (
                 "transcript" if outcome.continuity.transfer_kind == "transcript" else "history"
@@ -1774,6 +1802,33 @@ class TeamsApp:
         if prepared.continuity.pending:
             # The change was saved where it was made; the next turn applies it.
             log.info("teams.turn.change_pending", reasons=prepared.continuity.pending)
+
+    async def _finish_outputs(
+        self,
+        inbound: TeamsInbound,
+        outcome: RunOutcome,
+        final: TeamsTurnLifecycle,
+        *,
+        selfhosted: bool,
+    ) -> None:
+        """Release controls immediately when no Anthropic file sweep applies."""
+        if not selfhosted and any(
+            isinstance(block, ToolUseBlock) for block in outcome.state.content
+        ):
+            sweep = self.outputs.sweep(
+                inbound,
+                outcome.ma_session_id,
+                append=final.append_to_answer,
+                quiet_s=final.outputs_quiet_s(),
+            )
+            swept = self.spawn(sweep, name="teams.output-sweep")
+            self._held_controls[inbound.conversation_id] = final
+            controls = self.spawn(_controls_after(swept, final), name="teams.turn-controls")
+            controls.add_done_callback(
+                functools.partial(self._forget_controls, inbound.conversation_id, final)
+            )
+        else:
+            await final.release_controls()
 
     def _forget_controls(
         self, conversation_id: str, lifecycle: TeamsTurnLifecycle, _: asyncio.Task[None]
