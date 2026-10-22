@@ -1150,3 +1150,23 @@ async def test_plain_spawn_retry_reuses_the_admitted_workers_limits() -> None:
     limits = orchestrator.spawn.await_args.kwargs["limits"]
     assert (limits.budget_usd, limits.deadline) == (Decimal("0.33"), stored.deadline_at)
     orchestrator.read_snapshot.assert_not_awaited()
+
+
+async def test_fleet_r9_token_limits_are_filled_only_when_the_caller_gives_none() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    async with Client(registered(bridge)) as client:
+        await client.call_tool("fleet_spawn", {"operation_key": "W1", "role": "W", "task": "Go."})
+        await client.call_tool(
+            "fleet_spawn",
+            {
+                "operation_key": "W2",
+                "role": "W",
+                "task": "Go.",
+                "max_input_tokens": 262144,
+                "max_output_tokens": 65536,
+            },
+        )
+    plain, explicit = orchestrator.spawn.await_args_list
+    assert plain.kwargs["fill_token_limits"] is True
+    assert explicit.kwargs["fill_token_limits"] is False
+    assert explicit.kwargs["limits"].max_input_tokens == 262144

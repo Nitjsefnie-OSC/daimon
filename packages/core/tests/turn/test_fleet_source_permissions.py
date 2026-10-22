@@ -1294,3 +1294,74 @@ async def test_fleet_r7_only_gemini_workers_default_to_its_runtime_bound(capture
     ).deadline == NOW + timedelta(seconds=60)
     with pytest.raises(WorkerSpecRefused, match="deadline: unbound"):
         default_worker_limits(ceiling, _run(), (), provider="gemini", max_runtime_s=120)
+
+
+def test_bounded_gemini_tokens_fit_the_prompt_and_the_budget():
+    from daimon.core.neutral_resources import (
+        bounded_gemini_worker_tokens,
+        gemini_worker_cost_usd,
+    )
+
+    system = "Real root instructions. " * 1000  # ~24k characters, as staging's root
+    for budget, markup in ((Decimal("0.66"), Decimal(1)), (Decimal("0.15"), Decimal("1.3"))):
+        tokens = bounded_gemini_worker_tokens(
+            system, budget, model="gemini-3.8-flash", markup=markup
+        )
+        assert tokens["max_input_tokens"] == len(system.encode()) + 4096
+        assert 1024 <= tokens["max_output_tokens"] <= 65_536
+        worst = gemini_worker_cost_usd(
+            "gemini-3.8-flash", tokens["max_input_tokens"], tokens["max_output_tokens"]
+        )
+        assert worst <= budget / markup and worst <= Decimal("0.49")
+    # A budget that cannot buy a useful answer after the prompt refuses before dispatch.
+    with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
+        bounded_gemini_worker_tokens(system, Decimal("0.02"), model="gemini-3.8-flash")
+
+
+@pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
+async def test_fleet_r9_plain_gemini_spawn_fills_limits_only_when_none_are_given(captured):
+    from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused
+    from daimon.core.neutral_resources import task_worker_spec
+
+    source, _, grant, _, policy, _ = captured
+    flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
+    widened = grant.model_copy(
+        update={
+            "choices": (
+                *grant.choices,
+                (backend_selection("gemini").model_copy(update={"model": flash.id}), flash),
+            )
+        }
+    )
+    root = compose(captured[:2] + (widened,) + captured[3:])
+    large = "Real root instructions. " * 1000
+    root = replace(root, spec=root.spec.model_copy(update={"system": large}), base_system=large)
+    owner = FleetOrchestrator()
+
+    def resolver(spec):
+        def resolve(limits):
+            return resolve_worker_spec(root, spec, policy=policy, now=NOW, limits=limits)
+
+        return resolve
+
+    plain = task_worker_spec(root, role="W3", task="Compare X and Y.", model=flash.id)
+    resolve = resolver(plain)
+    base = resolve(root.limits.model_copy(update={"max_turns": 1}))
+    filled = owner._bounded_gemini(base, resolve, fill=True)  # pyright: ignore[reportPrivateUsage]
+    assert filled.limits.max_input_tokens == len(filled.spec.system.encode()) + 4096
+    assert filled.limits.max_output_tokens is not None
+    # Explicit limits from the caller win and are not replaced.
+    explicit = resolve(
+        root.limits.model_copy(
+            update={"max_turns": 1, "max_input_tokens": 262144, "max_output_tokens": 65536}
+        )
+    )
+    kept = owner._bounded_gemini(explicit, resolve, fill=True)  # pyright: ignore[reportPrivateUsage]
+    assert (kept.limits.max_input_tokens, kept.limits.max_output_tokens) == (262144, 65536)
+    # Without a fill, a prompt the unbounded 4096-token cap cannot hold is refused clearly.
+    with pytest.raises(FleetRefused, match="prompt_exceeds_worker_token_cap"):
+        owner._bounded_gemini(base, resolve, fill=False)  # pyright: ignore[reportPrivateUsage]
+    # Other providers are untouched.
+    luna = resolver(task_worker_spec(root, role="W2", task="Compare.", model="gpt-6-luna"))
+    other = luna(root.limits.model_copy(update={"max_turns": 1}))
+    assert owner._bounded_gemini(other, luna, fill=True) is other  # pyright: ignore[reportPrivateUsage]

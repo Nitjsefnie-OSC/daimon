@@ -371,6 +371,46 @@ class FleetOrchestrator:
             max_runtime_s=max_runtime_s,
         )
 
+    def _bounded_gemini(
+        self,
+        resolved: ResolvedWorkerSpec,
+        resolve: Callable[[WorkerLimits], ResolvedWorkerSpec],
+        *,
+        fill: bool,
+    ) -> ResolvedWorkerSpec:
+        """Keep a Gemini worker off the unbounded path when its prompt cannot fit it.
+
+        The unbounded path caps a whole turn at WORKER_MAX_TOTAL_TOKENS, which the
+        inherited root instructions alone exceed. When the caller set no token limits,
+        a Flash worker gets a bounded envelope derived from its own prompt and budget;
+        an unbounded worker whose prompt clearly exceeds the cap is refused here rather
+        than sent to a guaranteed provider 400.
+        """
+        from daimon.core.neutral_resources import bounded_gemini_worker_tokens
+        from mux.drivers.gemini.flash import FLASH_PRIMARY
+        from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS
+
+        limits = resolved.limits
+        if resolved.backend.profile != INLINE_REUSE.profile_id or limits.max_input_tokens:
+            return resolved
+        system = resolved.spec.system or ""
+        if (
+            fill
+            and limits.max_output_tokens is None
+            and resolved.spec.model.id == FLASH_PRIMARY
+            and "sandbox" in resolved.declared_drops
+        ):
+            markup = getattr(self._ports, "markup", None)
+            markup = markup if isinstance(markup, Decimal) else Decimal(1)
+            tokens = bounded_gemini_worker_tokens(
+                system, limits.budget_usd, model=resolved.spec.model.id, markup=markup
+            )
+            return resolve(limits.model_copy(update=tokens))
+        # About four characters per token: an estimate, used only to refuse early.
+        if len(system) // 4 >= WORKER_MAX_TOTAL_TOKENS:
+            raise FleetRefused("prompt_exceeds_worker_token_cap")
+        return resolved
+
     async def spawn(
         self,
         parent: WorkerPermissions,
@@ -390,6 +430,7 @@ class FleetOrchestrator:
         result_contract: Mapping[str, JsonValue] | None = None,
         reviewer_of: uuid.UUID | None = None,
         captured_source: BackendAgent | None = None,
+        fill_token_limits: bool = False,
     ) -> Mapping[str, JsonValue]:
         """Resolve once, then hand admission to the atomic owner operation.
 
@@ -432,27 +473,32 @@ class FleetOrchestrator:
             source = agent
         if captured_source is None:
             captured_source = await self._owner().capture_source(parent)
-        resolved = resolve_worker_spec(
-            parent,
-            source,
-            policy=policy,
-            now=now,
-            backend=backend,
-            overrides=overrides,
-            # Source memory is a host-owned binding already bounded by the
-            # retained root. The resolver validates its scope, native payload,
-            # read-only policy and explicit drops before materialization.
-            resources=tuple(
-                binding
-                for binding in parent.resources
-                if captured_source is not None
-                and binding.resource is not None
-                and binding.resource.kind == "memory_store"
-                and binding.resource.id == captured_source.memory_store_id
-            ),
-            limits=limits,
-            captured_source=captured_source,
-        )
+
+        def resolve(limits: WorkerLimits) -> ResolvedWorkerSpec:
+            return resolve_worker_spec(
+                parent,
+                source,
+                policy=policy,
+                now=now,
+                backend=backend,
+                overrides=overrides,
+                # Source memory is a host-owned binding already bounded by the
+                # retained root. The resolver validates its scope, native payload,
+                # read-only policy and explicit drops before materialization.
+                resources=tuple(
+                    binding
+                    for binding in parent.resources
+                    if captured_source is not None
+                    and binding.resource is not None
+                    and binding.resource.kind == "memory_store"
+                    and binding.resource.id == captured_source.memory_store_id
+                ),
+                limits=limits,
+                captured_source=captured_source,
+            )
+
+        resolved = resolve(limits)
+        resolved = self._bounded_gemini(resolved, resolve, fill=fill_token_limits)
         reviewed: Event | None = None
         if reviewer_of is not None:
             run, workers = await self.read_snapshot(parent, policy, selected_run)

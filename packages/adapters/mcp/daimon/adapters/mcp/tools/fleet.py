@@ -286,6 +286,7 @@ class HostFleetToolService:
             role=role,
             backend=backend,
             limits=limits,
+            fill_token_limits=max_input_tokens is None and max_output_tokens is None,
             agent=agent,
             clone=clone,
             clone_revision=clone_revision,
