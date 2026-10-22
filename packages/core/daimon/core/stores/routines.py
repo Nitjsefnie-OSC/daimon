@@ -28,10 +28,12 @@ from daimon.core._models import (
 )
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, Subject, authorize
+from daimon.core.config import RecruitmentSettings
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.errors import StoreError
 from daimon.core.permissions import limiting_ids_at
 from daimon.core.routine_files import OUTBOX_FILES, PREFIX, plain_payload
+from daimon.core.routines import recruitment_withholds_routine
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.domain import (
     CatchUpPolicy,
@@ -135,8 +137,17 @@ async def create_routine(
 
 
 async def get_routine(
-    session: AsyncSession, routine_id: _uuid.UUID, *, tenant_id: _uuid.UUID
+    session: AsyncSession,
+    routine_id: _uuid.UUID,
+    *,
+    tenant_id: _uuid.UUID,
+    recruitment: RecruitmentSettings | None = None,
 ) -> RoutineRow | None:
+    """Read internally, or project for a surface using its current recruitment settings.
+
+    Every content-bearing adapter reader must pass settings; omitting them is
+    reserved for internal scheduler/recruitment bookkeeping, never serialization.
+    """
     orm = (
         await session.execute(
             select(Routine).where(Routine.id == routine_id, Routine.tenant_id == tenant_id)
@@ -144,11 +155,16 @@ async def get_routine(
     ).scalar_one_or_none()
     if orm is None:
         return None
-    return RoutineRow.model_validate(orm)
+    row = RoutineRow.model_validate(orm)
+    return (
+        None if recruitment is not None and recruitment_withholds_routine(recruitment, row) else row
+    )
 
 
 async def list_routines_missing_agent_name(
     session: AsyncSession,
+    *,
+    recruitment: RecruitmentSettings | None = None,
 ) -> list[RoutineRow]:
     """Return all routines where `agent_name IS NULL`.
 
@@ -160,18 +176,31 @@ async def list_routines_missing_agent_name(
     rows = (
         (await session.execute(select(Routine).where(Routine.agent_name.is_(None)))).scalars().all()
     )
-    return [RoutineRow.model_validate(r) for r in rows]
+    projected = [RoutineRow.model_validate(r) for r in rows]
+    return [
+        row
+        for row in projected
+        if recruitment is None or not recruitment_withholds_routine(recruitment, row)
+    ]
 
 
 async def list_routines_for_tenant(
-    session: AsyncSession, *, tenant_id: _uuid.UUID
+    session: AsyncSession,
+    *,
+    tenant_id: _uuid.UUID,
+    recruitment: RecruitmentSettings | None = None,
 ) -> list[RoutineRow]:
     rows = (
         (await session.execute(select(Routine).where(Routine.tenant_id == tenant_id)))
         .scalars()
         .all()
     )
-    return [RoutineRow.model_validate(r) for r in rows]
+    projected = [RoutineRow.model_validate(r) for r in rows]
+    return [
+        row
+        for row in projected
+        if recruitment is None or not recruitment_withholds_routine(recruitment, row)
+    ]
 
 
 async def list_routine_creators(

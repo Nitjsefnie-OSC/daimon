@@ -685,7 +685,9 @@ async def _list_routines_impl(
     tenant_id = auth.tenant_id
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
-        rows = await routines_store.list_routines_for_tenant(session, tenant_id=tenant_id)
+        rows = await routines_store.list_routines_for_tenant(
+            session, tenant_id=tenant_id, recruitment=runtime.settings.recruitment
+        )
     return [
         _routine_for_reader(auth, row)
         for row in rows
@@ -701,7 +703,9 @@ async def _get_routine_impl(
 ) -> RoutineRow:
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session:
-        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
+        row = await routines_store.get_routine(
+            session, routine_id, tenant_id=tenant_id, recruitment=runtime.settings.recruitment
+        )
     if (
         row is None
         or not _may_read(auth, row)
@@ -734,7 +738,9 @@ async def _update_routine_impl(
     )
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
-        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
+        row = await routines_store.get_routine(
+            session, routine_id, tenant_id=tenant_id, recruitment=runtime.settings.recruitment
+        )
         if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
@@ -858,7 +864,9 @@ async def _delete_routine_impl(
     tenant_id = auth.tenant_id
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():
-        row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
+        row = await routines_store.get_routine(
+            session, routine_id, tenant_id=tenant_id, recruitment=runtime.settings.recruitment
+        )
         if row is None or not _sees_routine(caller, row):
             raise ToolError("routine not found")
         _require_routine_owner(auth, row)
@@ -931,7 +939,9 @@ async def _set_routine_sandbox_tools_impl(
     actor = await _sandbox_admin(runtime, auth)
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
-        row = await routines_store.get_routine(session, routine_id, tenant_id=auth.tenant_id)
+        row = await routines_store.get_routine(
+            session, routine_id, tenant_id=auth.tenant_id, recruitment=runtime.settings.recruitment
+        )
     if row is None or not _sees_routine(caller, row):
         raise ToolError("routine not found")
     # The opt-in covers the agent version and environment the routine would
