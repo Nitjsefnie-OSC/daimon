@@ -29,6 +29,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
+from typing import Any
 
 import anthropic
 import httpx
@@ -94,6 +95,7 @@ from daimon.core.routine_delivery import (
     record_failure,
     render_routine_controls,
 )
+from daimon.core.routine_hold import routine_hold
 from daimon.core.rule_views import (
     is_routine_parent_unknown,
     routine_answers_only_owner,
@@ -393,6 +395,12 @@ async def _build_fire(
                 await record_result(s, row.id, tail=None, error=policy_error)
                 return
 
+        # A destination in a channel shared with another organisation is read by
+        # people from it, so the fire runs held to that channel (its own memory,
+        # the held credential). It never runs unheld.
+        async with sm() as hold_s:
+            fire_hold = await routine_hold(hold_s, row, platform=platform)
+
         # Admission gate: per-tenant balance — independent of Stripe config.
         # Keys on row.tenant_id (NOT NULL). Mirror run_one_tick's cap_exceeded skip.
         if await is_over_balance(sessionmaker=sm, tenant_id=row.tenant_id):
@@ -556,6 +564,8 @@ async def _build_fire(
                 + row.trigger_message
             )
         final_state: list[TurnState] = []
+        # Passed only when held, so an ordinary fire's call stays what it was.
+        held_fire: dict[str, Any] = {} if fire_hold is None else {"hold": fire_hold}
 
         result = await run_turn(
             anthropic=client,
@@ -587,6 +597,7 @@ async def _build_fire(
             # result goes to nobody else; decided again from the row each fire.
             personal_memory=routine_answers_only_owner(row),
             platform=platform,
+            **held_fire,
         )
 
         if row.destination_kind is None:

@@ -677,6 +677,8 @@ async def create_ma_session(
             # A held turn mounts its own channel-bound Daimon credential; a shared
             # thread has no caller account and so no credential to hold.
             hold=None if admission.shared_owner is not None else admission.hold,
+            # Held memory is the place's, shared thread or not.
+            memory_hold=admission.hold,
             private_dm_id=admission.private_dm_id,
             budget_channel_id=admission.budget_channel_id,
             origin_channel_id=admission.origin_channel_id,

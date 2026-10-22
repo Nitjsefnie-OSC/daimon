@@ -1411,6 +1411,35 @@ class AgentMemoryStore(Base):
     )
 
 
+class AgentChannelMemoryStore(Base):
+    """Per-(tenant, agent, platform, channel) MA memory store binding: a held channel's memory.
+
+    A held turn (another organisation's requester, or a shared channel) mounts
+    this store instead of the agent-wide one and no personal store. `channel_id`
+    is the parent channel; threads under it share the row.
+    """
+
+    __tablename__ = "agent_channel_memory_store"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "agent_id", "platform", "channel_id", name="pk_agent_channel_memory_store"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AgentPersonalMemoryStore(Base):
     """Per-(tenant, agent, account) MA memory store binding: one person's own memory.
 

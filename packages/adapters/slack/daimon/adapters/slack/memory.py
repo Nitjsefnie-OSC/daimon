@@ -1,6 +1,7 @@
 """Slack /memory handler — the channel agent's shared memory, and your own.
 
-`/memory` and `/memory <path>` show the shared memory read-only.
+`/memory` and `/memory <path>` show the shared memory read-only; in a channel shared
+with another organisation, that channel's own memory instead.
 `/memory mine`, `/memory mine <path>` and `/memory forget-mine [code]` act on
 the invoking person's own personal memory only (`daimon.core.memory_view`).
 
@@ -101,6 +102,7 @@ async def _personal_memory_text(
         request=request,
         command="/memory",
         scope=resource_scope(tenant_id=str(agent.tenant_id)),
+        held=agent.hold is not None,
     )
     return _personal_text(reply)
 

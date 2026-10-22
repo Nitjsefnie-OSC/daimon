@@ -213,3 +213,54 @@ async def test_memory_mine_and_forget_act_only_on_the_invokers_own_store(
     done = await say("U1", f"forget-mine {code}")
     assert "Deleted 1 file " in done
     assert await paths(mine) == [] and await paths(theirs) == ["/x.md"]
+
+
+async def _hold_channel(db_session, runtime, *, shared_files: dict[str, str]) -> None:
+    """Mark C1 shared and bind a channel store holding `shared_files` for the agent."""
+    from daimon.core.stores.agent_memory_stores import insert_channel_memory_store
+    from daimon.core.stores.shared_channels import mark_channel_shared
+
+    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=TEAM_ID)
+    (agent,) = [a async for a in runtime.anthropic.beta.agents.list() if a.name == "daimon"]
+    store = await runtime.anthropic.beta.memory_stores.create(name="channel", description="d")
+    for p, c in shared_files.items():
+        await runtime.anthropic.beta.memory_stores.memories.create(store.id, path=p, content=c)
+    await insert_channel_memory_store(
+        db_session,
+        tenant_id=tenant_id,
+        agent_id=derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=str(agent.id)),
+        platform="slack",
+        channel_id="C1",
+        memory_store_id=store.id,
+    )
+    await mark_channel_shared(
+        db_session, tenant_id=tenant_id, platform="slack", channel_id="C1", source="platform"
+    )
+    await db_session.commit()
+
+
+async def test_memory_in_a_shared_channel_shows_the_channel_store_not_the_agent_wide_one(
+    db_session, db_session_factory
+) -> None:
+    runtime, web = await _setup(db_session, db_session_factory, seed={"/wide.md": "internal"})
+    await _hold_channel(db_session, runtime, shared_files={"/channel.md": "agreed here"})
+    with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+        await handle_memory_command(runtime, _payload())
+        await handle_memory_command(runtime, _payload("/channel.md"))
+        await handle_memory_command(runtime, _payload("/wide.md"))
+    listing, shown, wide = (call.kwargs["text"] for call in web.chat_postEphemeral.call_args_list)
+    assert "/channel.md" in listing and "/wide.md" not in listing
+    assert "agreed here" in shown
+    assert "No memory file called" in wide, "agent-wide files are not reachable from here"
+
+
+async def test_personal_memory_commands_say_it_is_not_used_in_a_shared_channel(
+    db_session, db_session_factory
+) -> None:
+    runtime, web = await _setup(db_session, db_session_factory, seed={})
+    await _hold_channel(db_session, runtime, shared_files={"/channel.md": "agreed here"})
+    with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+        for text in ("mine", "mine /a.md", "forget-mine", "forget-mine abc123"):
+            await handle_memory_command(runtime, _payload(text))
+    for call in web.chat_postEphemeral.call_args_list:
+        assert "Personal memory isn't used in this channel." in call.kwargs["text"]

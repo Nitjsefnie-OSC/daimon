@@ -937,6 +937,8 @@ async def _prepare_session_for_turn_locked(
             system_override=system_for_platform(admission.agent.system, platform),
             # A shared thread's session mounts no caller credential, so no hold.
             mcp_hold=hold_key(admission.hold) if admission.shared_owner is None else None,
+            # A held place's memory is its channel's, shared thread or not.
+            memory_hold=admission.hold,
         )
         if fresh_start:
             decision = ReplaceSession(reasons=())

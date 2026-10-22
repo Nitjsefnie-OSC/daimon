@@ -3021,6 +3021,90 @@ async def test_only_a_routine_answering_its_owner_alone_reads_their_personal_mem
     assert calls[0]["account_id"] is not None, "the owner's account selects the store"
 
 
+async def test_routine_fires_into_a_shared_channel_run_held_and_never_unheld(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    """A destination recorded as shared is read by people from another
+    organisation, so its fire runs held to that channel (its own memory, the held
+    credential). A destination elsewhere runs as before, and a thread whose parent
+    is unknown is refused (before any hold) rather than run unheld."""
+    from daimon.core.stores.shared_channels import mark_channel_shared
+    from daimon.core.turn_hold import TurnHold
+
+    now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
+    tenant = await make_tenant(db_session)
+    await make_ledger_entry(db_session, tenant=tenant, delta_usd=Decimal("10"))
+    row = await create_routine(
+        db_session,
+        created_by_user_id="u-owner",
+        agent_id="agent_z",
+        agent_name="daimon",
+        cron_expr="* * * * *",
+        timezone_="UTC",
+        trigger_message="trigger",
+        next_fire_at=now - timedelta(minutes=1),
+        tenant_id=tenant.id,
+    )
+    await mark_channel_shared(
+        db_session,
+        tenant_id=tenant.id,
+        platform=tenant.platform,
+        channel_id="chan-shared",
+        source="platform",
+    )
+    await db_session.commit()
+    fake_client = AsyncAnthropic(api_key="sk-test", base_url="http://localhost:99999")
+    calls: list[dict[str, object]] = []
+
+    async def capturing_run_turn(**kwargs: object) -> str:
+        calls.append(kwargs)
+        return "tail"
+
+    async def fake_resolve(*args: object, **kwargs: object) -> str:
+        return "agent_z"
+
+    fire = await _build_fire(
+        client=fake_client,
+        sm=db_session_factory,
+        settings=_make_test_settings(monkeypatch),
+        deployment_default=DeploymentDefault(),
+        resolver_cache=new_resolver_cache(),
+    )
+
+    def to_channel(channel: str) -> RoutineRow:
+        return row.model_copy(
+            update={"destination_kind": "channel", "destination_id": channel, "channel_id": channel}
+        )
+
+    unplaced_thread = row.model_copy(
+        update={"destination_kind": "thread", "destination_id": "thread-1", "channel_id": None}
+    )
+    with (
+        unittest.mock.patch(
+            "daimon.adapters.scheduler.main.run_turn", side_effect=capturing_run_turn
+        ),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_agent", fake_resolve),
+        unittest.mock.patch("daimon.adapters.scheduler.main.resolve_environment", fake_resolve),
+    ):
+        await fire(to_channel("chan-shared"))
+        await fire(to_channel("chan-private"))
+        await fire(row)
+        await fire(unplaced_thread)
+    await fake_client.close()
+
+    assert [call.get("hold") for call in calls] == [
+        TurnHold(tenant.platform, "chan-shared", client=False),
+        None,
+        None,
+    ], "the unplaceable thread never reached run_turn"
+    assert calls[0]["personal_memory"] is False
+    async with db_session_factory() as session:
+        refused = await get_routine(session, row.id, tenant_id=tenant.id)
+    assert refused is not None and refused.last_error == "routine_destination_parent_unknown"
+
+
 async def test_mcp_token_sweep_prunes_only_past_the_retention_grace(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],

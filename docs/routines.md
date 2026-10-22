@@ -501,7 +501,10 @@ with a destination (or a channel) mounts the agent's shared memory only: it post
 other people may read it, with nobody there to ask. A routine with neither, made in a DM
 or with no origin, answers its owner alone and also mounts its owner's personal memory,
 read-only. This is decided from the routine at every fire, so giving it a destination
-stops the personal mount at its next run.
+stops the personal mount at its next run. A routine whose destination channel is recorded
+as shared with another organisation runs held to that channel at every fire: it mounts
+that channel's memory read-only and no shared or personal memory, and its Daimon
+credential is the held one. It is never run unheld.
 
 A routine session is stamped like a turn in the channel it fires into: the
 destination's channel (a thread's parent), the thread, and the readers limits

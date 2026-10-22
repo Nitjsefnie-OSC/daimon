@@ -37,7 +37,10 @@ has a personal memory with each agent, mounted only in their own sessions
 cannot read it. `/memory` shows the shared memory, `/memory mine` shows your
 own, and `/memory forget-mine` clears yours after you confirm with the code it
 gives you. Every reply is ephemeral, to the person who ran the command, and no
-argument names another member. See
+argument names another member. In a channel shared with another organisation the
+agent uses that channel's own memory instead, which everyone in the channel sees: no
+shared or personal memory is mounted there, `/memory` shows the channel's, and
+`/memory mine` and `/memory forget-mine` say personal memory is not used there. See
 [architecture](architecture.md#shared-and-personal-memory).
 
 ### Session output files

@@ -111,6 +111,7 @@ async def _personal_cards(context: CommandContext, asked: TeamsInbound) -> list[
         request=parse_memory_args(context.args),
         command="memory",
         scope=resource_scope(tenant_id=str(agent.tenant_id)),
+        held=agent.hold is not None,
     )
     if reply.content is not None:
         return [_card(reply.title, reply.content)]

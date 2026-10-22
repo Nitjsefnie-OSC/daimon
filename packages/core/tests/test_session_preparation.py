@@ -581,7 +581,12 @@ async def test_a_held_turn_never_shares_a_session_with_an_unheld_one(
     assert isinstance(other, PreparedTurn)
     assert other.ma_session_id != first.ma_session_id
     assert other.continuity.state == "replaced"
-    assert other.continuity.applied == ("credential_hold",)
+    # The hold also moves the memory: a held turn mounts its channel's store alone.
+    assert other.continuity.applied == (
+        ("memory_store", "credential_hold")
+        if first_held
+        else ("memory_store", "personal_memory_store", "credential_hold")
+    )
 
 
 async def test_a_compatible_session_is_reused_without_touching_ma(
@@ -4376,3 +4381,207 @@ async def _review_replacement(db, factory, *, sealed=False, lift=False):
     )
     assert isinstance(handed, PreparedTurn)
     return tenant, transport, deps, admission_deps, first, handed, transfers
+
+
+# --- Held turns mount their channel's memory alone ---------------------------
+
+_HELD = TurnHold(platform="slack", channel_id="C-SYN-1", client=False)
+
+
+def _mounted_stores(transport: _Transport, prepared: PreparedTurn) -> list[Any]:
+    resources = transport.state.sessions[prepared.ma_session_id].resources
+    return [r for r in resources if r.type == "memory_store"]
+
+
+async def _bound_store_ids(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant: TenantRow
+) -> dict[str, list[str]]:
+    from daimon.core._models import (
+        AgentChannelMemoryStore,
+        AgentMemoryStore,
+        AgentPersonalMemoryStore,
+    )
+    from sqlalchemy import select
+
+    async with sessionmaker() as session:
+        return {
+            name: list(
+                (await session.execute(select(column).where(tenant_column == tenant.id))).scalars()
+            )
+            for name, column, tenant_column in (
+                ("shared", AgentMemoryStore.memory_store_id, AgentMemoryStore.tenant_id),
+                (
+                    "personal",
+                    AgentPersonalMemoryStore.memory_store_id,
+                    AgentPersonalMemoryStore.tenant_id,
+                ),
+                (
+                    "channel",
+                    AgentChannelMemoryStore.memory_store_id,
+                    AgentChannelMemoryStore.tenant_id,
+                ),
+            )
+        }
+
+
+async def test_a_held_turn_mounts_its_channel_store_and_no_personal_one(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    prepared = await _prepare(
+        deps, replace(_admission(account=account), hold=_HELD), tenant=tenant, account=account
+    )
+
+    assert isinstance(prepared, PreparedTurn)
+    bound = await _bound_store_ids(db_session_factory, tenant=tenant)
+    assert bound["shared"] == [] and bound["personal"] == [], (
+        "a held session provisions neither the agent-wide nor a personal store"
+    )
+    (mounted,) = _mounted_stores(transport, prepared)
+    assert [mounted.memory_store_id] == bound["channel"]
+    assert mounted.access == "read_write"
+    assert "including people from another organisation" in (mounted.instructions or "")
+
+
+async def test_an_unheld_turn_mounts_the_agent_wide_and_personal_stores_never_a_channels(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+
+    prepared = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+
+    assert isinstance(prepared, PreparedTurn)
+    bound = await _bound_store_ids(db_session_factory, tenant=tenant)
+    assert bound["channel"] == []
+    assert sorted(m.memory_store_id for m in _mounted_stores(transport, prepared)) == sorted(
+        [*bound["shared"], *bound["personal"]]
+    )
+    assert len(bound["shared"]) == 1 and len(bound["personal"]) == 1
+
+
+async def test_two_held_channels_get_different_stores(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    other = TurnHold(platform="slack", channel_id="C-SYN-2", client=False)
+
+    ids = []
+    for thread, hold in (("thread-1", _HELD), ("thread-2", other)):
+        prepared = await _prepare(
+            deps,
+            replace(_admission(account=account), hold=hold),
+            tenant=tenant,
+            account=account,
+            thread_id=thread,
+        )
+        assert isinstance(prepared, PreparedTurn)
+        ids.append(_mounted_stores(transport, prepared)[0].memory_store_id)
+
+    assert ids[0] != ids[1]
+    assert sorted(ids) == sorted(
+        (await _bound_store_ids(db_session_factory, tenant=tenant))["channel"]
+    )
+
+
+async def test_a_channel_store_session_is_reused_on_the_next_held_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    admission = replace(_admission(account=account), hold=_HELD)
+
+    first = await _prepare(deps, admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    creates = transport.creates
+    second = await _prepare(deps, admission, tenant=tenant, account=account)
+
+    assert isinstance(second, PreparedTurn)
+    assert second.ma_session_id == first.ma_session_id and second.reused
+    assert second.continuity == ContinuityOutcome(), "a channel-store session is not churned"
+    assert transport.creates == creates
+
+
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "active"])
+async def test_a_channel_turning_shared_replaces_its_agent_wide_session_without_a_transfer(
+    active: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The session that read agent-wide and personal memory never runs in the
+    shared channel: idle, it is replaced with nothing carried over; active, the
+    turn is refused until it ends (`_leaves_memory_store`, PR #1282)."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first = await _prepare(deps, _admission(account=account), tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None
+    if active:
+        async with db_session_factory.begin() as session:
+            await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
+
+    async def forbidden_transfer(**kwargs: Any) -> Any:
+        pytest.fail("agent-wide memory work must not be carried into a channel's store")
+
+    second = await _prepare(
+        deps,
+        replace(_admission(account=account), hold=_HELD),
+        tenant=tenant,
+        account=account,
+        transfer=forbidden_transfer,
+    )
+
+    if active:
+        assert isinstance(second, PreparationBusy)
+        assert "memory_store" in second.pending_reasons
+        assert transport.creates == 1
+    else:
+        assert isinstance(second, PreparedTurn)
+        assert second.ma_session_id != first.ma_session_id
+        assert {"memory_store", "personal_memory_store"} <= set(second.continuity.applied)
+        bound = await _bound_store_ids(db_session_factory, tenant=tenant)
+        assert [m.memory_store_id for m in _mounted_stores(transport, second)] == bound["channel"]
+
+
+async def test_a_shared_thread_in_a_held_place_mounts_the_channel_store(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A shared thread's session has no caller (and so no credential to hold), but
+    its memory is still the place's."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    admission = replace(_admission(account=account), hold=_HELD, shared_owner=account.id)
+
+    prepared = await _prepare(deps, admission, tenant=tenant, account=account)
+
+    assert isinstance(prepared, PreparedTurn)
+    bound = await _bound_store_ids(db_session_factory, tenant=tenant)
+    assert bound["shared"] == [] and bound["personal"] == []
+    assert [m.memory_store_id for m in _mounted_stores(transport, prepared)] == bound["channel"]
