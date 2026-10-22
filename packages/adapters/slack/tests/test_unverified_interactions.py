@@ -287,3 +287,185 @@ async def test_a_mention_with_an_empty_user_team_writes_no_foreign_marker(
     assert result.admit_kwargs["requester_home_id"] is None
     assert result.admission is not None and result.admission.hold is None
     assert result.admission.shared_channel is False
+
+
+# --- the lookup never holds an acknowledgement ------------------------------------
+
+_BUDGET_S = 0.05
+_SLOW_S = 0.3
+
+
+@pytest.fixture
+def short_budget(monkeypatch: pytest.MonkeyPatch) -> None:
+    from daimon.adapters.slack import app as app_module
+
+    monkeypatch.setattr(app_module, "_HOST_CHECK_TIMEOUT_S", _BUDGET_S)
+
+
+def _slow_lookup(verdict: SlackRequester | None, calls: list[str]) -> Any:
+    async def lookup(*args: Any, **kwargs: Any) -> SlackRequester | None:
+        calls.append(kwargs["user_id"])
+        await asyncio.sleep(_SLOW_S)
+        return verdict
+
+    return patch("daimon.adapters.slack.app.resolve_requester", new=lookup)
+
+
+async def _settle(app: Any) -> None:
+    await asyncio.sleep(_SLOW_S + 0.1)
+    await asyncio.gather(*list(app._bg_tasks), return_exceptions=True)  # pyright: ignore[reportPrivateUsage]
+
+
+async def _submit(app: Any, socket: _FakeSocketClient) -> float:
+    loop = asyncio.get_running_loop()
+    started = loop.time()
+    with patch(
+        "daimon.adapters.slack.app.resolve_web_client", new=AsyncMock(return_value=_slack_client())
+    ):
+        await app.on_request(socket, _submission("routines__delete_confirm", user_team=None))
+    return loop.time() - started
+
+
+@pytest.mark.parametrize(
+    "verdict", [_requester(_HOST), _requester(_OTHER)], ids=["member", "other"]
+)
+async def test_a_slow_lookup_still_acks_within_budget_and_runs_nothing(
+    short_budget: None, verdict: SlackRequester
+) -> None:
+    from daimon.adapters.slack.external_access import TRY_AGAIN_NOTICE
+
+    app = _make_app()
+    socket = _FakeSocketClient()
+    calls: list[str] = []
+    with (
+        _slow_lookup(verdict, calls),
+        patch(
+            "daimon.adapters.slack.app.run_routines_delete_submission", new_callable=AsyncMock
+        ) as ran,
+    ):
+        took = await _submit(app, socket)
+        await _settle(app)
+    assert took < _SLOW_S, "the ack must not wait for Slack"
+    view = (socket.sent_responses[0].payload or {})["view"]
+    assert view["blocks"][0]["text"]["text"] == TRY_AGAIN_NOTICE
+    ran.assert_not_awaited()
+
+
+async def test_after_a_timeout_a_member_retry_succeeds_from_the_finished_lookup() -> None:
+    app = _make_app()
+    calls: list[str] = []
+    with (
+        _slow_lookup(_requester(_HOST), calls),
+        patch(
+            "daimon.adapters.slack.app.run_routines_delete_submission", new_callable=AsyncMock
+        ) as ran,
+        patch("daimon.adapters.slack.app._HOST_CHECK_TIMEOUT_S", _BUDGET_S),
+        patch(
+            "daimon.adapters.slack.app.resolve_web_client",
+            new=AsyncMock(return_value=_slack_client()),
+        ),
+    ):
+        await _submit(app, _FakeSocketClient())
+        await _settle(app)
+        socket = _FakeSocketClient()
+        took = await _submit(app, socket)
+        await _settle(app)
+    assert calls == ["U_UNPLACED"], "the retry reuses the verdict the first lookup finished"
+    assert took < _BUDGET_S
+    assert socket.sent_responses[0].payload is None
+    ran.assert_awaited_once()
+
+
+async def test_a_non_member_is_refused_after_a_timeout_and_is_never_cached() -> None:
+    app = _make_app()
+    calls: list[str] = []
+    with (
+        _slow_lookup(_requester(_OTHER), calls),
+        patch(
+            "daimon.adapters.slack.app.run_routines_delete_submission", new_callable=AsyncMock
+        ) as ran,
+        patch("daimon.adapters.slack.app._HOST_CHECK_TIMEOUT_S", 1.0),
+    ):
+        socket = _FakeSocketClient()
+        await _submit(app, socket)
+    view = (socket.sent_responses[0].payload or {})["view"]
+    assert view["blocks"][0]["text"]["text"].startswith("That's only for people at")
+    ran.assert_not_awaited()
+    assert app._host_members == {}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_failed_lookup_is_not_cached() -> None:
+    app = _make_app()
+    with (
+        _lookup(None),
+        patch(
+            "daimon.adapters.slack.app.resolve_web_client",
+            new=AsyncMock(return_value=_slack_client()),
+        ),
+    ):
+        assert await app._host_check(_HOST, "U_UNPLACED") == "not_member"  # pyright: ignore[reportPrivateUsage]
+    assert app._host_members == {}  # pyright: ignore[reportPrivateUsage]
+
+
+async def test_a_cached_member_skips_the_lookup_until_the_verdict_expires() -> None:
+    app = _make_app()
+    now = [0.0]
+    app._host_member_clock = lambda: now[0]  # pyright: ignore[reportPrivateUsage]
+    calls: list[str] = []
+
+    async def fast(*args: Any, **kwargs: Any) -> SlackRequester:
+        calls.append(kwargs["user_id"])
+        return _requester(_HOST)
+
+    with (
+        patch("daimon.adapters.slack.app.resolve_requester", new=fast),
+        patch(
+            "daimon.adapters.slack.app.resolve_web_client",
+            new=AsyncMock(return_value=_slack_client()),
+        ),
+    ):
+        check = app._host_check  # pyright: ignore[reportPrivateUsage]
+        assert await check(_HOST, "U1") == "member"
+        now[0] = 599.0
+        assert await check(_HOST, "U1") == "member"
+        assert calls == ["U1"]
+        now[0] = 601.0
+        assert await check(_HOST, "U1") == "member"
+        assert calls == ["U1", "U1"]
+
+
+async def test_a_slow_lookup_gets_a_try_again_for_a_slash_command_and_opens_nothing(
+    short_budget: None,
+) -> None:
+    from daimon.adapters.slack.external_access import TRY_AGAIN_NOTICE
+
+    app = _make_app()
+    client = _slack_client()
+    calls: list[str] = []
+    with (
+        _slow_lookup(_requester(_HOST), calls),
+        patch(
+            "daimon.adapters.slack.app.handle_agent_setup_command", new_callable=AsyncMock
+        ) as ran,
+    ):
+        await _run_slash(app, _slash("/agent-setup"), client)
+        await _settle(app)
+    ran.assert_not_awaited()
+    assert client.chat_postEphemeral.await_args.kwargs["text"] == TRY_AGAIN_NOTICE
+
+
+async def test_a_slow_click_lookup_gets_a_try_again() -> None:
+    from daimon.adapters.slack.external_access import TRY_AGAIN_NOTICE
+
+    app = _make_app()
+    client = _slack_client()
+    calls: list[str] = []
+    with (
+        _slow_lookup(_requester(_HOST), calls),
+        patch("daimon.adapters.slack.app.handle_agent_setup_action", new_callable=AsyncMock) as ran,
+        patch("daimon.adapters.slack.app._HOST_CHECK_TIMEOUT_S", _BUDGET_S),
+    ):
+        await _deliver(app, _unproven_click("agent_setup__open"), client)
+        await _settle(app)
+    ran.assert_not_awaited()
+    assert client.chat_postEphemeral.await_args.kwargs["text"] == TRY_AGAIN_NOTICE

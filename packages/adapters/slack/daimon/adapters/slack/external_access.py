@@ -29,6 +29,7 @@ __all__ = [
     "host_only_notice",
     "refuse_external_click",
     "refusal_view",
+    "TRY_AGAIN_NOTICE",
 ]
 
 log = structlog.get_logger()
@@ -57,16 +58,24 @@ def external_submission_allowed(callback_id: str) -> bool:
     return callback_id == FEEDBACK_TEXT_CALLBACK_ID
 
 
-def refusal_view(workspace_name: str | None) -> dict[str, Any]:
+#: Said when the membership check could not finish in time; nothing ran, trying again works.
+TRY_AGAIN_NOTICE: Final = "I couldn't verify you just now. Try again."
+
+
+def refusal_view(workspace_name: str | None, *, text: str | None = None) -> dict[str, Any]:
     """A `view_submission` ack payload that replaces the form with the refusal."""
     return {
         "response_action": "update",
-        "view": notice_modal(title="Daimon", text=host_only_notice(workspace_name)),
+        "view": notice_modal(title="Daimon", text=text or host_only_notice(workspace_name)),
     }
 
 
 async def refuse_external_click(
-    client: AsyncWebClient, payload: dict[str, Any], *, workspace_name: str | None
+    client: AsyncWebClient,
+    payload: dict[str, Any],
+    *,
+    workspace_name: str | None,
+    text: str | None = None,
 ) -> None:
     """Tell an external clicker the control is not theirs: an ephemeral, else a thread reply.
 
@@ -82,7 +91,7 @@ async def refuse_external_click(
     thread_ts = str(message.get("thread_ts") or container.get("message_ts") or "") or None
     if not (channel and user_id):
         return
-    text = host_only_notice(workspace_name)
+    text = text or host_only_notice(workspace_name)
     try:
         await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
             channel=channel, user=user_id, thread_ts=message.get("thread_ts"), text=text

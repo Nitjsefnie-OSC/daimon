@@ -186,10 +186,10 @@ def _host_member_verified(monkeypatch: pytest.MonkeyPatch) -> None:
     The gate itself is covered in `test_unverified_interactions.py`, which overrides this.
     """
 
-    async def verified(self: SlackApp, team_id: str, user_id: str) -> bool:
-        return True
+    async def verified(self: SlackApp, team_id: str, user_id: str) -> str:
+        return "member"
 
-    monkeypatch.setattr(SlackApp, "_verified_host_member", verified)
+    monkeypatch.setattr(SlackApp, "_host_check", verified)
 
 
 @pytest.fixture

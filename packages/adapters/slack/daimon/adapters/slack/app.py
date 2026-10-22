@@ -111,6 +111,7 @@ from daimon.adapters.slack.errors import (
     setup_out_of_date_notice,
 )
 from daimon.adapters.slack.external_access import (
+    TRY_AGAIN_NOTICE,
     external_action_allowed,
     external_submission_allowed,
     host_only_notice,
@@ -329,6 +330,14 @@ def _log_bg_task_exception(task: asyncio.Task[None]) -> None:
         log.error("bg_task_failed", task_name=task.get_name(), exc_info=exc)
 
 
+#: How long a positive host-member verdict is reused.
+_HOST_MEMBER_TTL_S = 600.0
+#: The longest a membership lookup may hold an acknowledgement or a 3-second trigger id.
+_HOST_CHECK_TIMEOUT_S = 1.5
+
+type HostCheck = Literal["member", "not_member", "unavailable"]
+
+
 def _payload_team_id(payload: dict[str, Any]) -> str:
     """The workspace an interactive payload is addressed to (the host)."""
     team: dict[str, Any] = payload.get("team") or {}
@@ -438,6 +447,9 @@ class SlackApp:
         # The host workspace's name per team, from auth.test, for copy shown to external members.
         self._workspace_names: dict[str, str] = {}
         self._shared_channels = SharedChannelProbe()
+        # Host-member verdicts (positive only) per (team, user), with their expiry.
+        self._host_members: dict[tuple[str, str], float] = {}
+        self._host_member_clock: Callable[[], float] = time.monotonic
         # Tool-write confirmation cards awaiting a click (in-process, like the
         # cancel registry above).
         self._confirmations = SlackConfirmationCards()
@@ -764,9 +776,12 @@ class SlackApp:
         if req.type == "interactive" and payload.get("type") == "view_submission":
             view_vs: dict[str, Any] = payload.get("view") or {}
             cb_id: str = str(view_vs.get("callback_id") or "")
-            if not external_submission_allowed(cb_id) and not await self._submitter_is_host(
-                payload
-            ):
+            submitter = (
+                "member"
+                if external_submission_allowed(cb_id)
+                else await self._submitter_check(payload)
+            )
+            if submitter != "member":
                 # Only the feedback form opened from their own answer is open to
                 # a member of another workspace, or to anyone whose workspace the
                 # payload and users.info cannot place; everything else is the host's.
@@ -774,7 +789,10 @@ class SlackApp:
                 await client.send_socket_mode_response(
                     SocketModeResponse(
                         envelope_id=req.envelope_id,
-                        payload=refusal_view(self._workspace_names.get(_payload_team_id(payload))),
+                        payload=refusal_view(
+                            self._workspace_names.get(_payload_team_id(payload)),
+                            text=TRY_AGAIN_NOTICE if submitter == "unavailable" else None,
+                        ),
                     )
                 )
                 return
@@ -1457,10 +1475,8 @@ class SlackApp:
         elif action_id == HAND_OVER_ACTION_ID:
             self._spawn(handle_hand_over_click(self.runtime, payload))
 
-    async def _verified_host_member(self, team_id: str, user_id: str) -> bool:
-        """Whether users.info places `user_id` in the host workspace; False when it cannot say."""
-        if not (team_id and user_id):
-            return False
+    async def _lookup_host_member(self, team_id: str, user_id: str) -> bool:
+        """Ask users.info whether `user_id` is a host member; cache a positive answer only."""
         try:
             client = await resolve_web_client(self.runtime, team_id=team_id)
             if client is None:
@@ -1469,53 +1485,92 @@ class SlackApp:
         except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.host_member_check_failed", team_id=team_id, exc_info=exc)
             return False
-        return requester is not None and requester.is_host_member
+        member = requester is not None and requester.is_host_member
+        if member:
+            self._host_members[(team_id, user_id)] = self._host_member_clock() + _HOST_MEMBER_TTL_S
+        return member
 
-    async def _submitter_is_host(self, payload: dict[str, Any]) -> bool:
-        """Whether a submission is from a host member: the payload's proof, else users.info."""
+    async def _host_check(self, team_id: str, user_id: str) -> HostCheck:
+        """Whether users.info places `user_id` in the host workspace, within a short budget.
+
+        A recent positive answer is reused (negatives and failures never are). The
+        lookup is bounded so an acknowledgement or a 3-second trigger id is never
+        spent waiting on Slack: on timeout the answer is "unavailable", nothing runs,
+        and the lookup keeps going in the background so a retry finds its result.
+        """
+        if not (team_id and user_id):
+            return "not_member"
+        expires = self._host_members.get((team_id, user_id))
+        if expires is not None and self._host_member_clock() < expires:
+            return "member"
+        lookup = self._spawn_value(self._lookup_host_member(team_id, user_id))
+        try:
+            member = await asyncio.wait_for(asyncio.shield(lookup), timeout=_HOST_CHECK_TIMEOUT_S)
+        except TimeoutError:
+            log.warning("slack.host_member_check_timed_out", team_id=team_id)
+            return "unavailable"
+        return "member" if member else "not_member"
+
+    def _spawn_value(self, coro: Coroutine[Any, Any, bool]) -> asyncio.Task[bool]:
+        task = asyncio.create_task(coro)
+        self._bg_tasks.add(cast("asyncio.Task[None]", task))
+        task.add_done_callback(self._bg_tasks.discard)  # pyright: ignore[reportArgumentType]
+        return task
+
+    async def _submitter_check(self, payload: dict[str, Any]) -> HostCheck:
+        """A submission's sender: the payload's proof, else users.info."""
         if is_external_interactive(payload):
-            return False
+            return "not_member"
         if payload_proves_host(payload):
-            return True
+            return "member"
         user: dict[str, Any] = payload.get("user") or {}
-        return await self._verified_host_member(
-            _payload_team_id(payload), str(user.get("id") or "")
-        )
+        return await self._host_check(_payload_team_id(payload), str(user.get("id") or ""))
 
     async def _verify_then_route_block_action(
         self, payload: dict[str, Any], action_id: str
     ) -> None:
         user: dict[str, Any] = payload.get("user") or {}
-        if await self._verified_host_member(_payload_team_id(payload), str(user.get("id") or "")):
+        check = await self._host_check(_payload_team_id(payload), str(user.get("id") or ""))
+        if check == "member":
             self._route_block_action(payload, action_id)
             return
-        log.info("slack.on_request.unverified_block_action_refused")
-        await self._refuse_external_click(payload)
+        log.info("slack.on_request.unverified_block_action_refused", check=check)
+        await self._refuse_external_click(
+            payload, text=TRY_AGAIN_NOTICE if check == "unavailable" else None
+        )
 
     async def _gated_slash(
         self,
         payload: dict[str, Any],
         handler: Callable[[], Coroutine[Any, Any, None]],
     ) -> None:
-        """Run a slash command for a verified host member; anyone else gets the host-only line."""
+        """Run a slash command for a verified host member; anyone else gets a one-line refusal."""
         team_id = str(payload.get("team_id") or "")
         user_id = str(payload.get("user_id") or "")
-        if await self._verified_host_member(team_id, user_id):
+        check = await self._host_check(team_id, user_id)
+        if check == "member":
             await handler()
             return
-        log.info("slack.on_request.unverified_slash_refused", command=payload.get("command"))
+        log.info(
+            "slack.on_request.unverified_slash_refused", command=payload.get("command"), check=check
+        )
+        text = (
+            TRY_AGAIN_NOTICE
+            if check == "unavailable"
+            else host_only_notice(self._workspace_names.get(team_id))
+        )
         try:
             client = await resolve_web_client(self.runtime, team_id=team_id)
             if client is not None:
                 await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                    channel=str(payload.get("channel_id") or ""),
-                    user=user_id,
-                    text=host_only_notice(self._workspace_names.get(team_id)),
+                    channel=str(payload.get("channel_id") or ""), user=user_id, text=text
                 )
         except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.slash_refusal_notice_failed", team_id=team_id, exc_info=exc)
 
-    async def _refuse_external_click(self, payload: dict[str, Any]) -> None:
+    async def _refuse_external_click(
+        self, payload: dict[str, Any], *, text: str | None = None
+    ) -> None:
         """Say a control is for the host workspace's people, as an ephemeral to the clicker."""
         team_id = _payload_team_id(payload)
         try:
@@ -1525,7 +1580,7 @@ class SlackApp:
             if team_id not in self._workspace_names:
                 await self._bot_user_id(team_id, client)
             await refuse_external_click(
-                client, payload, workspace_name=self._workspace_names.get(team_id)
+                client, payload, workspace_name=self._workspace_names.get(team_id), text=text
             )
         except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
             log.warning("slack.external_refusal_notice_failed", team_id=team_id, exc_info=exc)
