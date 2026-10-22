@@ -31,7 +31,7 @@ from daimon.core.stores.gemini_runtime_state import (
 )
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.ids import ModelRef, Scope
-from mux.drivers.gemini.flash import FLASH_MODELS, FlashAttempt
+from mux.drivers.gemini.flash import ATTEMPT_MODELS, FlashAttempt
 from mux.drivers.gemini.storage import Records
 from pydantic import BaseModel, JsonValue, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -193,7 +193,7 @@ class _FlashAccounting:
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
         if (
             model.provider != "gemini"
-            or model.id not in FLASH_MODELS
+            or model.id not in ATTEMPT_MODELS
             or attempt < 1
             or self._pending.get() is not None
         ):

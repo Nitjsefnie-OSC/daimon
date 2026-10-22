@@ -42,7 +42,13 @@ from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import source_agent_record
 from daimon.core.neutral_resources import AgentFleetGrant, NeutralResourceHost, ResolvedWorkerSpec
-from daimon.core.pricing import MODEL_PRICING, ProviderPrice, list_price_preview
+from daimon.core.pricing import (
+    MODEL_PRICING,
+    ProviderPrice,
+    list_price_preview,
+    provider_price_expired_on,
+    provider_prices,
+)
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import agent_backends, mux_state, security_audit
 from daimon.core.stores.domain import (
@@ -75,6 +81,8 @@ from mux.profiles import (
     get_profile,
     runnable_selection,
     shared_threads_available,
+    tariff_gated,
+    worker_selection_allowed,
 )
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
@@ -193,13 +201,15 @@ async def set_channel_backend(
     """Record `config` as the channel's configuration (a new revision if it changed).
 
     Raises `InvalidConfig` for a selection that does not hold together (a
-    profile of another backend, a non-default backend without a model). Does
-    not check that the profile meets it: that happens at admission, so a
-    configuration can be written before the backend it names is runnable.
+    profile of another backend, a non-default backend without a model), and
+    `BackendUnsupported` for a tariff-gated model with no current price. Does
+    not otherwise check that the profile meets it: that happens at admission,
+    so a configuration can be written before the backend it names is runnable.
     """
     await policy_store.lock_policy_writes_exclusive(session, tenant_id=uuid.UUID(channel.tenant_id))
     resolved = resolve_default(config)
     get_profile(resolved.profile)
+    require_current_tariff(ConfigRevision.create(channel, 0, resolved))
     latest = await current_backend(session, channel)
     if (
         latest is not None
@@ -228,10 +238,32 @@ async def clear_channel_backend(session: AsyncSession, channel: ChannelRef) -> C
     return await mux_state.put_config_revision(session, revision, origin="channel_clear")
 
 
+def require_current_tariff(revision: ConfigRevision) -> None:
+    """Refuse a tariff-gated model unless the host holds a current price for it."""
+    if not tariff_gated(revision) or revision.model is None:
+        return
+    if (revision.backend, revision.model) in provider_prices(revision.profile):
+        return
+    log_backend_unsupported("backend_runnable", reason="tariff_unavailable", revision=revision)
+    ended = provider_price_expired_on(revision.profile, revision.backend, revision.model)
+    if ended is not None:
+        raise BackendUnsupported(
+            f"{revision.model}'s price window ended on {ended.isoformat()}, so it can't run "
+            "until a new price is published. Pick another model."
+        )
+    raise BackendUnsupported(f"{revision.model} has no current price here. Pick another model.")
+
+
 def check_backend(
-    revision: ConfigRevision, *, enabled_backends: tuple[Provider, ...] | None = None
+    revision: ConfigRevision,
+    *,
+    enabled_backends: tuple[Provider, ...] | None = None,
+    worker: bool = False,
 ) -> BackendAdmission:
-    """Admit `revision`, or raise `BackendUnsupported`."""
+    """Admit `revision`, or raise `BackendUnsupported`.
+
+    `worker` admits it for a fleet worker or grant, which refuses channel-only models.
+    """
     if revision.backend == "selfhosted" and not load_selfhosted_settings().admission_enabled:
         log_backend_unsupported(
             "backend_runnable", reason="selfhosted_admission_disabled", revision=revision
@@ -256,6 +288,10 @@ def check_backend(
             "backend_runnable", reason="profile_not_runnable", revision=revision
         )
         raise BackendUnsupported(f"{revision.profile} is not runnable in this release")
+    if worker and not worker_selection_allowed(revision):
+        log_backend_unsupported("backend_runnable", reason="channel_only_model", revision=revision)
+        raise BackendUnsupported(f"{revision.model} can't run fleet workers. Pick another model.")
+    require_current_tariff(revision)
     return admission
 
 
@@ -392,7 +428,13 @@ def log_backend_unsupported(
     stage: BackendRefusalStage,
     error: BaseException | None = None,
     *,
-    reason: Literal["backend_not_enabled", "profile_not_runnable", "selfhosted_admission_disabled"]
+    reason: Literal[
+        "backend_not_enabled",
+        "profile_not_runnable",
+        "selfhosted_admission_disabled",
+        "channel_only_model",
+        "tariff_unavailable",
+    ]
     | None = None,
     revision: ConfigRevision | None = None,
 ) -> None:
@@ -403,7 +445,13 @@ def log_backend_unsupported(
         fields["reason"] = (
             reason
             if reason
-            in {"backend_not_enabled", "profile_not_runnable", "selfhosted_admission_disabled"}
+            in {
+                "backend_not_enabled",
+                "profile_not_runnable",
+                "selfhosted_admission_disabled",
+                "channel_only_model",
+                "tariff_unavailable",
+            }
             else "redacted"
         )
     if revision is not None:
@@ -887,6 +935,7 @@ class AgentBackendService:
                             choice,
                         ),
                         enabled_backends=policy.enabled_backends,
+                        worker=True,
                     )
                     value.limits.require_profile(get_profile(choice.profile))
             except (ValueError, DaimonError, UnsupportedCapability):
@@ -1195,7 +1244,7 @@ async def resolve_turn_backend(
         checking = validate_origin(selection, "agent", None)
         if inspect.isawaitable(checking):
             await checking
-    check_backend(ConfigRevision.create(channel, 1, selection))
+    check_backend(ConfigRevision.create(channel, 1, selection), worker=worker is not None)
     if retained_revision is not None:
         retained = await mux_state.get_config_revision(session, channel, retained_revision)
         if (

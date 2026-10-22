@@ -68,6 +68,7 @@ from mux.drivers.gemini.skill_deployment import (
 from mux.drivers.gemini.storage import Storage
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles.gemini import (
+    ARGON_MODEL,
     INLINE_REUSE,
     WORKER_MAX_RUNTIME_S,
     WORKER_MAX_TOTAL_TOKENS,
@@ -419,7 +420,16 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     if (
         revision is None
         or revision.model
-        not in ((FLASH_PRIMARY, WORKER_MODEL) if request.worker is not None else (FLASH_PRIMARY,))
+        not in (
+            (FLASH_PRIMARY, WORKER_MODEL)
+            if request.worker is not None
+            else (FLASH_PRIMARY, ARGON_MODEL)
+        )
+        # Argon has no checked-in price after its intro tariff; never run it unpriced.
+        or (
+            revision.model == ARGON_MODEL
+            and (INLINE_REUSE.provider, ARGON_MODEL) not in pricing.provider_prices(PROFILE)
+        )
         or request.deps.state_store is None
         or (
             request.worker is not None
@@ -427,6 +437,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         )
     ):
         raise AdmissionDenied(reason="backend_unsupported")
+    assert revision.model is not None
     plan = load_gemini_deployment(request)
     if plan.storage_backend == "sqlite" and (
         os.environ.get("K_SERVICE") or os.environ.get("CLOUD_RUN_JOB")
@@ -442,7 +453,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         raise AdmissionDenied(reason="backend_unsupported")
     agent = AgentSpec(
         name=plan.agent_name,
-        model=ModelRef(provider="gemini", id=FLASH_PRIMARY),
+        model=ModelRef(provider="gemini", id=revision.model),
         system=plan.system,
         tools=plan.tools,
     )

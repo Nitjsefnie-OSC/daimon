@@ -10,7 +10,7 @@ from mux.contracts.resources import Agent, AgentSpec
 from mux.drivers.gemini.flash import FLASH_MODELS, FLASH_PRIMARY, FlashAttempt, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError
-from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
 from pydantic import JsonValue
 
 
@@ -197,3 +197,60 @@ async def test_bounded_worker_pins_counted_model_and_never_falls_back():
         await transport.create(body)
     assert len(source.requests) == len(accounting.held) == 1
     assert accounting.held[0].id == FLASH_PRIMARY
+
+
+def argon_request() -> Mapping[str, JsonValue]:
+    return {"agent_config": {"type": "antigravity", "model": ARGON_MODEL}, "input": []}
+
+
+@pytest.mark.parametrize("overloaded", (False, True))
+async def test_argon_primary_is_one_attempt_and_never_falls_back_to_flash(
+    overloaded: bool,
+) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(
+        ProviderError("overloaded", retryable=True, native_code="503")
+        if overloaded
+        else {"id": "argon", "status": "completed"}
+    )
+    source.responses.append({"id": "flash", "status": "completed"})
+    policy = FlashTransport(source, accounting, primary=ARGON_MODEL)
+    if overloaded:
+        with pytest.raises(ProviderError):
+            await policy.create(argon_request())
+        assert accounting.receipts[0].outcome == "refused"
+    else:
+        await policy.create(argon_request())
+        assert policy.model_for_interaction("argon") == ModelRef(provider="gemini", id=ARGON_MODEL)
+    assert source.requests == [argon_request()]
+    assert accounting.held == [ModelRef(provider="gemini", id=ARGON_MODEL)]
+
+
+async def test_argon_and_flash_primaries_refuse_each_others_requests() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    with pytest.raises(ProviderError, match="flash_primary_required"):
+        await FlashTransport(source, accounting, primary=ARGON_MODEL).create(request())
+    with pytest.raises(ProviderError, match="flash_primary_required"):
+        await FlashTransport(source, accounting).create(argon_request())
+    assert not source.requests and not accounting.held
+
+
+@pytest.mark.parametrize("primary", (WORKER_MODEL, "gemini-4-argon-preview", "gemini-pro"))
+def test_transport_primary_is_flash_or_argon_only(primary: str) -> None:
+    with pytest.raises(ValueError):
+        FlashTransport(FakeTransport(), Accounting(), primary=primary)
+
+
+async def test_bounded_worker_cannot_use_argon() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    capped: Mapping[str, JsonValue] = {
+        "model": ARGON_MODEL,
+        "tools": [],
+        "generation_config": {"max_output_tokens": 4096},
+        "input": [{"type": "text", "text": "task"}],
+    }
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting, bounded_worker=True, primary=ARGON_MODEL).create(
+            capped
+        )
+    assert not source.requests and not accounting.held

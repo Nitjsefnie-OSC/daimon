@@ -17,7 +17,7 @@ from mux.contracts.ids import Provider
 from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
-from mux.profiles.gemini import INLINE_REUSE, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, WORKER_MODEL
 from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 
@@ -184,6 +184,10 @@ class BackendSelection:
     thread_modes: tuple[ThreadMode, ...]
     allowed_models: tuple[str, ...] | None = None
     profiles: tuple[str, ...] = ()
+    # Allowed models that only a channel may select, never a fleet worker.
+    channel_only_models: tuple[str, ...] = ()
+    # Allowed models admitted only while the host holds a current dated tariff.
+    tariff_gated_models: tuple[str, ...] = ()
 
 
 _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
@@ -200,7 +204,9 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
         ("per_caller",),
-        allowed_models=(WORKER_MODEL,),
+        allowed_models=(WORKER_MODEL, ARGON_MODEL),
+        channel_only_models=(ARGON_MODEL,),
+        tariff_gated_models=(ARGON_MODEL,),
     ),
 }
 RUNNABLE_PROFILES: frozenset[str] = frozenset(
@@ -237,3 +243,15 @@ def runnable_selection(selection: ResolvedBackend) -> bool:
         )
         and selection.thread_mode in declared.thread_modes
     )
+
+
+def worker_selection_allowed(selection: ResolvedBackend) -> bool:
+    """Whether a fleet worker may run this selection; channel-only models refuse."""
+    declared = _BACKEND_SELECTIONS[selection.backend]
+    return selection.model not in declared.channel_only_models
+
+
+def tariff_gated(selection: ResolvedBackend) -> bool:
+    """Whether admitting this selection requires a current host tariff."""
+    declared = _BACKEND_SELECTIONS[selection.backend]
+    return selection.model in declared.tariff_gated_models

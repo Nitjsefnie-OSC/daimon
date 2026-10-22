@@ -1358,6 +1358,7 @@ def freeze_root_permissions(
             check_backend(
                 ConfigRevision.create(fleet.root.channel, 1, backend),
                 enabled_backends=policy.enabled_backends,
+                worker=True,
             )
     except (DaimonError, InvalidConfig):
         raise WorkerSpecRefused("backend", "unsupported") from None
@@ -1582,6 +1583,7 @@ def resolve_worker_spec(
         check_backend(
             ConfigRevision.create(fleet.root.channel, 1, selected),
             enabled_backends=policy.enabled_backends,
+            worker=True,
         )
     except DaimonError:
         raise WorkerSpecRefused("backend", "unsupported") from None

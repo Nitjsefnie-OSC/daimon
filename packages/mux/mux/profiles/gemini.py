@@ -12,6 +12,9 @@ from mux.contracts.extensions import ExtensionRef
 from mux.contracts.profile import AccountingMode, Profile
 
 WORKER_MODEL = "gemini-3.5-flash-lite"
+# Opt-in main-turn model for a channel-configured revision: one attempt, never
+# the Flash fallback chain, and never a fleet worker.
+ARGON_MODEL = "gemini-4-argon"
 WORKER_MAX_TOTAL_TOKENS = 4096
 WORKER_MAX_RUNTIME_S = 120
 

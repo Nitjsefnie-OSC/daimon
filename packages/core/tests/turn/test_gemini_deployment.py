@@ -8,7 +8,7 @@ import os
 from collections.abc import Mapping
 from contextlib import AsyncExitStack
 from dataclasses import replace
-from datetime import UTC, datetime
+from datetime import UTC, datetime, tzinfo
 from decimal import Decimal
 from pathlib import Path
 from typing import Literal, cast
@@ -65,6 +65,7 @@ from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord, Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import ScopeViolation
+from mux.profiles.gemini import ARGON_MODEL
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import async_sessionmaker
 
@@ -1002,6 +1003,21 @@ async def test_holds_survive_restart_and_refusal_never_releases_budget(
     assert error.value.reason == "channel_budget_exceeded"
 
 
+async def test_argon_attempt_holds_and_near_miss_ids_refuse(tmp_path: Path) -> None:
+    hold = SQLiteFlashAccounting(
+        tmp_path / "holds.sqlite",
+        namespace="account",
+        hold_usd=Decimal(".05"),
+        cap_usd=Decimal(".10"),
+    )
+    for near in ("gemini-4-argon-preview", "gemini-4"):
+        with pytest.raises(AdmissionDenied):
+            await hold.before_attempt(model=ModelRef(provider="gemini", id=near), attempt=1)
+    argon = ModelRef(provider="gemini", id=ARGON_MODEL)
+    await hold.before_attempt(model=argon, attempt=1)
+    await hold.after_attempt(receipt=FlashAttempt(argon, 1, "accepted", interaction_id="argon"))
+
+
 async def test_unknown_hold_commits_before_native_dispatch_and_survives_crash(
     tmp_path: Path,
 ) -> None:
@@ -1097,18 +1113,53 @@ async def test_policy_refusal_precedes_selected_key_and_transport(
     assert not (tmp_path / "records.sqlite").exists()
 
 
-@pytest.mark.parametrize("output_cap", (None, 4096))
+def argon_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz: tzinfo | None = None) -> datetime:  # pyright: ignore[reportIncompatibleMethodOverride]
+            assert tz is UTC
+            return day
+
+    monkeypatch.setattr(pricing, "datetime", Clock)
+
+
+def argon_selected(
+    selected: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch, day: datetime
+) -> ProviderPreparationRequest:
+    """Select Argon on the channel and move the tariff clock to `day`."""
+    argon_clock(monkeypatch, day)
+    revision = selected.admission.backend_revision
+    assert revision is not None
+    config = ConfigRevision.create(
+        revision.channel,
+        1,
+        resolve_default(BackendConfig(backend="gemini", profile=PROFILE, model=ARGON_MODEL)),
+    )
+    return replace(
+        selected,
+        admission=replace(
+            selected.admission, backend_revision=config, backend=check_backend(config)
+        ),
+    )
+
+
+@pytest.mark.parametrize(
+    "output_cap,model", ((None, FLASH_PRIMARY), (4096, FLASH_PRIMARY), (None, ARGON_MODEL))
+)
 async def test_application_constructs_gemini_and_reuses_persisted_native_binding(
     selected: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
     tmp_path: Path,
     db_clean: None,
     output_cap: int | None,
+    model: str,
 ) -> None:
     import httpx
 
     from .test_gemini_codec import interaction
 
+    if model == ARGON_MODEL:
+        selected = argon_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
     plan = entry(selected, tmp_path)
     if output_cap is not None:
         plan.update(
@@ -1127,10 +1178,10 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
             body = json.loads(request.content)
             assert body["tools"] == []
             if output_cap is None:
-                assert body["agent_config"]["model"] == FLASH_PRIMARY
+                assert body["agent_config"]["model"] == model
                 assert "generation_config" not in body
             else:
-                assert body["model"] == FLASH_PRIMARY
+                assert body["model"] == model
                 assert body["generation_config"] == {"max_output_tokens": 4096}
                 assert not {"agent", "agent_config", "environment"} & body.keys()
             assert "spend_control" not in body
@@ -1172,6 +1223,8 @@ async def test_application_constructs_gemini_and_reuses_persisted_native_binding
             reuse_existing=True,
         )
         assert prepared.runtime is not None and isinstance(prepared.runtime.journal, GeminiJournal)
+        deployment = prepared.runtime.journal.deployment
+        assert deployment is not None and deployment.agent.model.id == model
         if session_id is not None:
             assert prepared.ma_session_id == session_id
         session_id = prepared.ma_session_id
@@ -1616,6 +1669,26 @@ async def test_worker_runtime_refuses_a_deadline_beyond_the_cancel_bound_before_
         build_gemini_runtime(selected)
     assert refused.value.reason == "backend_unsupported"
     assert not owned.wire.requests and not calls
+
+
+async def test_argon_after_its_intro_tariff_refuses_before_runtime_discovery(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    # Admitted inside the window; the tariff expires before the runtime is built.
+    selected = argon_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
+    argon_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
+    getter = os.environ.get
+
+    def no_manifest(name: str, default: str | None = None) -> str | None:
+        if name == "DAIMON_TURN__PROVIDER_RUNTIME_FILE":
+            pytest.fail("unpriced Argon discovered its runtime")
+        return getter(name, default)
+
+    monkeypatch.setattr(os.environ, "get", no_manifest)
+    with pytest.raises(AdmissionDenied) as refused:
+        build_gemini_runtime(selected)
+    assert refused.value.reason == "backend_unsupported"
 
 
 async def test_cheap_model_does_not_enable_an_ordinary_channel_runtime(

@@ -617,3 +617,24 @@ def test_root_budget_pair_requires_both_operator_fields(field):
     data[field] = Decimal("0.20")
     with pytest.raises(ValidationError, match="supplied together"):
         AgentFleetGrant.model_validate(data)
+
+
+async def test_argon_fleet_grant_is_refused_up_front(owned, monkeypatch):
+    from daimon.core import pricing
+
+    class InIntroWindow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 30, tzinfo=UTC)
+
+    # Argon is priced here, so the refusal is the worker rule, not the tariff.
+    monkeypatch.setattr(pricing, "datetime", InIntroWindow)
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    argon = (
+        backend_selection("gemini").model_copy(update={"model": "gemini-4-argon"}),
+        ModelRef(provider="gemini", id="gemini-4-argon"),
+    )
+    with pytest.raises(AgentBackendRefused, match="invalid fleet grant"):
+        await set_grant(service, agent, actor, grant().model_copy(update={"choices": (argon,)}))
+    assert await service.current(agent) is None

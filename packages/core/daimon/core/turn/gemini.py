@@ -63,7 +63,7 @@ from mux.drivers.gemini.skill_deployment import SkillBundlePublisher
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
 from mux.state.store import StateStore
 from pydantic import JsonValue, TypeAdapter
 
@@ -112,13 +112,13 @@ class GeminiTransportRuntime:
 def _runtime_model(runtime: TurnRuntime | None) -> str:
     journal = runtime.journal if runtime is not None else None
     deployment = journal.deployment if isinstance(journal, GeminiJournal) else None
-    return (
-        deployment.agent.model.id
-        if deployment is not None
-        and (deployment.max_total_tokens is not None or deployment.max_input_tokens is not None)
-        and deployment.agent.model.id in (FLASH_PRIMARY, WORKER_MODEL)
-        else FLASH_PRIMARY
-    )
+    if deployment is None:
+        return FLASH_PRIMARY
+    model = deployment.agent.model.id
+    capped = deployment.max_total_tokens is not None or deployment.max_input_tokens is not None
+    if (capped and model in (FLASH_PRIMARY, WORKER_MODEL)) or (not capped and model == ARGON_MODEL):
+        return model
+    return FLASH_PRIMARY
 
 
 def compose_gemini_backend(request: TurnBackendRequest) -> TurnBackend:
@@ -202,6 +202,7 @@ def gemini_backend(
         runtime.usage_store.accounting,
         native_agent=deployment.native_agent if deployment.max_input_tokens is None else None,
         bounded_worker=deployment.max_input_tokens is not None,
+        primary=ARGON_MODEL if required_model == ARGON_MODEL else FLASH_PRIMARY,
     )
     return GeminiManagedAgents(
         transport,
