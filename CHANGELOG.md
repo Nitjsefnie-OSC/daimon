@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Admins can clear a channel's model-provider pin from chat: "clear this channel's pin" shows what the channel pins and clears it after the admin confirms on the card, so each agent answers there on its own provider again. Refusals and provider switches that mention a channel pin now give those words.
+
 - Configure an agent's fleet from chat: choose worker agents by name, worker and spending limits, and an expiry, then confirm the exact settings. Owners or admins can change the fleet; only admins can change the server's provider allowlist. Natural model names such as “opus 5.5” and “luna” work when configuring an agent's model. Edits preserve every omitted limit and the saved expiry; confirmation cards name removed caps. Ambiguous model-name typos ask for a choice.
 
 - Agent edits now reach an open self-hosted conversation at its next message: changed instructions, model, tools, skills or MCP servers apply on the same session, so workspace files stay. A turn already running finishes on its old configuration and its usage is metered at the model and tariff it used. Environment changes and archived agents still require a fresh session.

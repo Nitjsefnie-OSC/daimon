@@ -834,3 +834,34 @@ def test_an_approval_card_shows_the_call_exactly_even_when_it_names_another_app(
         "Title: Move the Slack bot to Teams",
         "Description: Not Discord",
     )
+
+
+async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from daimon.core import confirmation
+    from daimon.core.config import TurnSettings
+    from mux.contracts.ids import ChannelRef
+
+    tenant, account = uuid4(), uuid4()
+    runtime = MagicMock()
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    channel = MagicMock(spec=discord.TextChannel)
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    admission = SimpleNamespace(origin_channel_id="1561246827452571728")
+    discord_confirmation_hook(
+        channel,
+        runtime=runtime,
+        admission=admission,  # pyright: ignore[reportArgumentType]
+        tenant_id=tenant,
+        account_id=account,
+    )
+    assert factory.call_args.kwargs["pin_channel"] == ChannelRef(
+        tenant_id=str(tenant), platform="discord", channel_id="1561246827452571728"
+    )
+    discord_confirmation_hook(channel, runtime=runtime, tenant_id=tenant, account_id=account)
+    assert factory.call_args.kwargs["pin_channel"] is None, "no admitted channel, no pin card"

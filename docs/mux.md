@@ -126,6 +126,15 @@ agent's provider can't serve it here yet), and the provider involved. Each
 names the chat words that fix it; a refusal with no cause never blames the
 channel.
 
+A channel pin outranks every agent's own provider there, so an admin can clear
+it from chat: "clear this channel's pin" calls `request_channel_pin_clear`,
+which previews what this channel pins and, once the admin confirms the card,
+writes a `channel_clear` revision (`clear_channel_backend`). Only the chat's own
+channel can be cleared: the card binds the channel it is posted in (the
+admitted turn's origin channel), never a channel named in the tool call, and it
+re-checks the pin's revision and digest and that the clicker is a current
+admin. Existing threads keep their model.
+
 A channel may also name `gemini-4-argon` (Gemini 4 Argon, 1M-token context)
 on `gemini.inline_reuse`. The agent-preference switch and the default stay on
 `gemini-3.8-flash`; only an explicit channel revision selects Argon. An Argon

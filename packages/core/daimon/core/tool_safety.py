@@ -162,6 +162,7 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "request_agent_backend_switch": "preview_digest",
     "request_fleet_config": "preview_digest",
     "request_provider_allowlist": "preview_digest",
+    "request_channel_pin_clear": "preview_digest",
     # Every call names its action, so every call asks.
     "microsoft_send": "action",
     # Every call names its method; asks only with tool safety on.
@@ -173,7 +174,12 @@ def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     """Project authoritative backend-selection eligibility into session controls."""
     return (
         frozenset(
-            {"request_agent_backend_switch", "request_fleet_config", "request_provider_allowlist"}
+            {
+                "request_agent_backend_switch",
+                "request_fleet_config",
+                "request_provider_allowlist",
+                "request_channel_pin_clear",
+            }
         )
         if enabled
         else frozenset()

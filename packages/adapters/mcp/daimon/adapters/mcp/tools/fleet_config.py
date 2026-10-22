@@ -46,6 +46,14 @@ class FleetConfigInfo(BaseModel):
     summary: str
 
 
+class ChannelPinInfo(BaseModel):
+    status: str
+    pinned: str | None
+    expected_revision: int
+    preview_digest: str
+    summary: str
+
+
 class ProviderAllowlistInfo(BaseModel):
     status: str
     providers: tuple[Provider, ...]
@@ -57,7 +65,7 @@ class ProviderAllowlistInfo(BaseModel):
 async def _require_chat(
     runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None, tool: str
 ) -> None:
-    if tool == "request_provider_allowlist":
+    if tool in ("request_provider_allowlist", "request_channel_pin_clear"):
         _require_admin(auth)
     if auth.agent_id is not None or auth.platform_user_id is None:
         raise ToolError("Request this change from your active chat conversation.")
@@ -276,6 +284,72 @@ async def _request_provider_allowlist_impl(
         ) from exc
 
 
+async def _request_channel_pin_clear_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    expected_revision: int | None = None,
+    preview_digest: str | None = None,
+    origin_context_id: str | None = None,
+) -> ChannelPinInfo:
+    """This chat's channel pin: show it, then clear it once the admin confirms."""
+    from daimon.core.channel_backend import channel_ref, clear_channel_backend, current_backend
+    from daimon.core.fleet_configuration import channel_pin_digest
+    from daimon.core.stores import mux_state
+    from daimon.core.turn.notices import provider_name
+
+    await _require_chat(runtime, auth, origin_context_id, "request_channel_pin_clear")
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    assert origin is not None
+    channel = channel_ref(origin.tenant_id, origin.platform, origin.parent_channel_id)
+    async with runtime.session_factory() as session:
+        pin = await current_backend(session, channel)
+        pinned = (
+            pin is not None
+            and await mux_state.config_origin(session, channel, pin.local) == "channel"
+        )
+    if pin is None or not pinned:
+        if preview_digest is not None:
+            raise ToolError("This channel has no provider pin any more. Nothing changed.")
+        return ChannelPinInfo(
+            status="not_pinned",
+            pinned=None,
+            expected_revision=0,
+            preview_digest="",
+            summary="This channel has no provider pin: each agent answers here on its own "
+            "provider.",
+        )
+    named = provider_name(pin.backend) + (f" ({pin.model})" if pin.model else "")
+    digest = channel_pin_digest(pin)
+    if preview_digest is None:
+        return ChannelPinInfo(
+            status="preview",
+            pinned=named,
+            expected_revision=pin.local,
+            preview_digest=digest,
+            summary=f"This channel pins {named}, so agents answer here on it instead of their "
+            "own provider. Call request_channel_pin_clear again with this expected_revision and "
+            "preview_digest; the requesting admin must Confirm on the card. Nothing changed yet.",
+        )
+    if expected_revision != pin.local or preview_digest != digest:
+        raise ToolError("This channel's pin changed. Preview and confirm again. Nothing changed.")
+    async with runtime.session_factory.begin() as session:
+        current = await current_backend(session, channel)
+        if current is None or current.local != pin.local or current.digest != pin.digest:
+            raise ToolError(
+                "This channel's pin changed. Preview and confirm again. Nothing changed."
+            )
+        await clear_channel_backend(session, channel)
+    return ChannelPinInfo(
+        status="cleared",
+        pinned=None,
+        expected_revision=pin.local,
+        preview_digest=digest,
+        summary=f"Cleared this channel's {named} pin. New conversations here use each agent's "
+        "own provider; existing threads keep their model.",
+    )
+
+
 def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     @mcp.tool
     async def request_fleet_config(  # pyright: ignore[reportUnusedFunction]
@@ -342,6 +416,31 @@ def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             runtime,
             await _auth(ctx),
             providers=providers,
+            expected_revision=expected_revision,
+            preview_digest=preview_digest,
+            origin_context_id=origin_context_id,
+        )
+
+    @mcp.tool(tags={"admin"})
+    async def request_channel_pin_clear(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        expected_revision: int | None = None,
+        preview_digest: str | None = None,
+        origin_context_id: str | None = None,
+    ) -> ChannelPinInfo:
+        """Show or clear THIS channel's model-provider pin, with admin confirmation. Admin-only.
+
+        Use when an admin says "clear this channel's pin", or when a switch or refusal says
+        this channel pins a provider. A pin makes every agent answer here on that provider;
+        clearing it lets each agent use its own. First call without preview_digest and show
+        what the channel pins. Then call again with that preview's expected_revision and
+        preview_digest: the requesting admin must Confirm on the card. Only this chat's
+        channel can be cleared. Existing threads keep their model. Pass this turn's
+        origin_context_id. A stale preview changes nothing.
+        """
+        return await _request_channel_pin_clear_impl(
+            runtime,
+            await _auth(ctx),
             expected_revision=expected_revision,
             preview_digest=preview_digest,
             origin_context_id=origin_context_id,

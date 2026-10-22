@@ -702,7 +702,7 @@ async def test_the_switch_says_when_this_channel_pins_its_own_provider(active_ch
     )
     assert preview.channel_pin == (
         "This channel pins OpenAI (gpt-6-luna), so this agent keeps answering on that here"
-        " until the channel's pin is cleared."
+        ' until an admin clears it: say "clear this channel\'s pin".'
     )
     assert preview.summary.endswith(preview.channel_pin)
     async with runtime.session_factory.begin() as session:

@@ -17,6 +17,7 @@ if TYPE_CHECKING:
 
 from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
 from daimon.core.stores.domain import CompatibilityPreview, TenantBackendPolicy
+from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ModelRef, Provider
 from mux.profiles import MANAGED_AGENTS, backend_selection
 from pydantic import (
@@ -240,7 +241,7 @@ class ConfigurationReference(BaseModel):
     """Untrusted reference; every host reloads and validates its preview."""
 
     model_config = ConfigDict(extra="forbid", frozen=True)
-    operation: Literal["fleet_set", "fleet_revoke", "provider_allowlist"]
+    operation: Literal["fleet_set", "fleet_revoke", "provider_allowlist", "channel_pin_clear"]
     agent_name: str | None = Field(default=None, min_length=1)
     config: FleetConfigInput | None = None
     providers: tuple[Provider, ...] | None = None
@@ -249,6 +250,17 @@ class ConfigurationReference(BaseModel):
 
     @model_validator(mode="after")
     def _bound(self) -> ConfigurationReference:
+        if self.operation == "channel_pin_clear":
+            # The channel is never in the reference: the card binds the chat it is posted in.
+            if (
+                type(self.expected_revision) is not int
+                or self.expected_revision < 1
+                or self.agent_name is not None
+                or self.config is not None
+                or self.providers is not None
+            ):
+                raise ValueError("clearing a channel pin requires the pin's revision")
+            return self
         if self.operation == "provider_allowlist":
             if (
                 not isinstance(self.expected_revision, str)
@@ -268,6 +280,22 @@ class ConfigurationReference(BaseModel):
         if self.config is not None and self.config.expires_at is None:
             raise ValueError("confirm the exact expiry returned by the preview")
         return self
+
+
+def channel_pin_digest(pin: ConfigRevision) -> str:
+    """Binds a pin-clear preview to this exact channel pin revision."""
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "channel": pin.channel.model_dump(mode="json"),
+                "local": pin.local,
+                "digest": pin.digest,
+                "operation": "channel_pin_clear",
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
 
 
 def provider_preview_digest(policy: TenantBackendPolicy, providers: tuple[Provider, ...]) -> str:

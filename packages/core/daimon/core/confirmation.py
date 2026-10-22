@@ -47,7 +47,7 @@ from daimon.core.tool_safety import (
 )
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
 from mux.contracts.config import ThreadMode
-from mux.contracts.ids import Provider
+from mux.contracts.ids import ChannelRef, Provider
 from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
@@ -402,6 +402,21 @@ def prompt_for_tool_call(
             admin=True,
             configuration=reference,
         )
+    if call.tool_name == "request_channel_pin_clear" and server == DAIMON_SERVER_NAME:
+        reference = ConfigurationReference.model_validate(
+            {
+                "operation": "channel_pin_clear",
+                "expected_revision": data.get("expected_revision"),
+                "preview_digest": data.get("preview_digest"),
+            }
+        )
+        return ConfirmationPrompt(
+            title="Clear this channel's provider pin?",
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+            admin=True,
+            configuration=reference,
+        )
     if call.tool_name == "request_agent_backend_switch" and server == DAIMON_SERVER_NAME:
         reference = BackendSwitchReference.model_validate(
             {
@@ -598,6 +613,7 @@ def backend_switch_callbacks(
     resource_host: NeutralResourceHost | None = None,
     default_agent_name: str | None = None,
     place_word: str = "server",
+    pin_channel: ChannelRef | None = None,
 ) -> tuple[
     Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]],
     Callable[[ConfirmationPrompt, str], Awaitable[str | None]],
@@ -675,11 +691,44 @@ def backend_switch_callbacks(
         ):
             raise ValueError("This confirmation is unavailable. Preview again.")
         subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
-        if reference.operation == "provider_allowlist" and not subject.is_admin:
+        if (
+            reference.operation in ("provider_allowlist", "channel_pin_clear")
+            and not subject.is_admin
+        ):
             raise ValueError("This change needs a current workspace admin.")
         actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
         try:
-            if reference.operation == "provider_allowlist":
+            if reference.operation == "channel_pin_clear":
+                # Only the chat this card is posted in: the reference names no channel.
+                if pin_channel is None or pin_channel.tenant_id != str(tenant_id):
+                    raise ValueError("This confirmation is unavailable. Preview again.")
+                from daimon.core.channel_backend import current_backend
+                from daimon.core.fleet_configuration import channel_pin_digest
+                from daimon.core.stores import mux_state
+                from daimon.core.turn.notices import provider_name
+
+                async with sessionmaker() as session:
+                    pin = await current_backend(session, pin_channel)
+                    origin = (
+                        await mux_state.config_origin(session, pin_channel, pin.local)
+                        if pin is not None
+                        else None
+                    )
+                if (
+                    pin is None
+                    or origin != "channel"
+                    or pin.local != reference.expected_revision
+                    or channel_pin_digest(pin) != reference.preview_digest
+                ):
+                    raise ValueError("This preview changed. Preview and confirm again.")
+                model = f" ({pin.model})" if pin.model else ""
+                action = "Clear this channel's provider pin"
+                details = (
+                    f"This channel pins {provider_name(pin.backend)}{model}.",
+                    "After clearing, each agent answers here on its own provider. "
+                    "Existing threads keep their model.",
+                )
+            elif reference.operation == "provider_allowlist":
                 assert reference.providers is not None
                 policy = await service.tenant_policy(tenant_id)
                 if (
