@@ -20,7 +20,6 @@ from daimon.core.turn import driver
 from daimon.core.turn.io import LegacyTurnIO, TurnEvent, TurnStream
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.usage_billing import ObservationBilled
-from daimon.testing.ma_models import ma_model_usage
 from daimon.testing.turn_fakes import BlockForever, FakeAnthropic, RecordingLifecycle, YieldEvent
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Scope, ThreadRef
 from mux.contracts.receipts import StopObservation
@@ -29,6 +28,7 @@ from mux.contracts.usage import UsageObservation
 from mux.state.lease import LeaseBusy
 from mux.state.memory import MemoryStateStore
 from mux.state.store import binding_slot
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
 

@@ -28,7 +28,7 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.output_delivery import DeliverableFile, NoticedFiles
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
 NOW = datetime(2026, 8, 25, 12, tzinfo=UTC)
 # The turn's card is message 777; the turn ended a minute after the files were written.

@@ -24,8 +24,8 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001

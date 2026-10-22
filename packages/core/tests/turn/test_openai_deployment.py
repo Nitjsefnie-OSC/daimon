@@ -33,13 +33,13 @@ from daimon.core.turn.prepare import (
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtimes import build_channel_runtime
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ThreadRef
 from mux.drivers.openai import deployment
 from mux.errors import ContinuityLost, ScopeViolation
 from mux.state.lease import Slot
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from openai import AsyncOpenAI
 from pydantic import JsonValue, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

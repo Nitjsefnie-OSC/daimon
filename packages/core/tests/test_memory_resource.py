@@ -31,7 +31,7 @@ from daimon.core.stores.agent_memory_stores import (
     list_channel_memory_stores_for_agent,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     make_fake_memory_store_handler,
@@ -504,8 +504,8 @@ async def test_exact_warm_memory_refuses_changed_binding_without_provisioning(
     db_preflight, db_committing_engine, change
 ):
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.errors import ScopeViolation
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sm)

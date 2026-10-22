@@ -246,7 +246,7 @@ would give it.
 
 # Isolated provider SDK clients
 
-`daimon.testing.isolated_sdk` supplies `build_async_openai`,
+`mux.testing.isolated_sdk` supplies `build_async_openai`,
 `build_async_anthropic` and `build_gemini_client` for tests. Each requires an
 explicit HTTPX transport and supplies a fake API key, a fixed provider base URL
 and empty custom headers by default. Override `api_key`, `base_url` and `headers`
@@ -257,7 +257,7 @@ factories; imports remain lazy.
 
 ```python
 import httpx
-from daimon.testing.isolated_sdk import build_async_openai
+from mux.testing.isolated_sdk import build_async_openai
 
 transport = httpx.MockTransport(
     lambda request: httpx.Response(200, json={"data": [], "object": "list"})
@@ -473,7 +473,7 @@ This hook neither mutates budgets/credit nor binds the source executor itself.
 
 ```python
 import httpx
-from daimon.testing.isolated_sdk import build_async_openai
+from mux.testing.isolated_sdk import build_async_openai
 
 transport = httpx.MockTransport(
     lambda request: httpx.Response(200, json={"data": [], "object": "list"})
@@ -1029,17 +1029,15 @@ are offline actual SDK HTTP requests with owned Postgres readback.
 
 ## Conformance and manual probe tooling
 
-`daimon.testing.conformance` owns the backend-neutral conformance runner,
+`mux.testing.conformance` owns the backend-neutral conformance runner,
 normalized recorder and live-probe BudgetGuard. Provider SDK/script adapters live
-under `daimon.testing.drivers`; platform conformance callbacks live under
+under `mux.testing.drivers`; platform conformance callbacks live under
 `daimon.testing.adapters`. These are test-only dependencies and are never
 imported by runtime packages. The former `mux.conformance` namespace is removed.
 
-Tests live in `packages/testing/tests/conformance`, outside the wheel package.
-The existing ledger, retention, recorder and optimized-Python refusal checks are
-retained. Native certification receipts and replay tapes live under
-`packages/testing/fixtures`; their stored JSON bytes are unchanged. Provider
-reference/QA docs live under `packages/testing/docs` rather than inside `mux`.
+The conformance kit, its tests, saved receipts, replay tapes and reference docs
+now live in `packages/mux` (`mux.testing`, `packages/mux/tests`,
+`packages/mux/docs`), so the mux suite runs without Daimon installed.
 Product runtime usage/outbox reconciliation continues to use the mux state
 ledger; the manual admin hold-reconciliation tool is test support only.
 

@@ -62,13 +62,13 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.usage_recording import record_turn_usage
-from daimon.testing import ma_model_usage
 from daimon.testing.factories import (
     make_account,
     make_channel_budget,
     make_ledger_entry,
     make_tenant,
 )
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
@@ -1510,7 +1510,8 @@ async def test_fire_checks_the_agent_pin_before_the_channel_budget(
     the budget gate runs last, after the pin is checked on the resolved agent."""
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
-    from daimon.testing import MARouter, build_fake_anthropic, ma_agent
+    from daimon.testing.ma_models import ma_agent
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 
     now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
@@ -2755,7 +2756,7 @@ async def test_fire_skips_a_routine_that_would_post_across_an_isolated_channels_
     it is skipped too while anything is isolated."""
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
-    from daimon.testing import ma_agent
+    from daimon.testing.ma_models import ma_agent
 
     now = datetime(2026, 5, 30, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
@@ -2844,7 +2845,7 @@ async def test_fire_checks_the_pin_on_the_agent_that_will_run_by_its_display_nam
     The fire must check the resolved agent's names, not the saved name alone."""
     from daimon.core.access_policy import TenantAccessPolicy
     from daimon.core.stores.access_policy import set_access_policy
-    from daimon.testing import ma_agent
+    from daimon.testing.ma_models import ma_agent
 
     now = datetime(2026, 9, 28, 12, 0, 0, tzinfo=UTC)
     tenant = await make_tenant(db_session)
