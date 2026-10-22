@@ -165,17 +165,15 @@ async def _recorded_as_gated(
         tenant_id=auth.tenant_id,
         agent_id=agent.id,
     )
-    confirmed = backend_switch_tools(
-        enabled=backend_selection_enabled(runtime.settings.turn)
-    ) | microsoft_send_tools(
+    selection = backend_selection_enabled(runtime.settings.turn)
+    confirmed = backend_switch_tools(enabled=selection) | microsoft_send_tools(
         enabled=runtime.settings.microsoft_accounts.configured,
         tool_safety_on=runtime.settings.tool_safety.enabled,
     )
-    # A bind sent before the channel switch existed gated the same tools less
-    # that one; it still proves every card it did gate.
-    for confirmed_tools in dict.fromkeys(
-        (confirmed, confirmed - {"request_channel_backend_switch"})
-    ):
+    # A bind sent while the retired chat channel switch was also gated holds
+    # that one more gated tool; it still proves every card it gated.
+    legacy = confirmed | ({"request_channel_backend_switch"} if selection else set[str]())
+    for confirmed_tools in dict.fromkeys((confirmed, legacy)):
         for asks_before_publishing in (False, True):
             for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
                 tools = session_tools(

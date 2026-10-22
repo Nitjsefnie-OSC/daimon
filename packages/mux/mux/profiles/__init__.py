@@ -226,7 +226,7 @@ def backend_selection(backend: Provider) -> ResolvedBackend:
 
 
 def selectable_models(backend: Provider) -> tuple[str, ...]:
-    """The models a channel may select for `backend`, its default first."""
+    """The models an admin may select for `backend`, its default first."""
     declared = _BACKEND_SELECTIONS[backend]
     default = resolve_default(declared.config).model
     return tuple(
@@ -234,25 +234,6 @@ def selectable_models(backend: Provider) -> tuple[str, ...]:
             model for model in (default, *(declared.allowed_models or ())) if model is not None
         )
     )
-
-
-#: The profile a chat admin's channel switch runs for each provider it may
-#: pick besides the default: text-only conversation profiles a
-#: deployment-wide provider runtime row can serve in any channel.
-_CHANNEL_SWITCH_PROFILES: Mapping[Provider, str] = {
-    "openai": CONVERSATION_ONLY.profile_id,
-    "gemini": INLINE_REUSE.profile_id,
-}
-
-
-def channel_switch_profile(backend: Provider) -> str | None:
-    """The profile a channel switched to `backend` runs, or None if it can't be picked."""
-    return _CHANNEL_SWITCH_PROFILES.get(backend)
-
-
-def channel_switch_backends() -> tuple[Provider, ...]:
-    """Every provider a channel switch may pick, the default first."""
-    return (resolve_default(BackendConfig()).backend, *_CHANNEL_SWITCH_PROFILES)
 
 
 def shared_threads_available(backend: Provider) -> bool:
