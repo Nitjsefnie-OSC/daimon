@@ -34,6 +34,7 @@ def dispatch_general_interaction(
         data.get("type") == 2
         and application_id is not None
         and str(data.get("application_id")) == str(application_id)
+        and data.get("data", {}).get("type") == 1
         and data.get("data", {}).get("name") == "recruitment"
     )
     if own_recruitment_command or str(data.get("data", {}).get("custom_id", "")).startswith(

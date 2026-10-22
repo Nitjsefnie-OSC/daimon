@@ -116,7 +116,11 @@ async def test_own_recruitment_application_command_reaches_cog_in_reserved_threa
     data = {
         "type": 2,
         "application_id": "999",
-        "data": {"name": "recruitment", "options": [{"name": "action", "value": action}]},
+        "data": {
+            "type": 1,
+            "name": "recruitment",
+            "options": [{"name": "action", "value": action}],
+        },
     }
     control_dispatch.dispatch_general_interaction(
         policy(), MagicMock(), data, dispatch, MagicMock(), application_id=999
@@ -125,15 +129,20 @@ async def test_own_recruitment_application_command_reaches_cog_in_reserved_threa
 
 
 @pytest.mark.parametrize(
-    "name,application,kind",
+    "name,application,kind,command_type",
     [
-        ("here", "999", 2),
-        ("recruitment", "998", 2),
-        ("recruitment", None, 2),
-        ("recruitment", "999", 3),
+        ("here", "999", 2, 1),
+        ("recruitment", "998", 2, 1),
+        ("recruitment", None, 2, 1),
+        ("recruitment", "999", 3, 1),
+        ("recruitment", "999", 2, 2),
+        ("recruitment", "999", 2, 3),
+        ("recruitment", "999", 2, None),
     ],
 )
-async def test_general_or_foreign_commands_remain_refused(name, application, kind, monkeypatch):
+async def test_general_or_foreign_commands_remain_refused(
+    name, application, kind, command_type, monkeypatch
+):
     import asyncio
 
     from daimon.adapters.discord import control_dispatch
@@ -141,10 +150,13 @@ async def test_general_or_foreign_commands_remain_refused(name, application, kin
     tap = interaction()
     monkeypatch.setattr(control_dispatch.discord, "Interaction", MagicMock(return_value=tap))
     dispatch, tasks = MagicMock(), []
+    command = {"name": name}
+    if command_type is not None:
+        command["type"] = command_type
     control_dispatch.dispatch_general_interaction(
         policy(),
         MagicMock(),
-        {"type": kind, "application_id": application, "data": {"name": name}},
+        {"type": kind, "application_id": application, "data": command},
         dispatch,
         lambda work: tasks.append(asyncio.create_task(work)),
         application_id=999,
