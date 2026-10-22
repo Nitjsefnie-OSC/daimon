@@ -47,7 +47,15 @@ from mux.testing.isolated_sdk import build_async_anthropic, build_async_openai
 from structlog.testing import capture_logs
 
 from .test_openai_host import SESSION_ID, Wire
-from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission, deps_for
+from .test_provider_dispatch import (
+    ACCOUNT,
+    PROFILE,
+    REVISION,
+    SCOPE,
+    TENANT,
+    admission,
+    deps_for_pinned_mux,
+)
 
 
 @pytest.fixture
@@ -166,7 +174,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
             ),
         )
         deps = replace(
-            deps_for(client, db_session_factory),
+            deps_for_pinned_mux(client, db_session_factory),
             channel_backends=True,
             state_store=store,
             turn_runtimes={PROFILE: runtime},

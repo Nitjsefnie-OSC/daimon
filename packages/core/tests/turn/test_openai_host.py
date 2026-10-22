@@ -32,7 +32,15 @@ from mux.state.memory import MemoryStateStore
 from mux.state.operations import request_digest
 from openai import AsyncOpenAI
 
-from .test_provider_dispatch import ACCOUNT, PROFILE, REVISION, SCOPE, TENANT, admission, deps_for
+from .test_provider_dispatch import (
+    ACCOUNT,
+    PROFILE,
+    REVISION,
+    SCOPE,
+    TENANT,
+    admission,
+    deps_for_pinned_mux,
+)
 
 SESSION_ID = "native-openai-session"
 
@@ -269,7 +277,7 @@ async def composed(request, db_session_factory, db_clean, monkeypatch):
             ),
         )
         deps = replace(
-            deps_for(None, db_session_factory),
+            deps_for_pinned_mux(None, db_session_factory),
             channel_backends=True,
             state_store=store,
             turn_runtimes={PROFILE: runtime},

@@ -32,12 +32,13 @@ from anthropic.types import RawMessageStreamEvent
 from anthropic.types.beta import BetaManagedAgentsSession
 from anthropic.types.beta.beta_managed_agents_model_config import BetaManagedAgentsModelConfig
 from anthropic.types.beta.beta_managed_agents_session_agent import BetaManagedAgentsSessionAgent
-from daimon.core.config import McpSettings
+from daimon.core.config import McpSettings, TurnSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
+from daimon.testing.turn_leg import MUX_LEG, turn_leg
 from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -405,8 +406,19 @@ def assert_lifecycle(lc: TurnLifecycle) -> None:
     _ = lc  # runtime no-op; compile-time structural check
 
 
-def deps_for(client: object = None, sm: async_sessionmaker[AsyncSession] | None = None) -> TurnDeps:
-    """Build the real turn bundle; tests replace only dependencies they exercise."""
+def deps_for(
+    client: object = None,
+    sm: async_sessionmaker[AsyncSession] | None = None,
+    *,
+    leg: TurnSettings | None = None,
+) -> TurnDeps:
+    """Build the real turn bundle; tests replace only dependencies they exercise.
+
+    The turn path and backend flags come from `leg`, by default the leg the
+    run selected through the environment (`daimon.testing.turn_leg`). A test
+    that needs one path passes `leg=MUX_LEG` or `leg=LEGACY_LEG`.
+    """
+    selected = leg if leg is not None else turn_leg()
 
     return TurnDeps(
         anthropic=cast(AsyncAnthropic, client),
@@ -422,5 +434,19 @@ def deps_for(client: object = None, sm: async_sessionmaker[AsyncSession] | None 
         github_app_id=None,
         github_app_private_key=None,
         public_url=None,
-        turn_path="mux",
+        turn_path=selected.path,
+        channel_backends=selected.channel_backends,
+        agent_backends=selected.agent_backends,
     )
+
+
+def deps_for_pinned_mux(
+    client: object = None, sm: async_sessionmaker[AsyncSession] | None = None
+) -> TurnDeps:
+    """`deps_for` on the mux path with channel backends on, whatever leg the run selected.
+
+    For tests of behaviour that exists only on mux (non-Anthropic backends,
+    admission of a configured channel backend). Naming it makes the pin visible;
+    tests that should hold on both paths use `deps_for`.
+    """
+    return deps_for(client, sm, leg=MUX_LEG)

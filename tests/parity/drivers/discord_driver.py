@@ -77,6 +77,7 @@ from daimon.core.stores.tenants import set_provision_status
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.turn_fakes import deps_for
+from daimon.testing.turn_leg import turn_leg
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
@@ -317,6 +318,7 @@ class DiscordDriver:
         settings = MagicMock()
         settings.agent_identity.enabled = True
         settings.mcp = McpSettings()
+        settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.billing.markup = Decimal("1.0")
         settings.billing.signup_credit = Decimal("0")
         settings.crypto.keys = []
