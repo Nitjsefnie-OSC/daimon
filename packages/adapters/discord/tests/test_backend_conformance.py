@@ -36,20 +36,20 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import PreparedTurn
-from daimon.testing import ma_session
 from daimon.testing.adapters.discord.backend_conformance import (
     BackendTurnEnvelope,
     backend_selection_turn,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.isolated_sdk import (
+from daimon.testing.turn_router import build_turn_router
+from mux.contracts.config import BackendConfig, ConfigRevision
+from mux.testing.drivers.anthropic.ma import json_body, make_fake_memory_store_handler
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.isolated_sdk import (
     SDK_ENV_VARS,
     AmbientSDKConfigurationError,
     build_async_anthropic,
 )
-from daimon.testing.ma import json_body, make_fake_memory_store_handler
-from daimon.testing.turn_router import build_turn_router
-from mux.contracts.config import BackendConfig, ConfigRevision
 from pydantic import PostgresDsn, SecretStr
 from pydantic_settings import BaseSettings, PydanticBaseSettingsSource
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

@@ -33,9 +33,10 @@ from daimon.core.scope import DeploymentDefault, ResolvedConfig
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.thread_naming import THREAD_NAMING_MODEL
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_session, resolved_agent_env_router
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma import resolved_agent_env_router
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
@@ -487,8 +488,8 @@ async def test_selfhosted_opening_uses_text_title_without_touching_anthropic(
 
     from daimon.core.turn.admission import Admission
     from daimon.core.turn.errors import SessionAgentMismatch, SessionPreparationFailed
-    from daimon.testing import ma_agent, ma_environment
     from daimon.testing.factories import make_account
+    from daimon.testing.ma_models import ma_agent, ma_environment
     from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
     from mux.contracts.ids import ChannelRef
 

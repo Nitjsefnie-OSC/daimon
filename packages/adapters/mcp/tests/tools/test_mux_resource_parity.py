@@ -8,7 +8,7 @@ import pytest
 from anthropic import ConflictError
 from daimon.adapters.mcp.tools import skills
 from daimon.testing.ma_models import ma_agent
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 TENANT = UUID("00000000-0000-0000-0000-000000000007")
 ACCOUNT = UUID("00000000-0000-0000-0000-000000000008")

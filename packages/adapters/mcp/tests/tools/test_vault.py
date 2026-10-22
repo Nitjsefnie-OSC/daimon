@@ -14,8 +14,13 @@ from daimon.adapters.mcp.auth.resolver import AuthIdentity, Role
 from daimon.adapters.mcp.tools.vault import VaultCredentialSummary, _list_credentials_impl
 from daimon.core.mcp_vault import ensure_agent_mcp_vault
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, json_body, list_response
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    json_body,
+    list_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 VAULT_ID = "vault_abc"

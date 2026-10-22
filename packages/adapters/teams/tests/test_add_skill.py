@@ -21,10 +21,11 @@ from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.teams_installations import record_teams_installation
 from daimon.core.stores.user_skills import load_user_skill
-from daimon.testing import build_fake_anthropic, ma_agent
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
+    build_fake_anthropic,
     combine_handlers,
     list_response,
     make_fake_ma_handler,

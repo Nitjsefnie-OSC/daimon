@@ -53,10 +53,10 @@ from daimon.core.setup_conversations import setup_target_label, shared_keys_sent
 from daimon.core.stores.agent_avatars import AvatarRow
 from daimon.core.stores.domain import AccountRow, TenantRow
 from daimon.core.stores.mcp_tokens import count_tokens_for_account, get_mcp_token
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, build_stub_anthropic
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _PUBLIC_URL = "https://mcp.example.com"
