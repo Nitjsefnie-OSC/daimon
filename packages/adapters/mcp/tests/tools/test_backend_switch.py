@@ -507,3 +507,86 @@ async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat)
     revision = await service.current(source)
     assert revision.drop_consent is not None and revision.declared_drops == ()
     assert not trace.replies and not trace.violations
+
+
+def _gate_channel_switch(frozen):
+    frozen["agent"]["tools"][0]["configs"].append(
+        {
+            "name": "request_channel_backend_switch",
+            "enabled": True,
+            "permission_policy": {"type": "always_ask"},
+        }
+    )
+
+
+async def test_channel_switch_without_an_active_origin_reads_nothing(monkeypatch):
+    from daimon.adapters.mcp.tools.channel_backends import _request_channel_backend_switch_impl
+
+    auth = AuthIdentity(
+        tenant_id=uuid4(),
+        account_id=uuid4(),
+        role=Role.ADMIN,
+        is_admin=True,
+        platform="discord",
+        platform_user_id="123",
+    )
+    runtime = MagicMock()
+    origin = AsyncMock(return_value=None)
+    monkeypatch.setattr("daimon.adapters.mcp.tools.channel_backends.get_chat_origin", origin)
+    with pytest.raises(ToolError, match="active chat"):
+        await _request_channel_backend_switch_impl(
+            cast(McpRuntime, runtime), auth, target_backend="gemini"
+        )
+    runtime.session_factory.assert_not_called()
+
+
+async def test_chat_channel_switch_previews_then_confirms_this_channel_once(active_chat):
+    from daimon.adapters.mcp.tools.channel_backends import _request_channel_backend_switch_impl
+    from daimon.core.channel_backend import channel_ref, current_backend
+
+    runtime, auth, origin, _service, trace, _payload, frozen, gate, _agent, _mapping = active_chat
+    _gate_channel_switch(frozen)
+    channel = channel_ref(auth.tenant_id, "discord", "channel")
+
+    async def call(**kwargs):
+        gate()
+        return await _request_channel_backend_switch_impl(
+            runtime,
+            auth,
+            target_backend="gemini",
+            model="gemini-4-argon",
+            origin_context_id=str(origin.id),
+            **kwargs,
+        )
+
+    preview = await call()
+    assert preview.status == "preview" and preview.channel_id == "channel"
+    assert (preview.current_backend, preview.expected_revision) == ("anthropic", 0)
+    assert "memory" in preview.not_carried and "Text only" in preview.carries_over
+    with pytest.raises(ToolError, match="channel_id"):
+        await call(expected_revision=0, preview_digest=preview.preview_digest)
+    with pytest.raises(ToolError, match="Preview again"):
+        await call(channel_id="channel", expected_revision=0, preview_digest="b" * 64)
+    async with runtime.session_factory() as session:
+        assert await current_backend(session, channel) is None
+    changed = await call(
+        channel_id="channel", expected_revision=0, preview_digest=preview.preview_digest
+    )
+    assert changed.status == "changed" and "gemini-4-argon" in changed.summary
+    async with runtime.session_factory() as session:
+        written = await current_backend(session, channel)
+    assert written is not None and (written.backend, written.model) == ("gemini", "gemini-4-argon")
+    with pytest.raises(ToolError, match="Preview again"):
+        await call(channel_id="channel", expected_revision=0, preview_digest=preview.preview_digest)
+    assert not trace.violations
+
+
+async def test_channel_switch_refuses_a_session_without_the_card(active_chat):
+    from daimon.adapters.mcp.tools.channel_backends import _request_channel_backend_switch_impl
+
+    runtime, auth, origin, _service, _trace, _payload, _frozen, gate, _agent, _mapping = active_chat
+    gate()
+    with pytest.raises(ToolError, match="confirmation card"):
+        await _request_channel_backend_switch_impl(
+            runtime, auth, target_backend="gemini", origin_context_id=str(origin.id)
+        )

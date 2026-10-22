@@ -2233,6 +2233,29 @@ existing confirmation flow. Admin Details omit unavailable backend controls,
 and stale selections refuse without applying a change. Clear previews and their
 labels derive from the shared default backend.
 
+### Channel backend switch in chat
+
+With the same two settings, chat admins can switch one channel with
+`request_channel_backend_switch` ("switch this channel to gemini-4-argon",
+"use OpenAI here", "switch back to Claude"). Gemini channels run
+`gemini.inline_reuse` with any of its selectable models, Argon included;
+OpenAI channels run `openai.conversation_only` with gpt-6-luna; `anthropic`
+clears the channel back to the default. The first call previews: the
+channel's current backend, the target model, the list price, and what doesn't
+carry over. A switched channel answers in text only, without the agent's
+tools, skills, connections, memory or files. The second call, with the
+preview's `channel_id`, `expected_revision` and `preview_digest`, waits for
+the requesting admin's Confirm on the card, as the agent switch does. The
+card and the write each reload the server's preview; a changed channel, tenant
+allowlist or admin role refuses, and nothing changes. The write is the same
+`channel_config_revision` the CLI writes, with a `channel_backend` audit
+event. New conversations in the channel use it; existing threads keep their
+backend. `channel_id` defaults to the turn's channel; naming another channel
+checks that the admin can see it. A switched channel runs only where the
+deployment's provider runtime manifest has a row for its tenant and profile;
+one row with `"*"` on platform, channel and account serves every channel of
+that tenant.
+
 ### Output delivery pagination
 
 Delivery follows every Files API page through the authorized output port, so
