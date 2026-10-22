@@ -2538,7 +2538,7 @@ controls never become candidate evidence, and unknown-author bot events are
 resolved without changing an otherwise identical review.
 
 
-Every provider driver call now requires explicit source authority; prepared,
+Every provider driver call requires a `TurnPrivacy` declaration; prepared,
 headless routine and workspace-checkpoint paths carry the same recruitment
 settings and source placement. The scheduler refuses saved routines before
 using trigger content, and delivery refuses reserved destinations without any
@@ -2547,8 +2547,23 @@ Unresolved SDK channel forms fail closed, including uncached partial channels.
 General interactions are gated before SDK command/view/modal dispatch; wizard
 reconstruction additionally refuses before querying its row. Metadata listings
 and channel labels omit reserved places. An AST-based reader registry ratchets
-all runtime Discord primitives, turn callers and persistent controls against
-named boundaries and committed regressions.
+recognized runtime Discord primitives, turn callers, persistent controls and
+stored routine readers against named boundaries and committed regressions.
+It is a review ratchet, not exhaustive discovery: assignment aliases, reflection,
+constructed URL variables and lower-level SDK HTTP methods can escape it.
+Guard-string/test-name checks do not prove ordering, control flow or reachability;
+manual inventory review and behavioral tests remain necessary.
+
+`TurnPrivacy` is a trusted-caller declaration contract, not an independently
+authenticated source credential. Prepared paths derive origin from admission
+and prefer its grant's tenant; direct/headless callers must supply the actual
+platform, settings, tenant and placement from service context, never tool input.
+The driver cannot recognize false declarations. Stored routine content uses a
+shared current-settings read policy before MCP/CLI/control projection, including
+mutation returns. Reserved sources/destinations and unknown legacy provenance
+are hidden even from owners/admins. The interaction parser exempts only this
+application's named `/recruitment` command and its component namespace; the cog
+retains its live recruiter/thread checks.
 
 Bulk deletion locks every affected recruitment thread in stable order and
 records all source tombstones in one transaction. Its event watermark cannot be

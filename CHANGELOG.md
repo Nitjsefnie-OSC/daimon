@@ -7,6 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hide saved routine triggers/results from MCP, CLI and Discord controls when
+  their source or destination becomes reserved for recruitment, including
+  unknown legacy provenance. Restore this bot's `/recruitment` status, refresh,
+  retry and discard commands inside reserved channels with live recruiter checks.
+- Document the Discord reader registry as a syntax review ratchet with known
+  limits and `TurnPrivacy` as a trusted-caller declaration contract; prepared
+  turns prefer the admitted tenant over a repeated caller argument.
+
 ### Changed
 
 - Reserve configured recruitment parent channels and their threads for human

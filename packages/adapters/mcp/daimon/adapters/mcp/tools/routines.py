@@ -1057,13 +1057,18 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     @mcp.tool
     async def list_routines(ctx: Context) -> list[RoutineRow]:  # pyright: ignore[reportUnusedFunction]
-        """List the routines you created (an admin sees every routine in the workspace)."""
+        """List your routines (admins may see other owners' available routines).
+
+        Recruitment-reserved sources/destinations are omitted for everyone.
+        Unknown legacy provenance is withheld in recruitment-configured tenants.
+        """
         return await _list_routines_impl(runtime, await _auth(ctx))
 
     @mcp.tool
     async def get_routine(ctx: Context, routine_id: UUID) -> RoutineRow:  # pyright: ignore[reportUnusedFunction]
         """Get a routine by id. Raises if not found, cross-tenant, or someone else's and you
-        are not an admin."""
+        are not an admin. Recruitment-reserved or unresolved legacy sources and
+        destinations also return the same not-found response, including for admins."""
         return await _get_routine_impl(runtime, await _auth(ctx), routine_id=routine_id)
 
     @mcp.tool
@@ -1082,7 +1087,8 @@ def register_routines_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     ) -> RoutineRow:
         """PATCH-update a routine, including owner-only Discord DM delivery.
 
-        Only provided fields are changed.
+        Only provided fields are changed. Recruitment-reserved sources/destinations
+        and unknown legacy provenance in configured tenants return not-found.
 
         ``destination_kind`` + ``destination_id`` set where results go (see
         ``create_routine``); ``clear_destination=true`` removes it, and the

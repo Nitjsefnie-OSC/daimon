@@ -811,3 +811,12 @@ Configured recruitment channels and their threads cannot host general routines.
 Creation refuses reserved sources and destinations. Existing channel routines
 stop at fire after the coordinated settings restart, before using their stored
 trigger, and delivery never redirects their result to a DM or another channel.
+
+
+Recruitment reservations also govern saved content after a settings restart.
+MCP list/get and mutation returns, Discord panels/output controls and CLI
+previews withhold routines whose source or destination is reserved. Direct IDs
+receive a generic not-found response. Unknown legacy source provenance and
+thread destinations without a recorded parent fail closed for configured
+tenants. Owner/admin access does not reveal their saved trigger or result.
+Internal scheduler bookkeeping may still read rows to settle refused runs.

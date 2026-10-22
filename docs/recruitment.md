@@ -161,18 +161,41 @@ DM moves and descriptive MCP errors. Uncached SDK channel forms, including
 imports, recovery scans and native lead panels use the same boundary. Channel
 labels, `/here` and CLI channel discovery/answerability withhold reserved places.
 
-The core driver requires explicit turn source authority, repeating the check
-for prepared, headless and checkpoint turns. Saved channel routines stop after
-a settings restart if their source or destination is reserved; refusal never
+The core driver requires a `TurnPrivacy` declaration and repeats its check
+for prepared, headless and checkpoint turns. Prepared paths take the tenant
+from the admitted grant and the origin from admission; scheduler paths use
+service settings and saved provenance. This is a trusted-caller declaration
+contract, not an independent credential: direct/headless callers must supply
+the actual platform, tenant, settings and resolved parent, never model/tool
+input. The driver cannot detect a caller lying about those facts. Saved channel
+routines stop after a settings restart if their source or destination is reserved; refusal never
 falls back to a DM or another channel. Discord gates general interactions before
 the SDK dispatches slash commands, reconstructs persistent views or loads modal
-answers. Wizard entry points also refuse before loading their stored rows.
+answers. The bot's own `/recruitment` application command (matching command
+name and application ID) and recruitment component namespace reach the cog's
+live recruiter/thread checks. Wizard entry points also refuse before loading
+their stored rows.
 
-An AST architecture test discovers Discord history/message/channel primitives,
-HTTP message routes, turn callers and persistent control classes across runtime
-packages. Every discovered site must match an explicit registry entry with its
-audited boundary and regression test. New or changed sites fail the test until
-reviewed; recruitment-only readers are excluded by exact module path.
+Stored routine projections use current service settings as well: MCP list/get,
+update and sandbox-tool returns, Discord routine panels and direct output
+controls, and CLI backfill/sandbox previews omit protected source or destination
+rows. Direct IDs receive the same not-found response as missing rows. Unknown
+legacy source provenance or an unresolved destination thread parent fails closed
+in configured tenants. Restarting with a new reserved parent withholds existing
+saved triggers/results; ownership or operator status does not bypass it.
+
+The AST architecture test is a review ratchet for recognized Discord
+history/message/channel primitives, HTTP message routes, turn callers,
+persistent controls and stored routine reads. Its explicit inventory records
+content projections, internal bookkeeping and non-Discord tenant readers.
+Recognized new/changed sites require a reviewed entry, boundary and regression;
+recruitment-only readers are excluded by exact module path.
+
+The ratchet is not exhaustive Python discovery or a proof of authorization.
+Bound-method assignment aliases, reflection, URLs constructed through variables
+and unlisted lower-level SDK HTTP methods can escape discovery. Guard-string
+and regression-name checks prove neither reachability nor guard order/control
+flow. Manual inventory review and behavioral privacy tests remain necessary.
 
 Gateway creates, edits, deletes and bulk deletes in enrolled threads (including
 parent starters) durably increment `seen_watermark` before Discord or model
