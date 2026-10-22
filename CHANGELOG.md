@@ -17,6 +17,11 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Close recruitment boundaries for unresolved Discord channel forms, lead intake
+  and recovery, saved channel routines, persistent wizard controls and channel
+  metadata. Require explicit source authority at the core turn driver and gate
+  controls before SDK dispatch. Record complete bulk-delete events atomically;
+  audit runtime Discord readers with a discovery-based regression registry.
 - Recruitment tracks edits and deletions after raw-data retention, fences source events
   before enrichment, and preserves backend uncertainty independently of later errors.
   Empty recruitment settings require no privacy database or HTTP lookups.

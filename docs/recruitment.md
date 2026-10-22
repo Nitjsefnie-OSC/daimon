@@ -156,11 +156,29 @@ There are no privacy database caches, task snapshots or per-message context
 filters. Parent-channel histories, older CV scans, reply targets and thread
 histories cannot be opened by the general agent because their source channel
 is unavailable. The same boundary precedes classifier collection, queued turns,
-DM moves and descriptive MCP errors.
+DM moves and descriptive MCP errors. Uncached SDK channel forms, including
+`PartialMessageable`, carry an unresolved parent and fail closed. Lead source
+imports, recovery scans and native lead panels use the same boundary. Channel
+labels, `/here` and CLI channel discovery/answerability withhold reserved places.
+
+The core driver requires explicit turn source authority, repeating the check
+for prepared, headless and checkpoint turns. Saved channel routines stop after
+a settings restart if their source or destination is reserved; refusal never
+falls back to a DM or another channel. Discord gates general interactions before
+the SDK dispatches slash commands, reconstructs persistent views or loads modal
+answers. Wizard entry points also refuse before loading their stored rows.
+
+An AST architecture test discovers Discord history/message/channel primitives,
+HTTP message routes, turn callers and persistent control classes across runtime
+packages. Every discovered site must match an explicit registry entry with its
+audited boundary and regression test. New or changed sites fail the test until
+reviewed; recruitment-only readers are excluded by exact module path.
 
 Gateway creates, edits, deletes and bulk deletes in enrolled threads (including
 parent starters) durably increment `seen_watermark` before Discord or model
-work. Reviews record `covered_watermark`; cards bind it together with the summary
+work. A bulk-delete event records all tombstones in one transaction, locking all
+affected thread rows in stable order, including parent starters. Reconciliation
+cannot cover or approve an intermediate subset of that event. Reviews record `covered_watermark`; cards bind it together with the summary
 revision. Confirmation checks equality with the current counter in the same
 transaction that inserts the approved outbox. Pending enrichment blocks delivery.
 Known own-card IDs and own-author events do not enter the evidence ledger.

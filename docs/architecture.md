@@ -2536,3 +2536,20 @@ enrichment. Review cards bind revision and covered watermark; confirmation
 atomically checks the current counter while inserting its outbox intent. Own
 controls never become candidate evidence, and unknown-author bot events are
 resolved without changing an otherwise identical review.
+
+
+Every provider driver call now requires explicit source authority; prepared,
+headless routine and workspace-checkpoint paths carry the same recruitment
+settings and source placement. The scheduler refuses saved routines before
+using trigger content, and delivery refuses reserved destinations without any
+fallback. Independent lead HTTP routes and native panels share this boundary.
+Unresolved SDK channel forms fail closed, including uncached partial channels.
+General interactions are gated before SDK command/view/modal dispatch; wizard
+reconstruction additionally refuses before querying its row. Metadata listings
+and channel labels omit reserved places. An AST-based reader registry ratchets
+all runtime Discord primitives, turn callers and persistent controls against
+named boundaries and committed regressions.
+
+Bulk deletion locks every affected recruitment thread in stable order and
+records all source tombstones in one transaction. Its event watermark cannot be
+covered between deleted message IDs, including parent-channel starter events.

@@ -805,3 +805,9 @@ This is a core workflow with explicit recruiter approval of every backend write,
 not an unattended agent routine. Its retention sweep runs even when recruitment
 is disabled; failed or inaccessible threads retain opaque recovery status and
 never deliver candidate data elsewhere.
+
+
+Configured recruitment channels and their threads cannot host general routines.
+Creation refuses reserved sources and destinations. Existing channel routines
+stop at fire after the coordinated settings restart, before using their stored
+trigger, and delivery never redirects their result to a DM or another channel.
