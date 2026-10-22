@@ -16,13 +16,13 @@ from datetime import UTC, datetime
 from typing import cast
 
 from anthropic import AsyncAnthropic
-from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
 from daimon.testing.turn_fakes import (
     BlockForever,
     FakeAnthropic,
     RecordingLifecycle,
     YieldEvent,
+    run_turn_on_leg,
 )
 
 from .conftest import make_end_turn, make_status_idle
@@ -65,9 +65,9 @@ async def test_cancel_during_stream_open_interrupts_before_any_event() -> None:
     cancel = asyncio.Event()
     original_stream = fa.beta.sessions.events.stream
 
-    async def _slow_stream(*, session_id: str, timeout: object = None):
+    async def _slow_stream(*, session_id: str, timeout: object = None, **kwargs: object):
         await asyncio.sleep(0.05)
-        return await original_stream(session_id=session_id, timeout=timeout)
+        return await original_stream(session_id=session_id, timeout=timeout, **kwargs)
 
     fa.beta.sessions.events.stream = _slow_stream  # type: ignore[assignment]
 
@@ -78,7 +78,7 @@ async def test_cancel_during_stream_open_interrupts_before_any_event() -> None:
     lc = RecordingLifecycle()
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        final = await run_turn(
+        final = await run_turn_on_leg(
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -123,7 +123,7 @@ async def test_cancel_during_send_initial_interrupts_and_closes_the_opened_strea
     lc = RecordingLifecycle()
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        final = await run_turn(
+        final = await run_turn_on_leg(
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -156,7 +156,7 @@ async def test_cancel_already_set_before_run_turn_stays_pre_stream() -> None:
     cancel.set()
 
     lc = RecordingLifecycle()
-    final = await run_turn(
+    final = await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -185,9 +185,9 @@ async def test_cancel_during_stream_open_leaves_no_waiter_task_pending() -> None
     cancel = asyncio.Event()
     original_stream = fa.beta.sessions.events.stream
 
-    async def _slow_stream(*, session_id: str, timeout: object = None):
+    async def _slow_stream(*, session_id: str, timeout: object = None, **kwargs: object):
         await asyncio.sleep(0.05)
-        return await original_stream(session_id=session_id, timeout=timeout)
+        return await original_stream(session_id=session_id, timeout=timeout, **kwargs)
 
     fa.beta.sessions.events.stream = _slow_stream  # type: ignore[assignment]
 
@@ -198,7 +198,7 @@ async def test_cancel_during_stream_open_leaves_no_waiter_task_pending() -> None
     lc = RecordingLifecycle()
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        await run_turn(
+        await run_turn_on_leg(
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -233,7 +233,7 @@ async def test_interrupt_mid_consume_still_posts_user_interrupt_regression() -> 
 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        final = await run_turn(
+        final = await run_turn_on_leg(
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
