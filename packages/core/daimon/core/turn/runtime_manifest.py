@@ -1935,11 +1935,13 @@ def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
     if not controls:
         return target
     extension = controls[0]
-    if target.model.provider == ceiling.model.provider:
+    if (target.model.provider, target.model.id) == (ceiling.model.provider, ceiling.model.id):
         retained = target.model_copy(update={"extensions": controls})
         if _source_extension_obligation(extension, native_target=retained) is not None:
             raise ValueError("native worker model does not represent the granted controls")
         return retained
+    # Another model, even of the same provider, may not accept the root's controls
+    # (e.g. its effort level); the worker runs at its model's defaults, declared.
     if "model_controls" not in target.declared_drops:
         raise ValueError("native model controls require an explicit declared loss")
     return target.model_copy(update={"extensions": None})
@@ -2017,6 +2019,11 @@ def classify_source_obligations(
                         missing.add("tools")
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider
+            # A fleet worker on another model may declare the loss of the root's
+            # controls exactly as a foreign-provider worker does.
+            foreign_target = foreign_target or (
+                worker_ceiling and target is not None and target.model.id != spec.model.id
+            )
             obligation = _source_extension_obligation(
                 extension,
                 native_target=target if not foreign_target else None,

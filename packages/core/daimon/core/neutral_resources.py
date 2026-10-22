@@ -16,7 +16,7 @@ from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from urllib.parse import urlsplit
@@ -88,6 +88,7 @@ from pydantic import Field, JsonValue, TypeAdapter, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.fleet import FleetRun, FleetWorker
     from daimon.core.turn.admission import AdmissionGrant
     from daimon.core.turn.persistence import TurnPersistence
 
@@ -854,7 +855,9 @@ WorkerField = Literal[
     "native_budget_usd",
     "declared_drops",
 ]
-WorkerReason = DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale"]
+WorkerReason = (
+    DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale", "exhausted"]
+)
 
 
 class WorkerSpecRefused(ValueError):
@@ -1052,6 +1055,92 @@ class ResolvedWorkerSpec:
         return self.spec.declared_drops
 
 
+def task_worker_spec(
+    parent: WorkerPermissions, *, role: str, task: str, model: str | None = None
+) -> AgentSpec:
+    """A plain-language worker: one granted model, with the task as its instructions.
+
+    The worker carries no tools or skills. A worker on another model declares the
+    loss of the root's model controls (e.g. effort), which that model may not accept;
+    a foreign-provider worker also declares the root capabilities it cannot represent.
+    The resolver still checks every ceiling.
+    """
+    root = parent.spec.model
+    if model is None or model == root.id:
+        choice = ModelRef(provider=root.provider, id=root.id)
+    else:
+        matches = [granted for granted in parent.models if granted.id == model]
+        if len(matches) != 1:
+            raise WorkerSpecRefused("backend", "not_subset")
+        choice = matches[0]
+    if not task.strip():
+        raise WorkerSpecRefused("system", "unbound")
+    drops: set[DeclaredDrop] = {"skills", "tools", *parent.spec.declared_drops}
+    if choice.provider != root.provider:
+        drops |= {"mcp", "memory", "sandbox"}
+    if choice.id != root.id and parent.spec.extensions:
+        drops.add("model_controls")
+    return AgentSpec(name=role, model=choice, system=task, declared_drops=tuple(drops))
+
+
+def default_worker_limits(
+    ceiling: WorkerLimits,
+    run: FleetRun | None,
+    workers: tuple[FleetWorker, ...],
+    *,
+    provider: Provider,
+    budget_usd: Decimal | None = None,
+    deadline: datetime | None = None,
+    max_turns: int | None = None,
+    max_input_tokens: int | None = None,
+    max_output_tokens: int | None = None,
+) -> WorkerLimits:
+    """Fill omitted worker limits from the frozen root, so a model need not guess them.
+
+    The deadline defaults to (and is never later than) the root's frozen deadline. The
+    budget defaults to an even share, per remaining worker slot, of what the run and
+    the provider line have left. Slots bound how many workers can be admitted, so
+    parallel spawns reading the same snapshot never add up past either cap. Supplied
+    budgets and every ceiling are still checked by the resolver and financial admission.
+    """
+    latest = ceiling.deadline
+    if budget_usd is None:
+        if run is None:
+            raise WorkerSpecRefused("budget", "unbound")
+        slots = run.max_workers - len(workers)
+        if slots <= 0:
+            raise WorkerSpecRefused("budget", "exhausted")
+
+        def held(provider_only: bool) -> Decimal:
+            return sum(
+                (
+                    max(w.budget_usd, w.reserved_usd)
+                    for w in workers
+                    if not provider_only or w.backend == provider
+                ),
+                Decimal(0),
+            )
+
+        share = min(
+            (run.total_budget_usd - held(False)) / slots,
+            ceiling.for_provider(provider).budget_usd,
+        )
+        if ceiling.provider_limits_usd is not None:
+            line = ceiling.provider_limits_usd.get(provider, Decimal(0))
+            share = min(share, (line - held(True)) / slots)
+        budget_usd = max(share, Decimal(0)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        if budget_usd <= 0:
+            # Refuse before admission, so an exhausted run never spends a worker slot.
+            raise WorkerSpecRefused("budget", "exhausted")
+    return WorkerLimits(
+        budget_usd=budget_usd,
+        deadline=latest if deadline is None else min(deadline, latest),
+        max_turns=1 if max_turns is None else max_turns,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+    )
+
+
 def _worker_subset(
     field: WorkerField, requested: tuple[Contract, ...], granted: tuple[Contract, ...]
 ) -> None:
@@ -1208,6 +1297,44 @@ def _worker_environment(requested: EnvironmentSpec | None, granted: EnvironmentS
         raise WorkerSpecRefused("sandbox", "not_subset")
 
 
+def _with_root_model(
+    grant: AgentFleetGrant,
+    root: ModelRef,
+    *,
+    policy: TenantAccessPolicy,
+    fleet: FleetFacts,
+) -> tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]]:
+    """The root's own model is implicitly granted; every other ceiling still applies.
+
+    A granted backend for the root's provider carries it as is. Otherwise only the
+    provider's default per-caller selection is added, and only when tenant policy
+    already enables it. Provider budget lines, worker counts and deadlines are unchanged.
+    """
+    from daimon.core.channel_backend import check_backend
+    from mux.profiles import backend_selection
+
+    backends, models = grant.backends, grant.models
+    model = ModelRef(provider=root.provider, id=root.id)
+    if model in models:
+        return backends, models
+    if any(
+        backend.backend == model.provider and backend.model in (None, model.id)
+        for backend in backends
+    ):
+        return backends, (*models, model)
+    try:
+        selection = backend_selection(model.provider)
+        if selection.thread_mode != "per_caller" or selection.model not in (None, model.id):
+            return backends, models
+        check_backend(
+            ConfigRevision.create(fleet.root.channel, 1, selection),
+            enabled_backends=policy.enabled_backends,
+        )
+    except (DaimonError, InvalidConfig):
+        return backends, models
+    return (*backends, selection), (*models, model)
+
+
 def fleet_root_permissions(
     source: BackendAgent,
     admission: AdmissionGrant,
@@ -1279,6 +1406,7 @@ def fleet_root_permissions(
     duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
     deadline = min(grant.expires_at, now + timedelta(seconds=duration))
     limits = grant.limits.model_copy(update={"deadline": deadline})
+    backend_grants, models = _with_root_model(grant, spec.model, policy=policy, fleet=fleet)
     return freeze_root_permissions(
         WorkerPermissions(
             fleet=fleet,
@@ -1286,8 +1414,8 @@ def fleet_root_permissions(
             agent=admission.agent,
             spec=spec,
             base_system=spec.system or "",
-            backend_grants=grant.backends,
-            models=grant.models,
+            backend_grants=backend_grants,
+            models=models,
             limits=limits,
             resources=resources,
             environment=environment.spec,
