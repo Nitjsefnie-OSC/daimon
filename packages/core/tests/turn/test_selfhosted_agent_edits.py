@@ -27,7 +27,7 @@ from mux.state.lease import LeaseBusy, Slot
 from mux.state.memory import MemoryStateStore
 
 from .conformance_support import ACCOUNT, TENANT
-from .test_selfhosted_host import BASE, PROFILE, REVISION, Wire, composed  # noqa: F401
+from .test_selfhosted_host import BASE, PROFILE, REVISION, Wire, composed, pinned_leg  # noqa: F401
 
 NEW_MODEL = "gpt-6-terra"
 NEW_REVISION = ConfigRevision.create(
