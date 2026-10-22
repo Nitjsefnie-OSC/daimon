@@ -48,6 +48,7 @@ from mux.drivers.gemini.mcp_auth import (
     authenticated_template,
     compile_mcp,
     model_request,
+    server_names,
     validate_intent,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
@@ -344,7 +345,13 @@ class Base:
                     now=now(),
                 )
                 self._append(record, (usage_event,))
-            normalized = saved_events(raw, record.session.ref, root=root, now=now())
+            normalized = saved_events(
+                raw,
+                record.session.ref,
+                root=root,
+                now=now(),
+                server_names=record.mcp_server_names,
+            )
             # A requires_action interaction and its result continuation share
             # one root. Only a terminal root snapshot completes it.
             self._append(record, normalized)
@@ -685,6 +692,7 @@ class GeminiSessions(Base):
                 agent.spec.model,
                 request,
                 max_input_tokens=self._max_input_tokens,
+                mcp_server_names=server_names(agent.spec.mcp_servers or ()),
             )
             records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
             return session
