@@ -172,6 +172,13 @@ class GeminiPlan(BaseModel):
             raise ValueError("skill deployment receipt fields must be exact")
         return cast(object, value)
 
+    @field_validator("source_agent_id", "source_agent_version", mode="before")
+    @classmethod
+    def _any_source(cls, value: object) -> object:
+        # "*" (any granted agent of the tenant, at its live version) is a template:
+        # the same as naming no source.
+        return None if value == "*" else value
+
     @model_validator(mode="after")
     def _configuration_authorization(self) -> GeminiPlan:
         if self.config_digest is None and self.configuration_grant is None:

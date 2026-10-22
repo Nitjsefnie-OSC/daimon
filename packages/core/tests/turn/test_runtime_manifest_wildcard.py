@@ -322,3 +322,132 @@ def test_fleet_worker_rows_still_resolve_next_to_channel_and_template_rows(
     plan = select_runtime_manifest(request, GeminiPlan)
     assert plan.worker_materialization and plan.agent_name == "daimon-fleet"
     assert validate_counterpart_request(plan, request, worker_materialization=True) == revision
+
+
+def _worker_request(tenant, channel, native_agent, version, *, worker=True):
+    from uuid import UUID
+
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+    from mux.contracts.ids import ChannelRef
+
+    revision = ConfigRevision.create(
+        ChannelRef(tenant_id=tenant, platform="discord", channel_id=channel),
+        3,
+        resolve_default(
+            BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
+        ),
+    )
+    account = "7c1e0e3a-84d9-4102-9164-40027e27be37"
+    return revision, SimpleNamespace(
+        admission=SimpleNamespace(
+            backend_revision=revision,
+            backend_revision_origin="agent",
+            account_id=UUID(account),
+            agent=SimpleNamespace(id=native_agent, version=version),
+        ),
+        scope=SimpleNamespace(tenant_id=tenant, account_id=account),
+        deps=SimpleNamespace(channel_backends=True, agent_backends=True, turn_path="mux"),
+        tenant_id=UUID(tenant),
+        session_account_id=UUID(account),
+        platform="discord",
+        worker=object() if worker else None,
+        before_native=object() if worker else None,
+    )
+
+
+def _gemini_worker_row(tenant, **changes):
+    row = {
+        "profile": "gemini.inline_reuse",
+        "tenant_id": tenant,
+        "platform": "*",
+        "channel_id": "*",
+        "account_id": "*",
+        "source_agent_id": "*",
+        "source_agent_version": "*",
+        "worker_materialization": True,
+        "configuration_grant": {
+            "profiles": ["gemini.inline_reuse"],
+            "models": ["gemini-3.8-flash"],
+            "thread_modes": ["per_caller"],
+            "requires": {},
+        },
+        "project": "gen-lang-client",
+        "api_key_env": "DAIMON_CHANNEL_GEMINI_KEY",
+        "storage_backend": "postgres",
+        "hold_usd": "0.25",
+        "cap_usd": "0.50",
+        "agent_name": "any-worker",
+        "tools": [],
+        "environment": {"name": "remote"},
+    }
+    return row | changes
+
+
+TENANT_A = "449f4dc5-5990-52c0-96e0-45a4ab3bf0e4"
+
+
+def test_a_worker_template_serves_any_agent_version_and_channel_of_its_tenant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.turn.gemini_deployment import GeminiPlan
+    from daimon.core.turn.runtime_manifest import validate_counterpart_request
+
+    write_manifest(tmp_path, monkeypatch, [_gemini_worker_row(TENANT_A)])
+    for channel, native_agent, version in (
+        ("1562712749321093122", "agent_root", 1),
+        ("999000111", "agent_root", 7),  # the agent was edited: a new live version
+        # A worker running AS another granted agent of the tenant (agent-as-worker).
+        ("999000111", "agent_other", 2),
+    ):
+        revision, request = _worker_request(TENANT_A, channel, native_agent, version)
+        plan = select_runtime_manifest(request, GeminiPlan)
+        assert plan.worker_materialization and plan.source_agent_id is None
+        assert (plan.channel_id, plan.account_id) == (channel, request.scope.account_id)
+        assert validate_counterpart_request(plan, request, worker_materialization=True) == revision
+
+
+def test_a_worker_template_never_serves_another_tenant_or_a_channel_turn(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.turn.gemini_deployment import GeminiPlan
+
+    write_manifest(tmp_path, monkeypatch, [_gemini_worker_row(TENANT_A)])
+    _, foreign = _worker_request("00000000-0000-0000-0000-00000000000b", "c", "agent_root", 1)
+    with pytest.raises(AdmissionDenied):
+        select_runtime_manifest(foreign, GeminiPlan)
+    _, channel_turn = _worker_request(TENANT_A, "c", "agent_root", 1, worker=False)
+    channel_turn.admission.backend_revision_origin = "channel"
+    with pytest.raises(AdmissionDenied):
+        select_runtime_manifest(channel_turn, GeminiPlan)
+
+
+def test_a_pinned_worker_row_still_wins_over_the_template_in_its_channel(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.turn.gemini_deployment import GeminiPlan
+
+    pinned = _gemini_worker_row(
+        TENANT_A,
+        platform="discord",
+        channel_id="1562712749321093122",
+        source_agent_id="00000000-0000-0000-0000-0000000000f1",
+        source_agent_version=1,
+        agent_name="pinned",
+    )
+    write_manifest(tmp_path, monkeypatch, [_gemini_worker_row(TENANT_A), pinned])
+    _, here = _worker_request(TENANT_A, "1562712749321093122", "agent_root", 1)
+    assert select_runtime_manifest(here, GeminiPlan).agent_name == "pinned"
+    _, elsewhere = _worker_request(TENANT_A, "999000111", "agent_root", 1)
+    assert select_runtime_manifest(elsewhere, GeminiPlan).agent_name == "any-worker"
+
+
+@pytest.mark.parametrize("half", [{"source_agent_id": None}, {"source_agent_version": None}])
+def test_a_worker_row_pins_both_or_neither_source_field(half) -> None:
+    from daimon.core.turn.gemini_deployment import GeminiPlan
+    from pydantic import ValidationError
+
+    row = _gemini_worker_row(
+        TENANT_A, source_agent_id="00000000-0000-0000-0000-0000000000f1", source_agent_version=1
+    )
+    with pytest.raises(ValidationError):
+        GeminiPlan.model_validate(row | half)

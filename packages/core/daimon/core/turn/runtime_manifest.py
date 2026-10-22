@@ -2602,9 +2602,10 @@ def validate_counterpart_pins(
             raise ValueError("root materialization takes its identity from the admitted agent")
         return
     if worker_materialization:
+        # A worker template names no source (both pins absent): it serves any
+        # granted agent of its tenant, at that agent's live version.
         if (
-            plan.source_agent_id is None
-            or plan.source_agent_version is None
+            (plan.source_agent_id is None) != (plan.source_agent_version is None)
             or plan.counterpart_catalog_id is not None
             or plan.counterpart_catalog_revision is not None
             or plan.agent_id is not None
@@ -2664,7 +2665,11 @@ def _rows_for(
     def origin_eligible(row: dict[str, JsonValue]) -> bool:
         # An agent's turn runs its own source (pinned, or a template that publishes
         # the admitted version); a channel's turn runs a fixed plan with no source.
-        sourced = row.get("root_materialization") is True or row.get("source_agent_id") is not None
+        sourced = (
+            row.get("root_materialization") is True
+            or row.get("worker_materialization") is True
+            or row.get("source_agent_id") is not None
+        )
         return sourced == agent_origin
 
     return [
@@ -2792,6 +2797,11 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         raise AdmissionDenied(reason="backend_unsupported") from None
 
 
+def _worker_template(plan: CounterpartPlan) -> bool:
+    """A worker row that names no source: identity comes from the request's admitted agent."""
+    return plan.worker_materialization and plan.source_agent_id is None
+
+
 def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
     """The one catalog entry a template row's counterpart lives at for this agent version.
 
@@ -2865,9 +2875,16 @@ def validate_counterpart_request(
         != (plan.tenant_id, plan.platform, plan.channel_id)
         or request.platform != plan.platform
         or revision.profile != plan.profile
-        or plan.source_agent_id
-        != derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
-        or plan.source_agent_version != request.admission.agent.version
+        or (
+            not _worker_template(plan)
+            and (
+                plan.source_agent_id
+                != derive_agent_uuid(
+                    tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+                )
+                or plan.source_agent_version != request.admission.agent.version
+            )
+        )
         or (worker_materialization and (request.worker is None or request.before_native is None))
         or (
             not worker_materialization
@@ -3030,9 +3047,11 @@ async def read_counterpart(
     )
     from daimon.core.ma_identity import derive_agent_uuid
 
+    # Templates (root or worker) bind to the request's own admitted source agent:
+    # the agent this turn runs AS, which for a worker need not be the root.
     expected_source = (
         derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
-        if root
+        if root or _worker_template(plan)
         else plan.source_agent_id
     )
     if (

@@ -54,6 +54,7 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     ValidationError,
+    field_validator,
     model_validator,
 )
 
@@ -93,6 +94,13 @@ class OpenAIDeployment(BaseModel):
     counterpart_catalog_revision: Annotated[int, Field(gt=0, strict=True)] | None = None
     source_capabilities: SourceCapabilities | None = None
     mcp_credential_file: Path | None = Field(default=None, repr=False)
+
+    @field_validator("source_agent_id", "source_agent_version", mode="before")
+    @classmethod
+    def _any_source(cls, value: object) -> object:
+        # "*" (any granted agent of the tenant, at its live version) is a template:
+        # the same as naming no source.
+        return None if value == "*" else value
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> OpenAIDeployment:

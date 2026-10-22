@@ -1498,7 +1498,8 @@ def test_manifest_hold_is_the_row_runtime_selection_would_pick(tmp_path, monkeyp
         }
         return base | changes
 
-    channel_only = {"source_agent_id": None, "source_agent_version": None}
+    unsourced = {"source_agent_id": None, "source_agent_version": None}
+    channel_only = {**unsourced, "worker_materialization": False}
 
     path = tmp_path / "runtime.json"
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
@@ -1519,6 +1520,12 @@ def test_manifest_hold_is_the_row_runtime_selection_would_pick(tmp_path, monkeyp
     # The channel's own worker row wins; a channel's fixed plan never serves a worker.
     assert hold("fleet-test") == Decimal("0.49")
     assert hold("elsewhere") is None
+    # A tenant-wide worker template serves workers in every channel; the pinned row still wins.
+    path.write_text(
+        json.dumps([row(), row(platform="*", channel_id="*", hold_usd="0.25", **unsourced)])
+    )
+    assert hold("fleet-test") == Decimal("0.49")
+    assert hold("elsewhere") == Decimal("0.25")
     path.write_text(json.dumps([row(), row(platform="*", channel_id="*", hold_usd="0.25")]))
     assert hold("fleet-test") == Decimal("0.49")
     assert hold("elsewhere") == Decimal("0.25")
