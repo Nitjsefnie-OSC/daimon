@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import copy
+import json
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from typing import Protocol, cast, runtime_checkable
+from typing import Any, Protocol, cast, runtime_checkable
 
 import httpx
 from google import genai
@@ -78,12 +80,45 @@ def storage_request_token(request: Mapping[str, JsonValue]) -> RedactedCredentia
     return None
 
 
+def scrub_mount_echo(value: Object, tokens: set[RedactedCredential]) -> Object:
+    """Remove the echo of our own storage-mount transform, and nothing else.
+
+    A completed interaction echoes the request's environment, including the
+    mount rule's Authorization transform. Only that exact location is cleaned:
+    `environment.network.allowlist[i].transform` on the interaction itself or
+    on a stream event's `interaction`, for the storage domain, equal to a
+    transform this transport dispatched. Any other transform refuses.
+    """
+    result = copy.deepcopy(value)
+    ours = [{"Authorization": "Bearer " + token} for token in tokens]
+    nested = result.get("interaction")
+    for owner in (result, nested) if isinstance(nested, dict) else (result,):
+        environment = owner.get("environment")
+        network = environment.get("network") if isinstance(environment, dict) else None
+        rules = network.get("allowlist") if isinstance(network, dict) else None
+        for rule in rules if isinstance(rules, list) else []:
+            if not isinstance(rule, dict) or "transform" not in rule:
+                continue
+            if rule.get("domain") != "storage.googleapis.com" or rule["transform"] not in ours:
+                raise ProviderError("permission", retryable=False, native_code="gcs_transform_echo")
+            del rule["transform"]
+    return result
+
+
 def checked_storage_response(
     value: Object, *, protected: bool, tokens: set[RedactedCredential] | None = None
 ) -> Object:
-    if protected and network_transform_present(value):
+    """Scrub our own echoed mount transform, then fail closed on any other trace."""
+    if not protected:
+        return value
+    known = tokens or set()
+    value = scrub_mount_echo(value, known)
+    if network_transform_present(value):
         raise ProviderError("permission", retryable=False, native_code="gcs_transform_echo")
-    if protected and tokens and any(contains_secret(value, token) for token in tokens):
+    # The token anywhere else (model output, a tool result, another field) is a
+    # leak: check decoded values and the re-encoded bytes of the scrubbed payload.
+    encoded = json.dumps(value).encode()
+    if any(contains_secret(value, t) or t.encode() in encoded for t in known):
         raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
     return value
 
@@ -204,14 +239,25 @@ class SDKTransport:
         self._files = client.aio.files
         self._models = client.aio.models
 
-    def _check_storage_response(self, response: httpx.Response) -> None:
-        # Inspect bytes before JSON/SDK parsing can render an unexpected value.
-        if any(token.encode() in response.content for token in self._storage_tokens):
-            raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
-        checked_storage_response(
-            object_value(cast(JsonValue, response.json())),
-            protected=True,
-            tokens=self._storage_tokens,
+    def _protected_interaction(self, response: httpx.Response) -> Object:
+        """A protected Interaction, scrubbed before the SDK parses or renders it.
+
+        Plain JSON decoding renders nothing; SDK models (whose serializer
+        warnings can quote values) only ever see the scrubbed payload.
+        """
+        from google.genai._interactions.types import Interaction
+
+        try:
+            raw = object_value(cast(JsonValue, json.loads(response.content)))
+        except ValueError:
+            raise ProviderError(
+                "upstream", retryable=False, native_code="malformed_interaction"
+            ) from None
+        clean = checked_storage_response(raw, protected=True, tokens=self._storage_tokens)
+        # The same loose construction `response.parse()` performs, on clean data.
+        parsed = cast(Any, Interaction).construct(**clean)
+        return object_value(
+            cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True, warnings=False))
         )
 
     async def count_input_tokens(self, request: Mapping[str, JsonValue]) -> int:
@@ -304,7 +350,7 @@ class SDKTransport:
                 )
             )
         if protected:
-            self._check_storage_response(response.http_response)
+            return self._protected_interaction(response.http_response)
         parsed = await response.parse()
         return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
@@ -316,7 +362,7 @@ class SDKTransport:
             )
         )
         if self._protect_storage_credentials or self._storage_tokens:
-            self._check_storage_response(response.http_response)
+            return self._protected_interaction(response.http_response)
         parsed = await response.parse()
         return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
@@ -328,7 +374,7 @@ class SDKTransport:
             )
         )
         if self._protect_storage_credentials or self._storage_tokens:
-            self._check_storage_response(response.http_response)
+            return self._protected_interaction(response.http_response)
         parsed = await response.parse()
         return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
