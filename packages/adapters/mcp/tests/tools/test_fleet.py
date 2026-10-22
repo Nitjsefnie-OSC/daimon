@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
-from unittest.mock import AsyncMock, Mock, create_autospec
+from unittest.mock import ANY, AsyncMock, Mock, create_autospec
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -683,6 +683,8 @@ async def test_installed_bridge_requires_the_exact_active_origin(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=-1 if fault == "expired" else 10),
             now=now,
         )
@@ -750,6 +752,8 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -858,7 +862,7 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
 @pytest.mark.parametrize("caps", [None, (262144, 65536)])
 async def test_public_token_caps_reach_existing_worker_limits(tool, caps) -> None:
     root = host_parent()
-    orchestrator = create_autospec(FleetOrchestrator, instance=True)
+    orchestrator = fleet_orchestrator_double()
     orchestrator.spawn.return_value = {"run_id": str(RUN), "status": "pending"}
 
     async def load(caller):
@@ -970,3 +974,246 @@ async def test_host_bridge_refuses_root_mismatch_or_nested_worker_before_store_r
         with pytest.raises(ToolError, match="caller_root_mismatch|worker_depth_exceeded"):
             await client.call_tool("fleet_status", {"run_id": str(RUN)})
     assert owner.mock_calls == []
+
+
+def fleet_orchestrator_double() -> Mock:
+    """Mocked owner operations; spawn limits still run the real defaulting code."""
+    orchestrator = create_autospec(FleetOrchestrator, instance=True)
+    orchestrator.admitted_worker.return_value = None
+
+    async def spawn_limits(*args: Any, **kwargs: Any) -> WorkerLimits:
+        return await FleetOrchestrator.spawn_limits(orchestrator, *args, **kwargs)
+
+    orchestrator.spawn_limits.side_effect = spawn_limits
+    return orchestrator
+
+
+def plain_root() -> WorkerPermissions:
+    root = host_parent()
+    luna = ModelRef(provider="openai", id="gpt-6-luna")
+    return replace(
+        root,
+        backend_grants=(*root.backend_grants, backend_selection("openai")),
+        models=(*root.models, luna),
+    )
+
+
+def plain_bridge(root: WorkerPermissions) -> tuple[HostFleetToolService, Mock]:
+    orchestrator = fleet_orchestrator_double()
+    orchestrator.spawn.return_value = {"run_id": str(RUN), "status": "pending"}
+    orchestrator.read_snapshot.return_value = host_owner().read_run.return_value
+    orchestrator.collect.return_value = {"run_id": str(RUN), "status": "waiting"}
+
+    async def load(caller):
+        assert caller is AUTH
+        return root, TenantAccessPolicy(enabled_backends=("anthropic", "openai"))
+
+    return HostFleetToolService(orchestrator, load), orchestrator
+
+
+@pytest.mark.parametrize("model", [None, "gpt-6-luna"])
+async def test_fleet_r3_r4_plain_spawn_needs_only_role_task_and_model(model) -> None:
+    """r3 invented a run_id and r4 a too-late deadline; neither is needed now."""
+    root = plain_root()
+    bridge, orchestrator = plain_bridge(root)
+    request = {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+    if model is not None:
+        request["model"] = model
+    async with Client(registered(bridge)) as client:
+        await client.call_tool("fleet_spawn", request)
+        await client.call_tool(
+            "fleet_spawn",
+            {**request, "deadline": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
+        )
+    first, later = orchestrator.spawn.await_args_list
+    kwargs = first.kwargs
+    assert kwargs["run_id"] is None and kwargs["backend"] is None and kwargs["clone"] is None
+    agent = kwargs["agent"]
+    assert agent.model == (root.spec.model if model is None else root.models[1])
+    assert agent.system == "Compare X and Y."
+    assert agent.declared_drops == (
+        ("skills", "tools") if model is None else ("mcp", "memory", "sandbox", "skills", "tools")
+    )
+    limits = kwargs["limits"]
+    # Run budget $1 over 3 worker slots; the run's deadline; one turn.
+    assert limits.budget_usd == Decimal("0.33") and limits.max_turns == 1
+    assert limits.deadline == root.limits.deadline
+    assert later.kwargs["limits"].deadline == root.limits.deadline
+    orchestrator.read_snapshot.assert_awaited_with(root, ANY, RUN)
+
+
+async def test_plain_spawn_refuses_ungranted_models_and_mixed_specs() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    request = {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+    async with Client(registered(bridge)) as client:
+        with pytest.raises(ToolError, match="backend: not_subset"):
+            await client.call_tool("fleet_spawn", {**request, "model": "gemini-3.8-pro"})
+        with pytest.raises(ToolError, match="exactly one"):
+            await client.call_tool("fleet_spawn", {**request, **arguments("fleet_spawn")})
+        with pytest.raises(ToolError, match="goes with a task"):
+            await client.call_tool(
+                "fleet_spawn", {**arguments("fleet_spawn"), "model": "gpt-6-luna"}
+            )
+    orchestrator.spawn.assert_not_awaited()
+
+
+async def test_explicit_budget_skips_the_run_read_and_reaches_the_resolver() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {"operation_key": "W1", "role": "W1", "task": "Go.", "budget_usd": "0.90"},
+        )
+    assert orchestrator.spawn.await_args.kwargs["limits"].budget_usd == Decimal("0.90")
+    orchestrator.read_snapshot.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tool", ["fleet_status", "fleet_collect"])
+async def test_status_and_collect_default_to_this_turns_run(tool) -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    orchestrator.status.return_value = {"run_id": str(RUN), "status": "running"}
+    async with Client(registered(bridge)) as client:
+        result = await client.call_tool(tool, {})
+    assert result.data["run_id"] == str(RUN)
+    assert getattr(orchestrator, tool.removeprefix("fleet_")).await_args.kwargs["run_id"] == RUN
+
+
+async def test_plain_spawn_with_no_budget_left_refuses_before_admission() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    run, _ = orchestrator.read_snapshot.return_value
+    orchestrator.read_snapshot.return_value = (replace(run, total_budget_usd=Decimal("0.02")), ())
+    async with Client(registered(bridge)) as client:
+        with pytest.raises(ToolError, match="budget: exhausted"):
+            await client.call_tool(
+                "fleet_spawn", {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+            )
+    orchestrator.spawn.assert_not_awaited()
+
+
+async def test_planned_workers_hint_reaches_the_default_budget() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {"operation_key": "W1", "role": "W1", "task": "Compare X and Y.", "planned_workers": 2},
+        )
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "fleet_spawn",
+                {"operation_key": "W2", "role": "W2", "task": "Go.", "planned_workers": 0},
+            )
+    # Run budget $1 shared by the 2 planned workers instead of 3 slots.
+    assert orchestrator.spawn.await_args.kwargs["limits"].budget_usd == Decimal("0.50")
+    orchestrator.spawn.assert_awaited_once()
+
+
+async def test_fleet_r7_plain_gemini_worker_gets_the_gemini_runtime_bound() -> None:
+    root = plain_root()
+    flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
+    root = replace(
+        root,
+        backend_grants=(
+            *root.backend_grants,
+            backend_selection("gemini").model_copy(update={"model": flash.id}),
+        ),
+        models=(*root.models, flash),
+    )
+    bridge, orchestrator = plain_bridge(root)
+    before = datetime.now(UTC)
+    async with Client(registered(bridge)) as client:
+        for model in ("gemini-3.8-flash", "gpt-6-luna"):
+            await client.call_tool(
+                "fleet_spawn",
+                {"operation_key": model, "role": "W", "task": "Compare.", "model": model},
+            )
+    gemini, luna = (call.kwargs["limits"] for call in orchestrator.spawn.await_args_list)
+    assert before + timedelta(seconds=120) <= gemini.deadline
+    assert gemini.deadline <= datetime.now(UTC) + timedelta(seconds=120)
+    assert luna.deadline == root.limits.deadline
+
+
+async def test_plain_spawn_retry_reuses_the_admitted_workers_limits() -> None:
+    from types import SimpleNamespace
+
+    root = plain_root()
+    bridge, orchestrator = plain_bridge(root)
+    stored = SimpleNamespace(
+        run_id=RUN,
+        budget_usd=Decimal("0.330000"),
+        deadline_at=datetime.now(UTC) + timedelta(seconds=40),
+    )
+    orchestrator.admitted_worker.return_value = stored
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn", {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+        )
+    limits = orchestrator.spawn.await_args.kwargs["limits"]
+    assert (limits.budget_usd, limits.deadline) == (Decimal("0.33"), stored.deadline_at)
+    orchestrator.read_snapshot.assert_not_awaited()
+
+
+async def test_fleet_r9_token_limits_are_filled_only_when_the_caller_gives_none() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    async with Client(registered(bridge)) as client:
+        await client.call_tool("fleet_spawn", {"operation_key": "W1", "role": "W", "task": "Go."})
+        await client.call_tool(
+            "fleet_spawn",
+            {
+                "operation_key": "W2",
+                "role": "W",
+                "task": "Go.",
+                "max_input_tokens": 262144,
+                "max_output_tokens": 65536,
+            },
+        )
+    plain, explicit = orchestrator.spawn.await_args_list
+    assert plain.kwargs["fill_token_limits"] is True
+    assert explicit.kwargs["fill_token_limits"] is False
+    assert explicit.kwargs["limits"].max_input_tokens == 262144
+
+
+async def test_planned_models_give_each_provider_its_own_share() -> None:
+    root = plain_root()
+    root = replace(
+        root,
+        limits=root.limits.model_copy(
+            update={"provider_limits_usd": {"anthropic": Decimal("0.5"), "openai": Decimal("0.5")}}
+        ),
+    )
+    bridge, orchestrator = plain_bridge(root)
+    plan = ["gpt-6-luna", "claude-haiku-5-5"]
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {
+                "operation_key": "W1",
+                "role": "W1",
+                "task": "Compare X and Y.",
+                "model": "gpt-6-luna",
+                "planned_models": plan,
+            },
+        )
+        with pytest.raises(ToolError, match="does not allow: gemini-3.8-pro"):
+            await client.call_tool(
+                "fleet_spawn",
+                {
+                    "operation_key": "W2",
+                    "role": "W2",
+                    "task": "Go.",
+                    "planned_models": [*plan, "gemini-3.8-pro"],
+                },
+            )
+        with pytest.raises(ToolError, match="planned_workers is smaller"):
+            await client.call_tool(
+                "fleet_spawn",
+                {
+                    "operation_key": "W3",
+                    "role": "W3",
+                    "task": "Go.",
+                    "planned_models": plan,
+                    "planned_workers": 1,
+                },
+            )
+    # Run $1 over the 2 planned workers; the OpenAI line ($0.50) is not split.
+    assert orchestrator.spawn.await_args.kwargs["limits"].budget_usd == Decimal("0.50")
+    orchestrator.spawn.assert_awaited_once()

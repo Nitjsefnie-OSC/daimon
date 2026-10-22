@@ -112,6 +112,17 @@ with `gemini-3.8-flash`. Anything else is refused as
 `backend_unsupported`, recorded as `admission_denied` in the turn outcome,
 never run on Anthropic in its place.
 
+A channel may also name `gemini-4-argon` (Gemini 4 Argon, 1M-token context)
+on `gemini.inline_reuse`. The agent-preference switch and the default stay on
+`gemini-3.8-flash`; only an explicit channel revision selects Argon. An Argon
+turn makes one attempt: a 503 is the turn's answer, never a fallback to the
+Flash chain. Fleet grants and worker specs naming Argon are refused up front.
+Configuring a channel to Argon, and admitting its turns, both refuse whenever
+`provider_prices` has no current Argon row (today: from 2026-12-01; see
+[billing](billing.md)); the message names the date the price window ended.
+Argon's rates are about 2.7x Flash's, so raise the runtime row's `hold_usd`
+(and `cap_usd`) for an Argon channel rather than reusing a Flash row's values.
+
 A channel whose configuration says `thread_mode="shared"` shares one session
 per new thread between everyone who writes in it
 (`daimon.core.shared_threads`). Only new threads share: a thread where
@@ -1435,11 +1446,16 @@ read. This is the one hard scope boundary the matcher preserves exactly: a
 row's resources can never serve a tenant other than the one it names, no
 matter how many other fields are wildcarded. Selection tries an exact match
 on every field first (unchanged from the schema above); only when no row
-matches exactly does it retry allowing `"*"` rows on those three fields, and
-the existing "exactly one candidate or refuse" rule still applies to each
-pass — an operator mixing one wildcard default with one or more narrower,
-exact rows gets the narrower row for the channels it names and the default
-for everything else, never an ambiguous refusal between them. `daimon openai
+matches exactly does it retry allowing `"*"` rows on those three fields.
+In that retry a row wins when the fields it names exactly strictly include
+every other matching row's, so a channel's own row with `"*"` accounts beats
+a deployment-wide default. Rows naming different fields (one channel's row
+and one account's row) refuse as ambiguous, as do equally specific rows.
+An operator mixing one wildcard default with narrower rows gets the narrower
+row for the channels it names and the default for everything else. A
+narrower row whose `config_digest` or `configuration_grant` doesn't match the
+channel's configuration doesn't match at all, so that channel falls back to
+the default. `daimon openai
 init` (see `docs/self-hosting.md`'s "Self-host on OpenAI") provisions the
 agent and environment and writes this row; it defaults to the wildcard form.
 
@@ -2203,7 +2219,19 @@ preview requires a fresh preview. **Use default** clears the agent preference.
 Existing threads retain their backend, and explicit channel overrides still
 have precedence.
 
-The CLI exposes `daimon agents backend set NAME BACKEND` and
+An admin may also pick a model with the provider: `model` on
+`request_agent_backend_switch` and `set_agent_backend`, and `--model` on the
+CLI ("switch agent to gemini-4-argon"). Only the provider's selectable models
+are accepted: Gemini's gemini-3.8-flash (the default) and gemini-4-argon;
+OpenAI's gpt-6-luna. Gemini's gemini-3.5-flash-lite stays a fleet-worker model:
+the host runs it only token-capped. Naming the default stores no model,
+as before. The model is part of the preview digest and the stored revision;
+revert restores the previous model; the card names it. Switching the
+deployment's default agent says it affects new conversations in every channel
+on the server (workspace on Slack, team on Teams); a lost capability (memory
+on Gemini and OpenAI) is listed before Confirm.
+
+The CLI exposes `daimon agents backend set NAME BACKEND [--model MODEL]` and
 `daimon agents backend clear NAME`, using the existing tenant selector and
 confirmation prompt. `--yes` skips that prompt; machine-readable `--json`
 requires `--yes`. These commands use the same shared preview and transactional
@@ -2226,6 +2254,35 @@ with `applied=false`, without changing a setting. Chat credentials use the
 existing confirmation flow. Admin Details omit unavailable backend controls,
 and stale selections refuse without applying a change. Clear previews and their
 labels derive from the shared default backend.
+
+### Agent template rows (Gemini)
+
+A Gemini agent-origin turn normally needs a manifest row pinned to the exact
+source agent, its MA version and a pre-installed native counterpart. A
+**template row** serves every agent of one tenant instead: `"root_materialization":
+true`, with no `source_agent_id`, `source_agent_version`, `counterpart_catalog_id`,
+`counterpart_catalog_revision` or `agent_id`, and usually `"*"` on platform,
+channel and account. `tenant_id` and `profile` stay exact, and a
+`configuration_grant` lists the models it serves (Flash and Argon).
+
+On an agent's first turn after the switch is confirmed, source preparation
+proves the drop consent, then the host publishes the confirmed target spec
+into the tenant's catalog once per user (catalog entries are scoped to the
+caller's account), at
+`root:<agent>:<MA version>:<profile>:<model>:<target digest>`. Every later
+turn for that agent version reuses it; editing the agent, changing the model
+or a different derived target publishes a new entry. A concurrent first turn
+loses the catalog compare-and-set and reads the winner's entry, and native
+creation uses the catalog id as its key. Readback then verifies the entry like
+an operator-installed counterpart. A template row carries no operator
+capability inputs, so its turns run the agent's own instructions with the
+confirmed drops (tools, skills and connections are declared drops for now).
+OpenAI rows refuse the flag.
+
+Selection only offers a row to the turn origin it serves: an agent's turn
+considers template and source-pinned rows; a channel's turn considers fixed
+plans with neither. A tenant-wide channel row and a template row therefore
+coexist without ambiguity.
 
 ### Output delivery pagination
 

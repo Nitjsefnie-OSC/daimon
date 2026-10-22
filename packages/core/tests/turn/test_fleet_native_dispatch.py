@@ -1195,3 +1195,72 @@ async def test_dispatch_failure_cannot_terminalize_a_requeued_claim(worker_root)
         assert next(row for row in rows if row.id == newer.id) == newer
     finally:
         pool.release()
+
+
+async def test_fleet_r7_retry_reuses_defaulted_limits_instead_of_conflicting(worker_root):
+    """#1298 review: a bounded default deadline (now + 120 s) moves on retry.
+
+    The retry must reuse the admitted worker's limits; recomputing them would change
+    the admission digest and refuse the replay as an operation conflict.
+    """
+    from datetime import timedelta
+
+    request, root, _, resolved, prices, calls, _, _, _ = worker_root
+    captured = await request.capture_root(root)
+    dispatched = []
+
+    class Dispatch:
+        async def __call__(self, parent, row, specification, review):
+            dispatched.append(row)
+
+    ports = HostFleetPorts(
+        request.deps.sessionmaker,
+        prices=prices,
+        markup=Decimal(1),
+        dispatch=Dispatch(),
+        deps=request.deps,
+    )
+    owner = FleetOrchestrator(ports)
+    try:
+        policy = await _policy(request)
+        replies = []
+        start = request.now()
+        for later in (0, 5):
+            now = start + timedelta(seconds=later)
+            limits = await owner.spawn_limits(
+                root,
+                policy,
+                operation_key="bounded-default",
+                provider=resolved.spec.model.provider,
+                now=now,
+                budget_usd=resolved.limits.budget_usd,
+                max_turns=resolved.limits.max_turns,
+                max_runtime_s=30,
+            )
+            if later == 0:
+                first = limits
+                # Shorter than this run's deadline, so a fresh default moves with time.
+                assert limits.deadline == start + timedelta(seconds=30)
+                assert limits.deadline < root.limits.deadline
+            else:
+                # A fresh default would be 5 s later and change the admission digest.
+                assert limits.deadline == first.deadline
+            terms = _spawn_terms(request, root, resolved, "bounded-default")
+            terms.update(
+                now=now,
+                limits=limits,
+                agent=resolved.spec,
+                clone=None,
+                clone_revision=None,
+                overrides=None,
+            )
+            replies.append(
+                await owner.spawn(root, policy, captured_source=captured.source, **terms)
+            )
+        assert replies[0]["worker_id"] == replies[1]["worker_id"]
+        # A replay of a still-pending worker re-runs its idempotent dispatch only.
+        assert {str(row.id) for row in dispatched} == {replies[0]["worker_id"]} and not calls
+        _, rows = await ports.read_run(root.fleet.scope, root.fleet.run_id)
+        assert sum(1 for row in rows if str(row.id) == replies[0]["worker_id"]) == 1
+    finally:
+        await ports.close()

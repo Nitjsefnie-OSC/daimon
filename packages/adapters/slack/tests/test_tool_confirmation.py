@@ -58,7 +58,9 @@ async def _post(
     *,
     channel: str = "C1",
 ) -> tuple[asyncio.Task[Any], str]:
-    hook = cards.hook(cast(AsyncWebClient, client), channel=channel, thread_ts="1699.9")
+    hook = cards.hook(
+        cast(AsyncWebClient, client), team_id="T_HOST", channel=channel, thread_ts="1699.9"
+    )
     waiting = asyncio.create_task(hook(prompt or _prompt()))
     while not client.chat_postMessage.await_count:
         await asyncio.sleep(0)
@@ -422,7 +424,9 @@ async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
 async def test_an_unanswered_card_expires_and_is_retired() -> None:
     cards = SlackConfirmationCards()
     client = _client()
-    hook = cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")
+    hook = cards.hook(
+        cast(AsyncWebClient, client), team_id="T_HOST", channel="C1", thread_ts="1699.9"
+    )
 
     answer = await hook(_prompt(expires_in=timedelta(milliseconds=10)))
 
@@ -548,7 +552,10 @@ async def test_a_stalled_slack_retire_cannot_hold_the_turn_past_its_budget(
     cards = SlackConfirmationCards()
 
     elapsed, final = await _run_turn_with_stalled_card_retire(
-        cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9"), monkeypatch
+        cards.hook(
+            cast(AsyncWebClient, client), team_id="T_HOST", channel="C1", thread_ts="1699.9"
+        ),
+        monkeypatch,
     )
 
     assert final.error is not None and final.error.kind == "ceiling"  # type: ignore[attr-defined]
@@ -566,7 +573,9 @@ async def test_upload_card_has_color_and_private_details() -> None:
             "consequence": "Anyone with the notebook's link can open these files.",
         }
     )
-    hook = cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")
+    hook = cards.hook(
+        cast(AsyncWebClient, client), team_id="T_HOST", channel="C1", thread_ts="1699.9"
+    )
     waiting = asyncio.create_task(hook(prompt))
     while not client.chat_postMessage.await_count:
         await asyncio.sleep(0)
@@ -598,6 +607,7 @@ async def test_admin_confirmation_rechecks_each_click_before_settlement() -> Non
     waiting = asyncio.create_task(
         cards.hook(
             cast(AsyncWebClient, client),
+            team_id="T_HOST",
             channel="C1",
             thread_ts="1699.9",
             prepare_admin=prepare,
@@ -635,7 +645,9 @@ async def test_admin_confirmation_without_a_verifier_posts_nothing() -> None:
     cards = SlackConfirmationCards()
     prompt = _prompt().model_copy(update={"admin": True})
     assert (
-        await cards.hook(cast(AsyncWebClient, client), channel="C1", thread_ts="1699.9")(prompt)
+        await cards.hook(
+            cast(AsyncWebClient, client), team_id="T_HOST", channel="C1", thread_ts="1699.9"
+        )(prompt)
         == "denied"
     )
     client.chat_postMessage.assert_not_awaited()
@@ -663,6 +675,7 @@ async def test_admin_await_cannot_bypass_requester_expiry_or_fail_closed(
     waiting = asyncio.create_task(
         cards.hook(
             cast(AsyncWebClient, client),
+            team_id="T_HOST",
             channel="C1",
             thread_ts="1699.9",
             prepare_admin=AsyncMock(return_value=prompt),
@@ -704,11 +717,14 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     runtime = MagicMock()
     runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
     client = _client()
-    client.users_info = AsyncMock(return_value={"ok": True, "user": {"is_admin": True}})
+    client.users_info = AsyncMock(
+        return_value={"ok": True, "user": {"is_admin": True, "team_id": "T_HOST"}}
+    )
     factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
     monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
     SlackConfirmationCards().hook(
         cast(AsyncWebClient, client),
+        team_id="T_HOST",
         channel="C1",
         thread_ts="1699.9",
         runtime=runtime,
@@ -719,7 +735,10 @@ async def test_runtime_hook_reuses_live_workspace_admin_lookup(
     assert kwargs["tenant_id"] == tenant and kwargs["account_id"] == account
     check = kwargs["current_admin"]
     assert await check("U1") is True
-    client.users_info.return_value = {"ok": True, "user": {"is_admin": False}}
+    client.users_info.return_value = {
+        "ok": True,
+        "user": {"is_admin": False, "team_id": "T_HOST"},
+    }
     assert await check("U1") is False
     assert client.users_info.await_count == 2
 

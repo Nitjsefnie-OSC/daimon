@@ -36,6 +36,7 @@ from daimon.core.turn.admission import (
     admit,
 )
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.ma import (
     MARouter,
     build_fake_anthropic,
@@ -140,6 +141,7 @@ async def test_admit_over_balance_tenant_raises_admission_denied_balance_deplete
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform=platform,
             external_user_id="user-1",
             channel_id="chan-1",
@@ -198,6 +200,7 @@ async def test_admit_over_cap_user_raises_admission_denied_cap_exceeded(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform=platform,
             external_user_id="user-1",
             channel_id="chan-1",
@@ -258,6 +261,7 @@ async def test_admit_refuses_a_turn_in_a_channel_over_its_budget(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform=platform,
             external_user_id="user-1",
             channel_id="chan-1",
@@ -300,7 +304,12 @@ async def test_a_budget_refusal_sends_the_notice_unless_the_tenant_opted_out(
     base = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_router_for(tenant)
     )
-    args = {"tenant_id": tenant.id, "platform": "discord", "external_user_id": "user-1"}
+    args = {
+        "tenant_id": tenant.id,
+        "platform": "discord",
+        "external_user_id": "user-1",
+        "requester_org": RequesterOrg.HOST,
+    }
     opted_out = replace(base, budget_notifier=notifier, budget_notices_off=frozenset({tenant.id}))
     with pytest.raises(AdmissionDenied):
         await admit(opted_out, **args, channel_id="chan-1", now=_NOW)
@@ -328,7 +337,12 @@ async def test_admit_attributes_the_channel_and_a_dm_to_its_source(
     deps = _deps(
         sessionmaker=db_session_factory, defaults_root=tmp_path, router=_router_for(tenant)
     )
-    args = {"tenant_id": tenant.id, "platform": "discord", "external_user_id": "user-1"}
+    args = {
+        "tenant_id": tenant.id,
+        "platform": "discord",
+        "external_user_id": "user-1",
+        "requester_org": RequesterOrg.HOST,
+    }
 
     unbudgeted = await admit(deps, **args, channel_id="chan-1", now=_NOW)
     assert unbudgeted.budget_channel_id == "chan-1", "no budget row admits, and still attributes"
@@ -369,6 +383,7 @@ async def test_admit_gate_order_cap_wins_over_channel_budget(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -396,6 +411,7 @@ async def test_admit_missing_agent_only_raises_missing_turn_config_error(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -425,6 +441,7 @@ async def test_admit_missing_agent_and_environment_raises_missing_turn_config_er
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -463,6 +480,7 @@ async def test_admit_unresolvable_tag_propagates_ma_resolver_miss_error(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -499,6 +517,7 @@ async def test_admit_happy_path_returns_admission_with_retrieved_agent_and_accou
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="user-1",
         channel_id="chan-1",
@@ -566,6 +585,7 @@ async def test_admit_reads_the_daimon_tools_the_agent_has_ask_or_deny_rules_on(
         admission = await admit(
             replace(deps, tool_safety=policy),
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -617,6 +637,7 @@ async def test_admission_reads_agent_rules_only_when_tool_safety_and_rules_are_o
             return scoped, await admit(
                 scoped,
                 tenant_id=tenant.id,
+                requester_org=RequesterOrg.HOST,
                 platform="discord",
                 external_user_id="user-1",
                 channel_id="chan-1",
@@ -677,6 +698,7 @@ async def test_admit_gate_order_config_bail_wins_over_over_balance(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -724,6 +746,7 @@ async def test_admit_raises_resolver_miss_when_the_resolved_agent_is_archived(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -777,6 +800,7 @@ async def test_admit_invalidates_archived_environment_cache(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -842,6 +866,7 @@ async def test_admit_clears_the_scope_row_that_named_an_archived_agent(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",
@@ -887,6 +912,7 @@ async def test_role_is_persisted_even_when_configuration_blocks_turn(
         await admit(
             _deps(sessionmaker=db_session_factory, router=MARouter(), defaults_root=tmp_path),
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="slack",
             external_user_id="U_CURRENT",
             channel_id="C_CHANNEL",
@@ -942,6 +968,7 @@ async def test_setup_admission_uses_bound_identity_and_leaves_missing_target_unc
     admission = await admit(
         _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="MEMBER",
         channel_id="C_PARENT",
@@ -992,6 +1019,7 @@ async def test_handoff_thread_admits_the_agent_the_task_was_handed_to(
     admission = await admit(
         _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="MEMBER",
         channel_id="C_PARENT",
@@ -1042,6 +1070,7 @@ async def test_handoff_thread_refuses_an_agent_from_another_workspace(
         await admit(
             _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="MEMBER",
             channel_id="C_PARENT",
@@ -1107,6 +1136,7 @@ async def test_admit_adds_the_default_agents_office_skills_on_teams_only(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform=platform,
         external_user_id="user-1",
         channel_id="chan-1",
@@ -1167,6 +1197,7 @@ async def test_admit_adds_the_default_agents_microsoft_365_skill_on_teams_only(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform=platform,
         external_user_id="user-1",
         channel_id="chan-1",
@@ -1221,6 +1252,7 @@ async def test_admit_refuses_an_invoker_outside_the_allowlist_before_any_ma_call
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="guest-1",
             channel_id="chan-1",
@@ -1256,6 +1288,7 @@ async def test_admit_admits_whoever_the_policy_allows(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id=external_user_id,
         channel_id="chan-1",
@@ -1283,6 +1316,7 @@ async def test_admit_treats_a_missing_live_role_as_non_admin_even_for_a_stored_a
     await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="ex-admin",
         channel_id="chan-1",
@@ -1294,6 +1328,7 @@ async def test_admit_treats_a_missing_live_role_as_non_admin_even_for_a_stored_a
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="ex-admin",
             channel_id="chan-1",
@@ -1320,6 +1355,7 @@ async def test_admit_gate_order_invoker_refusal_wins_over_missing_config_and_bal
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="slack",
             external_user_id="guest-1",
             channel_id="C1",
@@ -1350,6 +1386,7 @@ async def test_admit_refuses_when_the_stored_policy_is_unreadable(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="anyone",
             channel_id="chan-1",
@@ -1413,6 +1450,7 @@ async def test_admit_marks_memory_read_only_for_sealed_channels_and_policy_dms(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="anyone",
         channel_id=channel_id,
@@ -1465,6 +1503,7 @@ async def test_admit_records_every_seal_on_a_thread_sealed_twice(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="anyone",
         channel_id=sealed[0],
@@ -1517,6 +1556,7 @@ async def test_admit_leaves_an_isolated_channels_own_agent_memory_writable(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="anyone",
         channel_id="chan-1",
@@ -1555,6 +1595,7 @@ async def test_admit_refuses_an_agent_that_is_not_the_isolated_channels_own(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="anyone",
             channel_id="chan-1",
@@ -1587,7 +1628,12 @@ async def test_admit_holds_an_isolated_teams_channel_to_its_own_agent(
         ma_environment(id="env_1", name="default", tenant_id=tenant.id),
     )
     deps = _deps(sessionmaker=db_session_factory, defaults_root=tmp_path, router=router)
-    args = {"tenant_id": tenant.id, "platform": "teams", "external_user_id": "anyone"}
+    args = {
+        "tenant_id": tenant.id,
+        "platform": "teams",
+        "external_user_id": "anyone",
+        "requester_org": RequesterOrg.HOST,
+    }
 
     admission = await admit(
         deps,
@@ -1625,6 +1671,7 @@ async def test_admit_refuses_an_outside_agent_in_an_isolated_teams_thread(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="teams",
             external_user_id="anyone",
             channel_id=_TEAMS_ROOM,
@@ -1666,6 +1713,7 @@ async def test_admit_refuses_a_handoff_under_an_isolated_channel_to_an_outside_a
         await admit(
             _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="MEMBER",
             channel_id="chan-1",
@@ -1709,6 +1757,7 @@ async def test_admit_answers_a_setup_thread_under_an_isolated_channel_read_only(
     admission = await admit(
         _deps(sessionmaker=db_session_factory, router=router, defaults_root=tmp_path),
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="MEMBER",
         channel_id="chan-1",
@@ -1749,6 +1798,7 @@ async def test_admit_refuses_a_turn_whose_reply_would_land_in_a_protected_channe
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="anyone",
             channel_id=channel_id,
@@ -1779,6 +1829,7 @@ async def test_admit_still_admits_outside_the_protected_channels(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="anyone",
         channel_id="chan-1",
@@ -1808,6 +1859,7 @@ async def test_admit_protection_wins_over_the_invoker_refusal(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="guest",
             channel_id="client",
@@ -1840,6 +1892,7 @@ async def test_admit_with_an_unresolved_category(
     call = admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="anyone",
         channel_id="chan-1",
@@ -1889,6 +1942,7 @@ async def test_admit_refuses_a_pinned_agent_outside_its_channels(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="anyone",
             channel_id=channel_id,
@@ -1926,6 +1980,7 @@ async def test_admit_admits_a_pinned_agent_in_its_channels_and_leaves_others_alo
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="anyone",
         channel_id=channel_id,
@@ -1973,6 +2028,7 @@ async def test_admit_flags_a_sealed_source_apart_from_dm_memory_policy(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="anyone",
         channel_id=channel_id,
@@ -2048,6 +2104,7 @@ async def test_admit_refuses_a_handed_off_thread_whose_binding_names_the_agent_d
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="anyone",
             channel_id="general",
@@ -2084,6 +2141,7 @@ async def test_admit_refuses_an_agent_pinned_by_its_display_name(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="anyone",
             channel_id="general",
@@ -2113,6 +2171,7 @@ async def test_admit_exempts_an_admin_from_a_pin_in_a_dm_only(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform=platform,  # pyright: ignore[reportArgumentType]
         external_user_id="anyone",
         channel_id="general",
@@ -2148,6 +2207,7 @@ async def test_an_admins_dm_with_an_isolated_channels_agent_is_held_to_its_budge
         "channel_id": "dm-1",
         "is_dm": True,
         "role": Role.ADMIN,
+        "requester_org": RequesterOrg.HOST,
     }
 
     admission = await admit(deps, **args, now=_NOW)
@@ -2178,6 +2238,7 @@ async def _admit_as(
     return await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="teams",
         external_user_id="guest-1",
         channel_id=channel_id,

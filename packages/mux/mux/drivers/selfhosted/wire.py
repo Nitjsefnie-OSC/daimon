@@ -2,6 +2,9 @@
 
 Wire parts intentionally differ from mux content parts: images are always inline.
 An event validates its data against its type before entering a durable journal.
+Every C3 request carries the nonsecret ``session_id`` query parameter, including
+turn actions and cancellation, so an empty sandbox can restore before handling it.
+The parameter must match the turn body or events path and the sandbox binding.
 """
 
 from __future__ import annotations
@@ -276,7 +279,25 @@ class ErrorData(TurnError):
     request_id: str | None = None
 
 
+class CheckpointWarningData(ResponseModel):
+    message: str
+
+
+class HistoryGapData(ResponseModel):
+    """Recovery boundary; after_seq fences restore, replay_after_seq selects replay.
+
+    Both travel alongside session_id in the query; replay_after_seq is optional
+    on event reads and never lowers the restore fence.
+    """
+
+    from_seq: int = Field(ge=0)
+    to_seq: int = Field(ge=0)
+    reason: Literal["sandbox_restored"]
+
+
 EventType = Literal[
+    "history_gap",
+    "checkpoint_warning",
     "status_running",
     "model_request_started",
     "agent_message_delta",
@@ -289,7 +310,9 @@ EventType = Literal[
     "error",
 ]
 EventData = (
-    StatusRunningData
+    CheckpointWarningData
+    | HistoryGapData
+    | StatusRunningData
     | AgentMessageDeltaData
     | AgentMessageData
     | ToolUseData
@@ -301,6 +324,8 @@ EventData = (
     | ErrorData
 )
 DATA_MODELS: dict[EventType, type[WireModel]] = {
+    "history_gap": HistoryGapData,
+    "checkpoint_warning": CheckpointWarningData,
     "status_running": StatusRunningData,
     "agent_message_delta": AgentMessageDeltaData,
     "agent_message": AgentMessageData,

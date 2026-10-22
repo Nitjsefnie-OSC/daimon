@@ -95,6 +95,7 @@ from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import Provider
+from mux.profiles import selectable_models
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
 log = structlog.get_logger()
@@ -1027,6 +1028,16 @@ async def _capture_backend_source(
     )
 
 
+def _require_selectable_model(backend: Provider | None, model: str | None) -> None:
+    """Name the models on offer instead of a generic refusal for an unknown one."""
+    if model is None:
+        return
+    models = selectable_models(backend) if backend is not None else ()
+    if model not in models:
+        offer = f" Pick one of: {', '.join(models)}." if models else ""
+        raise ToolError(f"{model} isn't available on {backend or 'the default'} here.{offer}")
+
+
 async def _set_agent_backend_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1035,8 +1046,10 @@ async def _set_agent_backend_impl(
     backend: Provider | None,
     expected_revision: int | None = None,
     preview_only: bool = False,
+    model: str | None = None,
 ) -> dict[str, JsonValue]:
     _require_admin(auth)
+    _require_selectable_model(backend, model)
     if auth.agent_id is not None:
         raise ToolError("An agent key cannot change the model provider.")
     try:
@@ -1064,7 +1077,7 @@ async def _set_agent_backend_impl(
             tenant_id=auth.tenant_id,
             agent_name=name,
         )
-        preview = await service.preview(agent, backend)
+        preview = await service.preview(agent, backend, model)
         if preview_only:
             return {
                 "agent": name,
@@ -1088,13 +1101,14 @@ async def _set_agent_backend_impl(
             )
         else:
             revision = await service.set_backend(
-                current, backend, local, actor, expected_preview_digest=preview.digest
+                current, backend, local, actor, expected_preview_digest=preview.digest, model=model
             )
     except channel_backend.AgentBackendRefused as exc:
         raise ToolError(str(exc)) from exc
     return {
         "agent": name,
         "backend": revision.backend,
+        "model": revision.model,
         "revision": revision.local,
         "preview": cast(
             dict[str, JsonValue],
@@ -1108,6 +1122,8 @@ class AgentBackendSwitchInfo(BaseModel):
     status: Literal["preview", "changed"]
     agent_name: str
     target_backend: Provider
+    model: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    models: tuple[str, ...] = ()
     expected_revision: int
     preview_digest: str
     unsupported_skills: tuple[str, ...]
@@ -1129,8 +1145,10 @@ async def _request_agent_backend_switch_impl(
     preview_digest: str | None = None,
     origin_context_id: str | None = None,
     accepted_drops: tuple[str, ...] | None = None,
+    model: str | None = None,
 ) -> AgentBackendSwitchInfo:
     _require_admin(auth)
+    _require_selectable_model(target_backend, model)
     if auth.agent_id is not None or auth.platform_user_id is None:
         raise ToolError("Request this change from an admin's active chat conversation.")
     origin = await get_chat_origin(runtime, auth, origin_context_id)
@@ -1167,7 +1185,7 @@ async def _request_agent_backend_switch_impl(
             tenant_id=auth.tenant_id,
             agent_name=agent_name,
         )
-        preview = await service.preview(agent, target_backend)
+        preview = await service.preview(agent, target_backend, model)
         if not preview.allowed:
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
         status: Literal["preview", "changed"] = "preview"
@@ -1181,6 +1199,7 @@ async def _request_agent_backend_switch_impl(
                 {
                     "agent": agent_name,
                     "target_backend": target_backend,
+                    "model": model,
                     "expected_revision": expected_revision,
                     "preview_digest": preview_digest,
                     "accepted_drops": accepted_drops,
@@ -1204,6 +1223,7 @@ async def _request_agent_backend_switch_impl(
                 reference.expected_revision,
                 actor,
                 expected_preview_digest=reference.preview_digest,
+                model=reference.model,
                 **(
                     {"accepted_drops": reference.accepted_drops}
                     if reference.accepted_drops is not None
@@ -1212,13 +1232,15 @@ async def _request_agent_backend_switch_impl(
             )
             status = "changed"
             summary = (
-                "Model provider changed. Existing threads keep their provider; "
-                "channel settings still win in new threads."
+                "Model provider changed. New conversations with this agent use it; "
+                "existing threads keep their model."
             )
         return AgentBackendSwitchInfo(
             status=status,
             agent_name=agent.name,
             target_backend=preview.target_backend,
+            model=preview.target_model,
+            models=selectable_models(preview.target_backend),
             expected_revision=preview.setting_revision,
             preview_digest=preview.digest,
             unsupported_skills=preview.unsupported_skills,
@@ -1245,6 +1267,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             backend: Provider | None,
             expected_revision: int | None = None,
             preview_only: bool = False,
+            model: str | None = None,
         ) -> dict[str, JsonValue]:
             """Set an enabled model provider, or clear the agent setting with backend=null.
 
@@ -1254,6 +1277,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             Existing threads keep their provider; channel settings still apply.
             expected_revision refuses a setting changed since it was read.
             preview_only returns the compatibility and cost preview without applying it.
+            model picks one of the provider's selectable models (Gemini: gemini-3.8-flash or
+            gemini-4-argon); omit it for the provider's default.
             """
             return await _set_agent_backend_impl(
                 runtime,
@@ -1262,6 +1287,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 backend=backend,
                 expected_revision=expected_revision,
                 preview_only=preview_only,
+                model=model,
             )
 
     @mcp.tool
@@ -1473,14 +1499,23 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             preview_digest: str | None = None,
             origin_context_id: str | None = None,
             accepted_drops: tuple[str, ...] | None = None,
+            model: str | None = None,
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
-            Use when an admin asks to switch an agent to Anthropic, OpenAI or Gemini.
+            Use when an admin asks to switch an agent to Anthropic, OpenAI or Gemini,
+            optionally naming a model: "switch agent to gemini-4-argon". ``model`` is one
+            of the returned ``models`` (Gemini: gemini-3.8-flash or gemini-4-argon); omit
+            it for the provider's default. The switch applies to
+            new conversations wherever the agent answers; switching the default agent
+            applies to every channel on this server. For "fork agent to gemini", copy the
+            agent with fork_agent, then switch the copy; say plainly that the copy isn't
+            answering anywhere yet, and that switching the agent itself is how to use
+            Gemini here.
             First call without preview_digest and show the returned compatibility,
-            shared-thread limits and cost line. Call again with that preview's
-            expected_revision, preview_digest and exact declared_drops as accepted_drops:
-            the requesting admin must Confirm
+            shared-thread limits, what won't be available, and the cost line. Call again
+            with the same model and that preview's expected_revision, preview_digest and
+            exact declared_drops as accepted_drops: the requesting admin must Confirm
             on the card before anything is changed. A stale preview or expired card
             changes nothing; preview again. Pass this active turn's origin_context_id.
             """
@@ -1493,4 +1528,5 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 preview_digest=preview_digest,
                 origin_context_id=origin_context_id,
                 accepted_drops=accepted_drops,
+                model=model,
             )

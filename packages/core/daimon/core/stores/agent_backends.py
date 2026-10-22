@@ -96,12 +96,14 @@ async def put_revision(
     preview_digest: str,
     fleet_grant: JsonValue | None = None,
     drop_consent: JsonValue | None = None,
+    model: str | None = None,
 ) -> AgentBackendRevision:
     row = AgentBackendRevisionRecord(
         tenant_id=tenant_id,
         agent_id=agent_id,
         local=local,
         backend=backend,
+        model=model,
         digest=digest,
         previous_local=previous_local,
         agent_name=agent_name,

@@ -23,6 +23,7 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import (
     make_account,
@@ -205,6 +206,7 @@ async def selector_host(db_preflight, db_session_factory, db_clean, request, ini
             current = await admit_impl(
                 deps,
                 tenant_id=TENANT,
+                requester_org=RequesterOrg.HOST,
                 platform="slack",
                 external_user_id="caller",
                 channel_id="channel",
@@ -609,6 +611,7 @@ async def test_legacy_or_unconfigured_admission_does_not_read_native_bindings(
     current = await admit_impl(
         replace(host.deps, turn_path=path, channel_backends=enabled),
         tenant_id=TENANT,
+        requester_org=RequesterOrg.HOST,
         platform="slack",
         external_user_id="caller",
         channel_id="channel",
@@ -636,6 +639,7 @@ async def test_another_caller_never_selects_the_private_native_binding(selector_
     current = await admit_impl(
         host.deps,
         tenant_id=TENANT,
+        requester_org=RequesterOrg.HOST,
         platform="slack",
         external_user_id="other",
         channel_id="channel",
