@@ -3158,8 +3158,13 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
             }
         )
     elif changed == "drops":
+        from mux.contracts.resources import ResourceBinding
+
+        # A worker that declared memory dropped may not still carry a mount.
         worker = replace(
-            worker, spec=worker.spec.model_copy(update={"declared_drops": ("memory",)})
+            worker,
+            spec=worker.spec.model_copy(update={"declared_drops": ("memory",)}),
+            resources=(ResourceBinding(id="memory", kind="native"),),
         )
     trace = ScriptedTransport()
     async with trace.client() as client:

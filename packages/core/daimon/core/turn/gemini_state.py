@@ -206,7 +206,7 @@ class _FlashAccounting:
                     raise ValueError("invalid Gemini hold ledger")
                 held += Decimal(cast(str, row["held_usd"]))
             if held + self._hold > self._cap:
-                raise AdmissionDenied(reason="channel_budget_exceeded")
+                raise AdmissionDenied(reason="provider_hold_cap_reached")
             rows[id_] = {
                 "model": model.id,
                 "attempt": attempt,

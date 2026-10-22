@@ -33,7 +33,9 @@ from .test_fleet_source_permissions import captured as captured
 RESEARCHER_SYSTEM = "You are the research agent. Cite sources."
 
 
-async def capture_agent(owned, scope, *, ma_id, name, model="claude-haiku-5-5", tools=()):
+async def capture_agent(
+    owned, scope, *, ma_id, name, model="claude-haiku-5-5", tools=(), memory_store=True
+):
     """Capture another on-server agent the way the root's source is captured."""
     _, identity, actor, sessions = owned
     native = ma_agent(
@@ -66,13 +68,14 @@ async def capture_agent(owned, scope, *, ma_id, name, model="claude-haiku-5-5", 
         source = await load_backend_agent(
             client, sessions, tenant_id=identity.tenant_id, agent_name=name, actual_agent=actual
         )
-        async with sessions.begin() as db:
-            await agent_memory_stores.insert_memory_store(
-                db,
-                tenant_id=identity.tenant_id,
-                agent_id=source.agent_id,
-                memory_store_id=f"memstore-{name}",
-            )
+        if memory_store:
+            async with sessions.begin() as db:
+                await agent_memory_stores.insert_memory_store(
+                    db,
+                    tenant_id=identity.tenant_id,
+                    agent_id=source.agent_id,
+                    memory_store_id=f"memstore-{name}",
+                )
         source = await project_session_resources(
             source,
             agent=actual,
@@ -665,3 +668,80 @@ async def test_prepare_worker_agent_decides_admission_again_for_that_agent(
         )
         worker = await prepare_worker_agent(root.deps, unsealed, researcher)
         assert worker.admission.memory_read_only is root_read_only
+
+
+@pytest.mark.parametrize("provisioned", [True, False])
+async def test_a_never_run_agent_gets_its_memory_store_and_its_worker_reads_it(
+    captured, owned, monkeypatch, provisioned
+):
+    """CLI- and chat-created agents get their store on their first session (r13b)."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from daimon.core import channel_backend, memory_resource
+    from daimon.core.fleet_orchestration import FleetRefused, HostFleetPorts
+    from daimon.core.turn import admission as admission_module
+    from daimon.core.turn import runtime_manifest
+
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    _, identity, _, sessions = owned
+    fresh, actual = await capture_agent(
+        owned, fleet.scope, ma_id="fresh-source", name="fresh", memory_store=False
+    )
+    assert fresh.memory_store_id is None
+    warm = fresh.model_copy(update={"memory_store_id": "memstore-fresh"})
+    as_fresh = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    provisions, prepared = [], []
+
+    async def load(client, sessionmaker, *, tenant_id, agent_name):
+        assert agent_name == "fresh"
+        return fresh
+
+    async def read_grant(deps, admitted, *, now):
+        # The host decides on the wall clock; keep the fixture's grant current.
+        value = any_agent(grant)
+        limits = value.limits.model_copy(update={"deadline": now + timedelta(days=1)})
+        return value.model_copy(update={"limits": limits})
+
+    async def prepare(deps, request, source):
+        # Captured before (no store yet) and again after the store exists.
+        prepared.append(source)
+        captured_source = fresh if len(prepared) == 1 or not provisioned else warm
+        return SimpleNamespace(source=captured_source, admission=SimpleNamespace(grant=as_fresh))
+
+    async def ensure(client, sessionmaker, **kwargs):
+        provisions.append(kwargs)
+        if not provisioned:
+            from daimon.core.errors import StoreError
+
+            raise StoreError("memory store create failed")
+
+    monkeypatch.setattr(channel_backend, "load_backend_agent", load)
+    monkeypatch.setattr(runtime_manifest, "read_agent_fleet_grant", read_grant)
+    monkeypatch.setattr(admission_module, "prepare_worker_agent", prepare)
+    monkeypatch.setattr(memory_resource, "ensure_memory_store_and_mount", ensure)
+    ports = HostFleetPorts(
+        sessions,
+        prices={},
+        markup=Decimal(1),
+        deps=SimpleNamespace(anthropic=None, sessionmaker=sessions, fleet_enabled=False),
+        preparation=lambda parent: None,
+    )
+
+    @asynccontextmanager
+    async def root_request(parent, deadline=None):
+        yield SimpleNamespace(tenant_id=identity.tenant_id, admission=SimpleNamespace())
+
+    monkeypatch.setattr(ports, "_load_preparation", root_request)
+    if not provisioned:
+        with pytest.raises(FleetRefused, match="worker_agent_memory_unavailable"):
+            await ports.agent_worker_parent(root, "fresh")
+        return
+    worker_root = await ports.agent_worker_parent(root, "fresh")
+    # Provisioned once, the way the agent's own first session would, then captured again.
+    assert [(p["agent_id"], p["read_only"]) for p in provisions] == [(fresh.agent_id, True)]
+    assert len(prepared) == 2
+    (mount,) = [r for r in worker_root.resources if r.resource.kind == "memory_store"]
+    assert mount.resource.id == "memstore-fresh"
+    assert worker_root.memory_read_only is True

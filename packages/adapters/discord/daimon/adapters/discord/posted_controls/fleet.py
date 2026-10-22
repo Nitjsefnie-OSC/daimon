@@ -19,6 +19,7 @@ import structlog
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.adapters.discord.views import finish_control
 from daimon.core.access_policy import TenantAccessPolicy
+from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.fleet import TERMINAL, FleetRun, FleetWorker, holds_slot
 from daimon.core.fleet_orchestration import Control, FleetOrchestrator, FleetRefused
 from daimon.core.ma_identity import derive_tenant_uuid
@@ -199,9 +200,15 @@ def build_fleet_view(
 
 
 def _worker_agent(worker: FleetWorker) -> str:
-    """The agent a worker runs as, when that is not just its role's name."""
-    name = worker.spec.get("name")
-    if not isinstance(name, str) or not name.strip() or name == worker.role:
+    """The agent a worker ran as, when it ran as one and that isn't its role's name.
+
+    A worker that runs as an agent carries that agent's own metadata name. An inline
+    spec inherits the root's metadata, so a name it gives itself is not shown as an
+    agent.
+    """
+    name, metadata = worker.spec.get("name"), worker.spec.get("metadata")
+    agent = metadata.get(MA_METADATA_KEY_NAME) if isinstance(metadata, dict) else None
+    if not isinstance(name, str) or not name.strip() or name != agent or name == worker.role:
         return ""
     return f" ({_literal(name, 40)})"
 
