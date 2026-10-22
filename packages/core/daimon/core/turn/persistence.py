@@ -18,7 +18,7 @@ from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, OperationStatus
 from mux.contracts.resources import ProviderBinding
-from mux.drivers.anthropic.transport import single_attempt_mutation
+from mux.drivers.anthropic import single_attempt_mutation
 from mux.errors import ProviderError, ScopeViolation
 from mux.state.journal import JournalAppend, JournalEntry, is_authoritative
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence

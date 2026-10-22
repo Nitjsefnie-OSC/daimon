@@ -523,8 +523,8 @@ async def test_worker_native_readback_checks_stripped_tools_mounts_and_protected
         owned.wire.agent[field] = original
 
     # Persist the independently read-back native acknowledgement at the owned storage edge.
+    import mux.drivers.gemini as sdk_deployment
     from daimon.core.turn import gemini_deployment
-    from mux.drivers.gemini import deployment as sdk_deployment
 
     storage = MemoryStorage()
     async with storage.transaction() as records:
@@ -1367,11 +1367,11 @@ async def test_real_worker_materialization_refuses_without_input_or_recreation(
     monkeypatch: pytest.MonkeyPatch,
     fault: str,
 ) -> None:
+    import mux.drivers.gemini as sdk_deployment
     from daimon.core.fleet import FleetConflict
     from daimon.core.headless_runner import run_worker
     from daimon.core.neutral_resources import WorkerSpecRefused
     from daimon.core.stores import fleet
-    from mux.drivers.gemini import deployment as sdk_deployment
 
     (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
     if fault == "disabled":

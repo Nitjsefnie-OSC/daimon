@@ -48,3 +48,8 @@ class UsageObservation(Contract):
     completeness: Literal["partial", "measured", "unknown"]
     observed_at: datetime
     covers: tuple[str, ...] = ()
+
+
+__all__ = [
+    "UsageObservation",
+]

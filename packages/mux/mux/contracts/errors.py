@@ -149,3 +149,19 @@ class ProviderError(MuxError):
         self.native_message = native_message
         self.native_error_code = native_error_code
         self.native_param = native_param
+
+
+__all__ = [
+    "BindingConflict",
+    "ContinuityLost",
+    "ExtensionVersionError",
+    "InvalidConfig",
+    "MigrationUnsupported",
+    "MuxError",
+    "OperationConflict",
+    "PROVIDER_ERROR_CATEGORIES",
+    "ProviderError",
+    "ProviderErrorCategory",
+    "ScopeViolation",
+    "UnsupportedCapability",
+]
