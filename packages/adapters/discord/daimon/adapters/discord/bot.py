@@ -30,6 +30,7 @@ from daimon.adapters.discord.context import (
     build_delta_xml,
 )
 from daimon.adapters.discord.continuation_dispatch import dispatch_pending_continuations
+from daimon.adapters.discord.control_dispatch import dispatch_general_interaction
 from daimon.adapters.discord.errors import (
     NOT_SET_UP_NOTICE,
     SETUP_OUT_OF_DATE_NOTICE,
@@ -721,7 +722,13 @@ class DaimonBot(commands.Bot):
         def parse_allowed_interaction(data: dict[str, Any]) -> None:
             guild_id = data.get("guild_id")
             if self._allows_guild(int(guild_id) if guild_id is not None else None):
-                parse_interaction(data)
+                dispatch_general_interaction(
+                    self.runtime.settings.recruitment,
+                    self._connection,
+                    data,
+                    parse_interaction,
+                    lambda work: self._spawn(work),
+                )
 
         self._connection.parsers["INTERACTION_CREATE"] = parse_allowed_interaction
 
