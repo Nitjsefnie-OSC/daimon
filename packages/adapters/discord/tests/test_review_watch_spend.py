@@ -28,6 +28,7 @@ from daimon.testing.ma import (
 from .harness import make_bot
 from .test_continuation_dispatch_entry import _make_guild, _make_member, _make_runtime, _make_thread
 from .watch_fixtures import (
+    WatchDiscordRest,
     cached_watch_session,
     enrolled_page_watch,
     watch_admission_patches,
@@ -136,12 +137,15 @@ async def test_review_spend_rechecked_after_admission(db_session_factory, mode, 
     )
     runtime = replace(runtime, anthropic=fake_client, turn_deps=deps)
     bot = make_bot(runtime)
+    WatchDiscordRest(bot)
     guild = _make_guild(member=_make_member(admin=False))
     guild.id = 710000099
     thread = _make_thread(guild=guild)
+    thread.locked = False
     thread.permissions_for.return_value = discord.Permissions(
-        view_channel=True, send_messages_in_threads=True
+        view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
+    thread.type = discord.ChannelType.public_thread
     bot.get_channel = MagicMock(return_value=thread)
 
     bound = []

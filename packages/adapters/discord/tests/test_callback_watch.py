@@ -27,6 +27,7 @@ from daimon.testing.ma import (
 from .harness import make_bot
 from .test_continuation_dispatch_entry import _make_guild, _make_member, _make_runtime, _make_thread
 from .watch_fixtures import (
+    WatchDiscordRest,
     cached_watch_session,
     enrolled_page_watch,
     watch_admission_patches,
@@ -36,7 +37,23 @@ from .watch_fixtures import (
 
 @pytest.mark.fresh_schema
 @pytest.mark.parametrize("source", ["page_event", "poll"])
-@pytest.mark.parametrize("mode", ["ready", "revoked_owner", "deleted", "policy_revoked"])
+@pytest.mark.parametrize(
+    "mode",
+    [
+        "ready",
+        "private_member",
+        "private_removed",
+        "private_removed_after_bind",
+        "private_removed_before_card",
+        "private_manager",
+        "history_revoked",
+        "parent_hidden",
+        "lookup_failed",
+        "revoked_owner",
+        "deleted",
+        "policy_revoked",
+    ],
+)
 async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, source, monkeypatch):
     db_session_factory, now, tenant, principal, mapping, watch, key = await enrolled_page_watch(
         db_session_factory, monkeypatch, source=source
@@ -144,14 +161,35 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
     )
     runtime = replace(runtime, anthropic=fake_client, turn_deps=deps)
     bot = make_bot(runtime)
+    rest = WatchDiscordRest(bot)
     guild = _make_guild(member=_make_member(admin=False))
     if mode == "revoked_owner":
         guild = _make_guild()
+        rest.member_error = discord.NotFound(MagicMock(status=404, reason="gone"), "gone")
     guild.id = 710000099
     thread = _make_thread(guild=guild)
+    thread.locked = False
     thread.permissions_for.return_value = discord.Permissions(
-        view_channel=True, send_messages_in_threads=True
+        view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
+    thread.type = discord.ChannelType.public_thread
+    if mode.startswith("private_"):
+        rest.private = True
+        thread.type = discord.ChannelType.private_thread
+        if mode in {"private_removed", "private_manager"}:
+            rest.membership_error = discord.NotFound(
+                MagicMock(status=404, reason="gone"), "Unknown Member"
+            )
+        if mode == "private_manager":
+            rest.permissions.manage_threads = True
+    if mode == "history_revoked":
+        rest.permissions.read_message_history = False
+    if mode == "parent_hidden":
+        rest.permissions.view_channel = False
+    if mode == "lookup_failed":
+        rest.channel_error = discord.Forbidden(
+            MagicMock(status=403, reason="forbidden"), "forbidden"
+        )
     bot.get_channel = MagicMock(return_value=thread)
     if mode == "deleted":
         bot.get_channel = MagicMock(return_value=None)
@@ -169,6 +207,19 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
                 policy=TenantAccessPolicy(invoker_user_ids=("someone_else",)),
             )
 
+    if mode == "private_removed_before_card":
+        from daimon.adapters.discord import bot as bot_module
+
+        original_post = bot_module.post_initial_turn_card
+
+        async def revoke_before_card(*args, **kwargs):
+            rest.membership_error = discord.NotFound(
+                MagicMock(status=404, reason="gone"), "Unknown Member"
+            )
+            return await original_post(*args, **kwargs)
+
+        monkeypatch.setattr(bot_module, "post_initial_turn_card", revoke_before_card)
+
     bound = []
 
     async def bind(_deps, admission, **_kwargs):
@@ -185,6 +236,10 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
             _record=record,
         )
         bound.append(prepared)
+        if mode == "private_removed_after_bind":
+            rest.membership_error = discord.NotFound(
+                MagicMock(status=404, reason="gone"), "Unknown Member"
+            )
         return prepared
 
     with watch_admission_patches(bind):
@@ -200,8 +255,20 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
     async with db_session_factory() as db:
         wake = await get_continuation(db, idempotency_key=key)
         assert len(await watches.list_evidence(db, watch.id)) == 1
+        current_watch = await watches.get_watch(db, watch.id)
+        if mode in {
+            "private_removed",
+            "private_removed_after_bind",
+            "private_removed_before_card",
+            "history_revoked",
+            "parent_hidden",
+            "lookup_failed",
+            "revoked_owner",
+        }:
+            assert current_watch.status == "paused"
+            assert current_watch.source_state["reason"].startswith("Watch paused:")
     assert wake is not None
-    if mode == "ready":
+    if mode in {"ready", "private_member", "private_manager"}:
         assert wake.status == "delivered", wake
         assert len([event for event in sent if event["type"] == "user.message"]) == 1, (
             transport_failures,
@@ -211,6 +278,8 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         assert updates and "always_ask" in str(updates)
         assert "Summarize the upload" in str(sent)
         assert thread.send.await_count > 0
+        outgoing = str(thread.send.await_args_list) + str(thread.send.return_value.mock_calls)
+        assert "The upload is ready." in outgoing
         thread.history.assert_not_called()
         assert snapshot.agent.tools == original_tools
         assert snapshot.agent.mcp_servers == original_servers
@@ -240,8 +309,23 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         assert len(sent_tools) == 2
         assert sent_tools[1] == original_tools
     else:
-        assert wake.status == "skipped", wake
+        if mode in {
+            "private_removed",
+            "private_removed_after_bind",
+            "private_removed_before_card",
+            "history_revoked",
+            "parent_hidden",
+            "lookup_failed",
+            "revoked_owner",
+        }:
+            assert wake.status == "cancelled", wake
+            assert wake.skip_reason == "watch_revoked"
+        else:
+            assert wake.status == "skipped", wake
         assert sent == []
+        if mode == "private_removed_before_card":
+            assert bound == []
+            thread.send.assert_not_awaited()
         if mode == "deleted":
             assert wake.skip_reason == "thread_unavailable"
             thread.send.assert_not_awaited()

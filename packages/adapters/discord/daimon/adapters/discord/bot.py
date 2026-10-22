@@ -99,6 +99,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
+from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_spend import spend_limit_error
@@ -213,6 +214,7 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.prepare import PreparedTurn, admitted_session_scope, bind_session
 from daimon.core.turn.protection import (
     ConfirmedProtection,
@@ -3864,32 +3866,13 @@ class DaimonBot(commands.Bot):
             else None
         )
 
-        # The follow-up runs as the requester, so it carries their role as it
-        # stands NOW -- re-read from the guild, never from anything the form
-        # or the row recorded. A lookup that fails runs the turn as USER.
+        # Watches require a complete REST-only owner snapshot and fail closed.
+        # Other continuations retain their existing requester-role resolution.
         if row.reason == "watch_fired":
-            from daimon.core.stores.tenants import get_tenant
-
-            async with self.runtime.sessionmaker() as db:
-                tenant = await get_tenant(db, tenant_id)
-            if (
-                tenant is None
-                or tenant.archived_at is not None
-                or tenant.external_id != str(thread.guild.id)
-                or row.thread_id != str(thread.id)
-                or row.parent_channel_id != str(thread.parent_id)
-            ):
-                raise AdmissionDenied(reason="invoker_not_allowed")
-            try:
-                member = await thread.guild.fetch_member(int(row.requester_external_user_id))
-            except (discord.HTTPException, ValueError) as exc:
-                raise AdmissionDenied(reason="invoker_not_allowed") from exc
-            permissions = thread.permissions_for(member)
-            if not permissions.view_channel or not permissions.send_messages_in_threads:
-                raise AdmissionDenied(reason="writers_none")
+            member = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
             role = (
                 Role.ADMIN
-                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
+                if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
                 else Role.USER
             )
             _role_ids = member_role_ids(member)
@@ -3998,10 +3981,26 @@ class DaimonBot(commands.Bot):
         # A thread lost mid-turn sets the same event Stop does: the normal interrupt path.
         self._thread_stops.watch(thread.id, cancel)
 
+        async def watch_binding() -> None:
+            from daimon.core.stores.watches import watch_seed
+
+            async with self.runtime.sessionmaker() as db:
+                seed = await watch_seed(db, row, now=datetime.now(UTC))
+            if seed is None:
+                raise AdmissionDenied(reason="runs_elsewhere")
+            member = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            live_role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
+                else Role.USER
+            )
+            if live_role is not role or set(member_role_ids(member)) != set(_role_ids):
+                raise AdmissionDenied(reason="invoker_not_allowed")
+
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
-            return DiscordTurnLifecycle(
+            lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
@@ -4046,6 +4045,10 @@ class DaimonBot(commands.Bot):
                 ),
             )
 
+            if row.reason == "watch_fired":
+                lifecycle.set_output_authorization(OutputAuthorization(watch_binding))
+            return lifecycle
+
         turn_card_intent, lifecycle = await post_initial_turn_card(
             self.runtime.sessionmaker,
             tenant_id=tenant_id,
@@ -4068,28 +4071,6 @@ class DaimonBot(commands.Bot):
             reuse_existing=True,
             deadline=turn_deadline_at,
         )
-
-        async def watch_binding() -> None:
-            from daimon.core.stores.watches import watch_seed
-
-            async with self.runtime.sessionmaker() as db:
-                seed = await watch_seed(db, row, now=datetime.now(UTC))
-            if seed is None:
-                raise AdmissionDenied(reason="runs_elsewhere")
-            try:
-                member = await thread.guild.fetch_member(int(row.requester_external_user_id))
-            except (discord.HTTPException, ValueError) as exc:
-                raise AdmissionDenied(reason="invoker_not_allowed") from exc
-            live_role = (
-                Role.ADMIN
-                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
-                else Role.USER
-            )
-            if live_role is not role or set(member_role_ids(member)) != set(_role_ids):
-                raise AdmissionDenied(reason="invoker_not_allowed")
-            permissions = thread.permissions_for(member)
-            if not permissions.view_channel or not permissions.send_messages_in_threads:
-                raise AdmissionDenied(reason="writers_none")
 
         async def completion_root() -> None:
             if prepared.session_account_id != prepared.admission.account_id:
