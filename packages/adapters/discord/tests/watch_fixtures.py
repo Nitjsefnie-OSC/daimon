@@ -208,6 +208,7 @@ class WatchDiscordRest:
         self.private = False
         self.locked = False
         self.overwrites = []
+        self.category_id = None
         self.member_error = None
         self.membership_error = None
         self.channel_error = None
@@ -262,6 +263,7 @@ class WatchDiscordRest:
                 "guild_id": "710000099",
                 "type": 0,
                 "name": "REST parent",
+                "parent_id": self.category_id,
                 "position": 0,
                 "permission_overwrites": self.overwrites,
             }

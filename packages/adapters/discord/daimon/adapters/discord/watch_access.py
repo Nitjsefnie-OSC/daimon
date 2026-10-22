@@ -1,6 +1,8 @@
 """Watch authorization invariant: every decision input is fetched by REST in
 this check: guild identity/owner, roles/permissions, member identity/roles/timeout,
-parent overwrites, thread identity/type/lock and private-thread membership.
+parent overwrites/category, thread identity/type/lock and private-thread membership.
+Channel and category protection rules are loaded from the DB in the same check;
+REST category metadata is carried into admission, never resolved from the gateway.
 Only the credentialed HTTP transport is shared with the gateway. All Discord
 objects are parsed into a new, empty ConnectionState; no gateway guild, role,
 member, channel or thread object (or cache-derived attribute) supplies authority.
@@ -10,15 +12,24 @@ or failed REST proof refuses output and pauses the watch, without parent fallbac
 
 from __future__ import annotations
 
+from dataclasses import dataclass
+
 from aiohttp import ClientError
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.tenants import get_tenant
 from daimon.core.stores.watches import get_firing, pause_watch
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.protection import protection_state
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 from discord.state import ConnectionState
+
+
+@dataclass(frozen=True)
+class WatchThreadAccess:
+    member: discord.Member
+    category_id: str | None
 
 
 def _discard_event(*args: object, **kwargs: object) -> None:
@@ -29,10 +40,11 @@ async def require_watch_thread_access(
     sessions: async_sessionmaker[AsyncSession],
     row: TaskContinuationRow,
     client: discord.Client,
-) -> discord.Member:
+) -> WatchThreadAccess:
     """Never use cached thread membership or redirect a refused wake to its parent."""
     reason: str | None = None
     member: discord.Member | None = None
+    category_id: str | None = None
     try:
         async with sessions() as db:
             tenant = await get_tenant(db, row.tenant_id)
@@ -73,8 +85,22 @@ async def require_watch_thread_access(
         ):
             reason = "Watch paused: reporting thread parent is unavailable."
         else:
+            category_id = str(parent.category_id) if parent.category_id is not None else None
+
+            async def rest_category() -> tuple[str | None, bool]:
+                return category_id, False
+
+            protection = await protection_state(
+                sessions,
+                tenant_id=row.tenant_id,
+                channel_id=row.parent_channel_id,
+                thread_id=row.thread_id,
+                resolve_category=rest_category,
+            )
             permissions = parent.permissions_for(member)
-            if not permissions.view_channel:
+            if not protection.may_post:
+                reason = "Watch paused: channel/category rules block or cannot verify output."
+            elif not permissions.view_channel:
                 reason = "Watch paused: owner can no longer view the reporting channel."
             elif not permissions.read_message_history:
                 reason = "Watch paused: owner can no longer read reporting channel history."
@@ -109,4 +135,4 @@ async def require_watch_thread_access(
                 await pause_watch(db, firing.watch_id, reason=reason)
         raise AdmissionDenied(reason="invoker_not_allowed")
     assert member is not None
-    return member
+    return WatchThreadAccess(member=member, category_id=category_id)

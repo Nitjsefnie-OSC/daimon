@@ -150,7 +150,8 @@ async def test_watch_authority_is_entirely_rest(db_session_factory, monkeypatch,
         "current_owner",
     }
     if allowed:
-        member = await require_watch_thread_access(factory, row, client)
+        access = await require_watch_thread_access(factory, row, client)
+        member = access.member
         assert member.guild.owner_id == int(rest.owner_id)
         assert member.display_name == "owner"  # Never the cached user named "cached".
         if rest.permissions.manage_threads or mode == "current_owner" or not rest.private:
