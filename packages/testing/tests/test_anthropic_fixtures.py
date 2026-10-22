@@ -18,6 +18,7 @@ from anthropic import APIConnectionError
 from anthropic.types.beta.sessions import BetaManagedAgentsSpanModelRequestEndEvent
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.anthropic_fixtures import (
     AnthropicEntry,
     AnthropicIndex,
@@ -72,6 +73,7 @@ async def test_main_824_catchup_reads_recorded_usage_after_the_real_sdk_turn() -
         assert await edge.status() == "idle"
         lifecycle = RecordingLifecycle()
         state = await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=replay.client,
             session_id=identity,
             user_message=turn.request_text,
@@ -227,6 +229,7 @@ async def test_each_turn_drives_real_anthropic_sdk_and_legacy_host(
             replay.wire.release(binding.completion_gate)
         state = await asyncio.wait_for(
             run_turn(
+                privacy=TurnPrivacy("test"),
                 anthropic=replay.client,
                 session_id=binding.session_id,
                 user_message=turn.request_text,
@@ -675,6 +678,7 @@ async def test_followup_uses_one_retained_sdk_client_and_native_session() -> Non
             lifecycle = RecordingLifecycle()
             state = await asyncio.wait_for(
                 run_turn(
+                    privacy=TurnPrivacy("test"),
                     anthropic=replay.client,
                     session_id=binding.session_id,
                     user_message=turn.request_text,

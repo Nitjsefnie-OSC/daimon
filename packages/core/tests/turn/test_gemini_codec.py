@@ -12,6 +12,7 @@ from daimon.core.turn.driver import run_turn
 from daimon.core.turn.gemini import PROFILE, GeminiTurnIO
 from daimon.core.turn.io import TurnConnectionLost
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
@@ -292,6 +293,7 @@ async def test_n4_dispatch_runs_two_offline_host_turns_without_anthropic_calls(
         for text in ("first answer", "second answer"):
             lifecycle = RecordingLifecycle()
             state = await run_turn(
+                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 session_id=harness.session.id,
                 user_message="question",

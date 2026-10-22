@@ -17,6 +17,7 @@ from daimon.core.turn.driver import run_turn
 from daimon.core.turn.io import default_mux_turn_io
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import list_response, send_events_response
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
@@ -116,6 +117,7 @@ async def test_actual_sdk_traffic_and_effects_match_legacy_with_durable_journal(
         async with transport.client() as client:
             with context(store).activate():
                 state = await run_turn(
+                    privacy=TurnPrivacy("test"),
                     anthropic=client,
                     session_id="session",
                     user_message="question",
@@ -638,6 +640,7 @@ async def test_main_confirmation_recovery_keeps_legacy_wire_and_the_mux_fence(
         async with transport.client() as client:
             with context(store).activate():
                 state = await run_turn(
+                    privacy=TurnPrivacy("test"),
                     anthropic=client,
                     session_id="session",
                     user_message="retry me",

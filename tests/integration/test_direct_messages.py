@@ -41,6 +41,7 @@ from daimon.core.stores.thread_sessions import create_thread_session, get_live_t
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn_queue import TurnQueue
 from daimon.testing import build_turn_router
 from daimon.testing.db import build_test_engine
@@ -1315,6 +1316,7 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         private_tokens.append(token)
         # Run the real headless assembly and driver while the DM context is live.
         await headless_turn(
+            privacy=TurnPrivacy("rehearsal"),
             anthropic=deps.anthropic,
             agent_id=admission.agent.id,
             environment_id=admission.environment.id,

@@ -5,12 +5,10 @@ from daimon.adapters.mcp.runtime import McpRuntime
 from fastmcp.exceptions import ToolError
 
 
-def protected(
-    runtime: McpRuntime, guild_id: str, channel: discord.abc.GuildChannel | discord.Thread
-) -> bool:
+def protected(runtime: McpRuntime, guild_id: str, channel: object) -> bool:
     return runtime.settings.recruitment.is_recruitment_channel(
         guild_id,
-        str(channel.id),
+        str(getattr(channel, "id", "")),
         str(channel.parent_id)
         if isinstance(channel, discord.Thread) and channel.parent_id
         else ""
@@ -19,8 +17,6 @@ def protected(
     )
 
 
-def require_general_channel(
-    runtime: McpRuntime, guild_id: str, channel: discord.abc.GuildChannel | discord.Thread
-) -> None:
+def require_general_channel(runtime: McpRuntime, guild_id: str, channel: object) -> None:
     if protected(runtime, guild_id, channel):
         raise ToolError("Source unavailable.")

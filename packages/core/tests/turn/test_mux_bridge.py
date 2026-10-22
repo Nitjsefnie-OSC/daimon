@@ -11,6 +11,7 @@ from anthropic.types.beta.sessions import BetaManagedAgentsEventParams
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.io import neutral_inputs
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.ma import send_events_response
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
@@ -64,6 +65,7 @@ async def test_real_http_and_host_effects_match_both_paths(
         lifecycle = RecordingLifecycle()
         async with transport.client() as client:
             state = await run_turn(
+                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 session_id="session",
                 user_message="question",
@@ -148,6 +150,7 @@ async def test_idle_stream_opens_before_post_and_needs_no_first_event(
     ) as client:
         turn = asyncio.create_task(
             run_turn(
+                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 session_id="session",
                 user_message="question",
@@ -178,6 +181,7 @@ async def test_mux_scope_is_required_before_any_provider_io() -> None:
     async with transport.client() as client:
         with pytest.raises(ScopeViolation):
             await run_turn(
+                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 session_id="session",
                 user_message="question",
@@ -225,6 +229,7 @@ async def test_future_native_root_idle_preserves_legacy_completion_without_recon
         lifecycle = RecordingLifecycle()
         async with transport.client() as client:
             state = await run_turn(
+                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 session_id="session",
                 user_message="question",

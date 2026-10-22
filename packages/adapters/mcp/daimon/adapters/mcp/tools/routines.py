@@ -33,6 +33,7 @@ from daimon.adapters.mcp.tools.discord._client import (
     _resolve_member,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
+from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _check_send_permission,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
@@ -186,6 +187,7 @@ async def _resolve_discord_destination(
         async with rest_client(_require_bot_token(runtime)) as client:
             _, member = await _resolve_member(client, guild_id, caller)
             channel = await client.fetch_channel(int(destination_id))
+            require_general_channel(runtime, guild_id, channel)
             if isinstance(channel, discord.Thread):
                 if kind != "thread":
                     raise ToolError(f"{destination_id} is a thread: use destination_kind=thread")
@@ -623,6 +625,10 @@ async def _create_routine_impl(
             raise ToolError(str(exc)) from exc
     if destination_kind in (None, "dm"):
         budget_channel_id = source_channel_id
+    if auth.platform == "discord" and runtime.settings.recruitment.is_recruitment_channel(
+        _require_guild_id(auth), source_thread_id or source_channel_id or "", source_channel_id
+    ):
+        raise ToolError("Source unavailable.")
     caller = await load_isolation_view(runtime, auth, location_channel_id=origin_channel_id(origin))
     match = await find_agent_by_daimon_tag(
         runtime.client,

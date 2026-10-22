@@ -154,6 +154,7 @@ from daimon.core.turn.admission import DmSource
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.outcomes import current_outcome, drain_outcomes
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.turn_card_intent_sweep import sweep_retired_turn_card_intents
@@ -437,6 +438,35 @@ async def _build_fire(
                 await _refuse(s, row, "routine tenant archived")
                 return
             platform = tenant.platform
+            privacy = TurnPrivacy(
+                platform,
+                settings.recruitment,
+                row.tenant_id,
+                row.source_thread_id or row.source_channel_id or row.channel_id or "",
+                row.source_channel_id or row.channel_id,
+            )
+            try:
+                privacy.check()
+            except AdmissionDenied:
+                await _refuse(s, row, "Source unavailable.")
+                return
+            # Stored destination metadata is resolved below by normal policy;
+            # configured parents can be refused before using stored trigger text.
+            if (
+                platform == "discord"
+                and row.destination_kind in {"channel", "thread"}
+                and settings.recruitment.is_recruitment_channel(
+                    tenant.external_id,
+                    row.destination_id or "",
+                    ""
+                    if row.destination_kind == "channel"
+                    else row.channel_id
+                    if row.channel_id != row.destination_id
+                    else None,
+                )
+            ):
+                await _refuse(s, row, "Source unavailable.")
+                return
             if row.destination_kind == "dm" and (
                 platform != "discord"
                 or not await dm_enabled(s, tenant_id=row.tenant_id)
@@ -707,6 +737,7 @@ async def _build_fire(
         output_sessions: list[str] = []
 
         result = await run_turn(
+            privacy=privacy,
             anthropic=client,
             agent_id=resolved_agent_id,
             environment_id=resolved_env_id,

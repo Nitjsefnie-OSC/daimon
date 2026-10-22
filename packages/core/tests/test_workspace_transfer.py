@@ -52,6 +52,7 @@ from daimon.core.checkpoint_prompt import (
 from daimon.core.session_snapshot import SessionSnapshot
 from daimon.core.stores.pending_file_deletes import list_due_pending_file_deletes
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.workspace_transfer import (
     CHECKPOINT_REASON_CONFIGURATION_CHANGE,
     CHECKPOINT_REASON_HANDOFF,
@@ -228,6 +229,7 @@ async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -286,6 +288,7 @@ async def test_transfer_records_a_repository_commit_it_could_not_prevent(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
         tenant_id=TENANT_ID,
@@ -326,6 +329,7 @@ async def test_checkpoint_prompt_names_every_excluded_path(
     await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
         tenant_id=TENANT_ID,
@@ -390,6 +394,7 @@ async def test_transfer_bills_the_checkpoint_at_the_old_model_as_a_checkpoint_de
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(model_id="claude-haiku-4-5"),
         tenant_id=tenant.id,
@@ -434,6 +439,7 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -469,6 +475,7 @@ async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -519,6 +526,7 @@ async def test_transfer_degrades_to_transcript_when_the_session_vanishes_mid_tra
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -554,6 +562,7 @@ async def test_transfer_degrades_to_transcript_when_the_bundle_is_oversize(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -594,6 +603,7 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_wrote_no_arch
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -648,6 +658,7 @@ async def test_transfer_degrades_to_transcript_when_the_re_upload_fails(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -687,6 +698,7 @@ async def test_transfer_returns_history_only_when_the_session_log_is_gone(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -830,6 +842,7 @@ async def test_transfer_leaves_uncommitted_work_behind_and_names_it_when_asked_t
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
         tenant_id=TENANT_ID,
@@ -869,6 +882,7 @@ async def test_transfer_captures_uncommitted_work_when_the_answer_is_copy(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(repo_mount_path="/root/repo"),
         tenant_id=TENANT_ID,
@@ -915,6 +929,7 @@ async def test_a_partial_archive_crosses_and_names_the_files_it_left_out(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -965,6 +980,7 @@ async def test_a_left_out_listing_does_not_rescue_an_archive_still_over_the_cap(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -1026,6 +1042,7 @@ async def test_checkpoint_rides_the_system_channel_on_a_model_that_takes_one(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(model_id="claude-sonnet-5"),
         tenant_id=TENANT_ID,
@@ -1088,6 +1105,7 @@ async def test_checkpoint_stays_a_user_message_on_a_model_without_system_support
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(model_id="claude-haiku-4-5"),
         tenant_id=TENANT_ID,
@@ -1132,6 +1150,7 @@ async def test_transfer_degrades_to_transcript_when_the_checkpoint_rejects_its_o
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -1212,6 +1231,7 @@ async def test_the_checkpoint_controls_carry_the_reason_they_were_given(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -1306,6 +1326,7 @@ async def test_full_transfer_accepts_partial_upload_reply_and_enqueues_cleanup(
         outcome = await transfer_workspace(
             client,
             db_session_factory,
+            privacy=TurnPrivacy("test"),
             old_session_id=old_session,
             old_snapshot=_snapshot(),
             tenant_id=TENANT_ID,
@@ -1446,6 +1467,7 @@ async def test_a_checkpoint_turn_is_decided_by_the_unattended_rules(
     await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -1561,6 +1583,7 @@ async def test_a_checkpoint_follows_its_conversations_rules_not_its_budget_chann
         )
     ]
     runner = WorkspaceTransferRunner(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         sessionmaker=db_session_factory,
         tenant_id=tenant.id,
@@ -1612,6 +1635,7 @@ async def test_a_coordinator_session_is_never_checkpointed(
     outcome = await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
@@ -1681,6 +1705,7 @@ async def test_every_mcp_call_of_a_checkpoint_pauses_for_the_decider(
     await transfer_workspace(
         client,
         db_session_factory,
+        privacy=TurnPrivacy("test"),
         old_session_id=old_session,
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,

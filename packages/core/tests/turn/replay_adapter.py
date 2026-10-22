@@ -22,6 +22,7 @@ from baselines.replay import Evidence
 from daimon.core.config import load_turn_settings
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.ma import send_events_response
 from daimon.testing.ma_models import ma_model_usage
 from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
@@ -111,6 +112,7 @@ class TurnReplayAdapter:
             selected = load_turn_settings(_env_file=None).path
             async with transport.client() as client:
                 state = await run_turn(
+                    privacy=TurnPrivacy("test"),
                     anthropic=client,
                     session_id="session",
                     user_message="offline question",

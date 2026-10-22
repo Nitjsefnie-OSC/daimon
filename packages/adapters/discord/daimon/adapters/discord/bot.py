@@ -1219,6 +1219,7 @@ class DaimonBot(commands.Bot):
                     platform="discord",
                     post=make_discord_routine_poster(
                         self.runtime.sessionmaker,
+                        recruitment=self.runtime.settings.recruitment,
                         fetch_channel=self._channel_by_id,
                         open_dm=self.open_member_dm,
                         dm_policy=lambda row: self.runtime.settings.direct_message_policies.get(
