@@ -70,7 +70,7 @@ when it supports all nine.
 
 | Profile | Core | Notes |
 | --- | --- | --- |
-| `anthropic.managed_agents` | yes | Every core capability is declared native, but the driver does not implement `reconcile` yet. Steering, stream-cursor replay, environment fork and native schedules are not offered. |
+| `anthropic.managed_agents` | yes | Every core capability is native. `reconcile` reads the session status and the newest 5,000 events; older history is reported as a `history_truncated` gap. Steering, stream-cursor replay, environment fork and native schedules are not offered. |
 | `openai.persistent_workspace` | yes | `reconcile` is emulated from saved items; missed events cannot be replayed. |
 | `openai.conversation_only` | no | No workspace. Runnable for explicitly granted conversation-only fleet workers. |
 | `gemini.inline_reuse` | no | The inline environment expires after inactivity, so workspace persistence is not guaranteed. Its usage reporting is undeclared, so admission refuses it until a driver shows usage observations. |
