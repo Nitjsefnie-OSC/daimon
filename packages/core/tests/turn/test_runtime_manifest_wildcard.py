@@ -51,7 +51,7 @@ def fake_request(
         channel=SimpleNamespace(platform=platform, channel_id=channel_id),
     )
     return SimpleNamespace(
-        admission=SimpleNamespace(backend_revision=revision),
+        admission=SimpleNamespace(backend_revision=revision, backend_revision_origin="channel"),
         scope=SimpleNamespace(tenant_id=tenant_id, account_id=account_id),
     )
 
@@ -225,3 +225,26 @@ def test_wildcard_tenant_id_or_profile_refuses_at_startup_validation(
     with pytest.raises(ProviderRuntimeConfigurationError) as refused:
         validate_configured_runtime_manifest()
     assert refused.value.reason == "wildcard_tenant_or_profile"
+
+
+def test_channel_and_agent_rows_serve_only_their_own_turn_origin(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    sourced = {
+        **row(platform="*", channel_id="*", account_id="*", agent_id="agent-counterpart"),
+        "source_agent_id": "00000000-0000-0000-0000-000000000001",
+        "source_agent_version": 2,
+        "counterpart_catalog_id": "catalog",
+        "counterpart_catalog_revision": 1,
+    }
+    write_manifest(
+        tmp_path,
+        monkeypatch,
+        [row(platform="*", channel_id="*", account_id="*", agent_id="agent-fixed"), sourced],
+    )
+    request = fake_request(
+        tenant_id="tenant-a", account_id="account-1", platform="slack", channel_id="channel-1"
+    )
+    assert select_runtime_manifest(request, OpenAIDeployment).agent_id == "agent-fixed"
+    request.admission.backend_revision_origin = "agent"
+    assert select_runtime_manifest(request, OpenAIDeployment).agent_id == "agent-counterpart"

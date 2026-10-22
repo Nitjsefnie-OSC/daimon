@@ -8,6 +8,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 ## [Unreleased]
 
 - Fleet: whenever a worker is cancelled, the host logs why (`fleet.worker_cancel`, with a reason such as `shutdown`, `budget`, `usage_unavailable`, `run_deadline` or `terminal`), so a worker interrupted at send is no longer left without a cause.
+- Gemini agents need no per-agent setup: one tenant-wide template row in the provider runtime manifest (`"root_materialization": true`) serves every agent switched to Gemini. Each agent version's counterpart is published on its first turn and reused after that. Channel and agent rows now serve only their own kind of turn.
 
 - Fleet: a plain-language Gemini worker no longer fails with a provider 400. When the caller gives no token limits, a Gemini Flash worker gets a bounded envelope derived from its own prompt and budget (max input = the prompt's bytes plus headroom; max output = what the rest of its budget buys, at most 65,536 tokens), and an unbounded Gemini worker whose prompt clearly exceeds the 4096-token turn cap is refused at spawn instead of being sent.
 - Switching an agent to another model provider can name the model: "switch agent to gemini-4-argon" (Gemini: gemini-3.8-flash or gemini-4-argon). The card names the model, says where the switch applies (every channel on the server for the default agent), and lists what won't be available, such as memory. Only where agent backends are on.

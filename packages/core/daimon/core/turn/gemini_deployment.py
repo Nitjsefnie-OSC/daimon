@@ -48,6 +48,7 @@ from daimon.core.turn.runtime_manifest import (
     SourceCapabilities,
     fixed_plan_origin_allowed,
     materialize_counterpart,
+    materialize_root_counterpart,
     read_counterpart,
     represented_source,
     select_runtime_manifest,
@@ -139,6 +140,11 @@ class GeminiPlan(BaseModel):
     worker_materialization: bool = Field(
         default=False, strict=True, exclude_if=lambda value: not value
     )
+    # A tenant-wide agent template: each admitted agent version's counterpart is
+    # published on its first turn (`materialize_root_counterpart`).
+    root_materialization: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: not value
+    )
     max_output_tokens: Annotated[int, Field(gt=0, le=65_536, strict=True)] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -169,6 +175,8 @@ class GeminiPlan(BaseModel):
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
         validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
+        if self.root_materialization and self.source_capabilities is not None:
+            raise ValueError("an agent template carries no operator capability inputs")
         if self.source_capabilities is not None:
             if (
                 self.worker_materialization
@@ -633,6 +641,11 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             catalog_adapter=backend.catalog_adapter,
         )
 
+    async def materialize_root(preparation: ProviderPreparationRequest) -> AgentRevision:
+        return await materialize_root_counterpart(
+            plan, preparation, resources=resources(preparation)
+        )
+
     async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
         async def host(_: TurnPersistence, worker: ResolvedWorkerSpec) -> NeutralResourceHost:
             if plan.worker_deployment(worker, revision) != deployment:
@@ -665,6 +678,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         transport_factory=transport,
         read_agent_counterpart=read,
         materialize_worker=materialize if plan.worker_materialization else None,
+        materialize_root=materialize_root if plan.root_materialization else None,
         journal=GeminiJournal(
             records,
             request.deps.state_store,
