@@ -1491,8 +1491,14 @@ def test_manifest_hold_is_the_row_runtime_selection_would_pick(tmp_path, monkeyp
             "account_id": "*",
             "configuration_grant": grant,
             "hold_usd": "0.49",
+            # Fleet workers' turns are agent-origin: only source-pinned worker rows serve them.
+            "source_agent_id": "00000000-0000-0000-0000-0000000000f1",
+            "source_agent_version": 1,
+            "worker_materialization": True,
         }
         return base | changes
+
+    channel_only = {"source_agent_id": None, "source_agent_version": None}
 
     path = tmp_path / "runtime.json"
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
@@ -1504,12 +1510,16 @@ def test_manifest_hold_is_the_row_runtime_selection_would_pick(tmp_path, monkeyp
         json.dumps(
             [
                 row(),
-                row(platform="*", channel_id="*", hold_usd="0.25"),
+                # D3's tenant-wide channel row: a fixed plan no worker ever runs.
+                row(platform="*", channel_id="*", hold_usd="0.25", **channel_only),
                 row(tenant_id="other", hold_usd="0.01"),
             ]
         )
     )
-    # The channel's own row wins over the tenant-wide default, as selection does.
+    # The channel's own worker row wins; a channel's fixed plan never serves a worker.
+    assert hold("fleet-test") == Decimal("0.49")
+    assert hold("elsewhere") is None
+    path.write_text(json.dumps([row(), row(platform="*", channel_id="*", hold_usd="0.25")]))
     assert hold("fleet-test") == Decimal("0.49")
     assert hold("elsewhere") == Decimal("0.25")
     # Two rows naming different fields are ambiguous: selection refuses, so no hold.
@@ -1559,6 +1569,9 @@ async def test_fleet_r9_plain_gemini_spawn_admits_the_derived_envelope_end_to_en
                         "requires": {},
                     },
                     "hold_usd": "0.12",
+                    "source_agent_id": "00000000-0000-0000-0000-0000000000f1",
+                    "source_agent_version": 1,
+                    "worker_materialization": True,
                 }
             ]
         )
