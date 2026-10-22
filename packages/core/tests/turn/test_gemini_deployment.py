@@ -1103,11 +1103,7 @@ async def test_policy_refusal_precedes_selected_key_and_transport(
     assert not (tmp_path / "records.sqlite").exists()
 
 
-def argon_selected(
-    selected: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch, day: datetime
-) -> ProviderPreparationRequest:
-    """Select Argon on the channel and move the tariff clock to `day`."""
-
+def argon_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
     class Clock(datetime):
         @classmethod
         def now(cls, tz: tzinfo | None = None) -> datetime:  # pyright: ignore[reportIncompatibleMethodOverride]
@@ -1115,6 +1111,13 @@ def argon_selected(
             return day
 
     monkeypatch.setattr(pricing, "datetime", Clock)
+
+
+def argon_selected(
+    selected: ProviderPreparationRequest, monkeypatch: pytest.MonkeyPatch, day: datetime
+) -> ProviderPreparationRequest:
+    """Select Argon on the channel and move the tariff clock to `day`."""
+    argon_clock(monkeypatch, day)
     revision = selected.admission.backend_revision
     assert revision is not None
     config = ConfigRevision.create(
@@ -1662,7 +1665,9 @@ async def test_argon_after_its_intro_tariff_refuses_before_runtime_discovery(
     selected: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    selected = argon_selected(selected, monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
+    # Admitted inside the window; the tariff expires before the runtime is built.
+    selected = argon_selected(selected, monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
+    argon_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
     getter = os.environ.get
 
     def no_manifest(name: str, default: str | None = None) -> str | None:

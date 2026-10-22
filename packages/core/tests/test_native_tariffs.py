@@ -235,3 +235,18 @@ def test_argon_has_no_price_outside_its_intro_window(monkeypatch: pytest.MonkeyP
     rows = pricing.provider_prices("gemini.inline_reuse")
     assert ("gemini", "gemini-4-argon") not in rows
     assert ("gemini", "gemini-3.8-flash") in rows
+
+
+def test_argon_expiry_is_reported_only_after_its_window(monkeypatch: pytest.MonkeyPatch) -> None:
+    def expired():
+        return pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "gemini-4-argon")
+
+    _clock(monkeypatch, date(2026, 11, 30))
+    assert expired() is None
+    _clock(monkeypatch, date(2026, 12, 1))
+    assert expired() == date(2026, 11, 30)
+    assert pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "unknown") is None
+    assert (
+        pricing.provider_price_expired_on("gemini.inline_reuse", "gemini", "gemini-3.5-flash-lite")
+        is None
+    )
