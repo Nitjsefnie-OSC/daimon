@@ -313,6 +313,7 @@ source_modules = [
     "daimon.core.turn",
     "daimon.core.turn_card_intent_sweep",
     "daimon.core.turn_keys",
+    "daimon.core.turn_hold",
     "daimon.core.turn_origin",
     "daimon.core.turn_queue",
     "daimon.core.untrusted",
