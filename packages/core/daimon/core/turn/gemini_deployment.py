@@ -238,7 +238,7 @@ class GeminiPlan(BaseModel):
         return self
 
     def worker_deployment(
-        self, worker: ResolvedWorkerSpec, revision: ConfigRevision
+        self, worker: ResolvedWorkerSpec, revision: ConfigRevision, *, markup: Decimal = Decimal(1)
     ) -> GeminiDeployment:
         """Compile the resolved worker without adding resources or implicit execution."""
         if self.source_capabilities is not None:
@@ -259,6 +259,7 @@ class GeminiPlan(BaseModel):
                     worker.limits.max_input_tokens,
                     worker.limits.max_output_tokens,
                     worker.limits.budget_usd,
+                    markup=markup,
                     hold_usd=self.hold_usd,
                 )
             except WorkerSpecRefused:
@@ -343,7 +344,7 @@ class GeminiPlan(BaseModel):
         if revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
         if request.worker is not None:
-            return self.worker_deployment(request.worker, revision)
+            return self.worker_deployment(request.worker, revision, markup=request.deps.markup)
         target, source = request.target_spec, request.source
         from daimon.core.turn.runtime_manifest import source_instructions_preserved
 
@@ -680,7 +681,8 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
 
     async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
         async def host(_: TurnPersistence, worker: ResolvedWorkerSpec) -> NeutralResourceHost:
-            if plan.worker_deployment(worker, revision) != deployment:
+            markup = preparation.deps.markup
+            if plan.worker_deployment(worker, revision, markup=markup) != deployment:
                 raise AdmissionDenied(reason="backend_unsupported")
             return resources(preparation)
 

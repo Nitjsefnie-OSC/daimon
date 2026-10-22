@@ -199,15 +199,14 @@ async def test_a_worker_agent_runs_on_its_own_configured_model_not_the_grants_li
     assert patch is not None and patch.model == flash[1]
     assert {"mcp", "memory", "sandbox"} <= set(patch.declared_drops or ())
     # An Argon-configured agent, with a grant that lists neither model: the grant's
-    # list is never the reason. Only the worker profile refuses (Argon is channel-only
-    # until B2 lands); Astra follows the same path once it is selectable.
+    # list is never the reason, and Argon is no longer channel-only.
     argon = agent_worker_backend(pricey.effective_spec, "gemini", "gemini-4-argon")
     assert argon[0].model == "gemini-4-argon"
     assert argon[1] not in grant.models and flash[1] not in grant.models
-    with pytest.raises(WorkerSpecRefused, match="backend: unsupported"):
-        agent_worker_permissions(
-            root, pricey, as_pricey, any_agent(grant), policy=gemini_on, now=NOW, backend=argon
-        )
+    as_argon = agent_worker_permissions(
+        root, pricey, as_pricey, any_agent(grant), policy=gemini_on, now=NOW, backend=argon
+    )
+    assert as_argon.models[0] == argon[1] and argon[0] in as_argon.backend_grants
 
 
 async def test_the_requester_must_be_able_to_run_that_agent_here(captured, owned):
@@ -344,6 +343,73 @@ async def test_spawn_as_a_gemini_configured_agent_runs_on_that_agents_model(capt
     assert resolved.spec.model == ModelRef(provider="gemini", id="gemini-3.8-flash")
     assert resolved.backend.backend == "gemini"
     assert RESEARCHER_SYSTEM in resolved.spec.system
+
+
+async def test_spawn_as_an_argon_agent_runs_only_on_an_envelope_its_budget_covers(
+    captured, owned, monkeypatch
+):
+    from daimon.core.fleet_orchestration import FleetOrchestrator
+    from daimon.core.neutral_resources import gemini_worker_cost_usd
+    from mux.contracts.ids import ModelRef
+
+    from .test_fleet_source_permissions import _in_argon_window
+
+    _in_argon_window(monkeypatch)
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    researcher, actual = await capture_agent(
+        owned, fleet.scope, ma_id="researcher-source", name="researcher"
+    )
+    assert researcher.effective_spec is not None
+    as_researcher = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    gemini_on = policy.model_copy(update={"enabled_backends": ("anthropic", "gemini")})
+    worker_root = agent_worker_permissions(
+        root,
+        researcher,
+        as_researcher,
+        any_agent(grant),
+        policy=gemini_on,
+        now=NOW,
+        backend=agent_worker_backend(researcher.effective_spec, "gemini", "gemini-4-argon"),
+    )
+
+    async def spawn(limits, *, fill):
+        ports, admitted, Admitted = ports_for(worker_root, researcher)
+        with pytest.raises(Admitted):
+            await FleetOrchestrator(ports).spawn(
+                root,
+                gemini_on,
+                now=NOW,
+                operation_key="A1",
+                role="research",
+                backend=None,
+                limits=limits,
+                fill_token_limits=fill,
+                as_agent="researcher",
+                task="Find three sources.",
+            )
+        ((_, resolved),) = admitted
+        return resolved
+
+    # Plain language: the fleet fills a bounded envelope at Argon's tariff.
+    resolved = await spawn(root.limits, fill=True)
+    assert resolved.spec.model == ModelRef(provider="gemini", id="gemini-4-argon")
+    limits = resolved.limits
+    assert limits.max_input_tokens is not None and limits.max_output_tokens is not None
+    worst = gemini_worker_cost_usd(
+        "gemini-4-argon", limits.max_input_tokens, limits.max_output_tokens
+    )
+    assert worst <= limits.budget_usd
+    # Explicit caps whose worst case ($1.18 at Argon's rates) exceeds a $0.05 budget.
+    oversized = root.limits.model_copy(
+        update={
+            "budget_usd": Decimal("0.05"),
+            "max_input_tokens": 262144,
+            "max_output_tokens": 65536,
+        }
+    )
+    with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
+        await spawn(oversized, fill=False)
 
 
 async def test_an_agent_with_an_ask_tool_never_runs_as_a_worker(captured, owned):

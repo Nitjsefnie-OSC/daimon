@@ -236,6 +236,13 @@ def test_argon_worker_compiles_only_on_the_bounded_envelope(
     assert deployment.agent.model == ModelRef(provider="gemini", id="gemini-4-argon")
     assert deployment.max_total_tokens is None
     assert (deployment.max_input_tokens, deployment.max_output_tokens) == (10_000, 2048)
+    # The markup counts too: a $0.06 budget at 2x markup buys only $0.03 of provider cost.
+    priced = replace(
+        bounded, limits=bounded.limits.model_copy(update={"budget_usd": Decimal("0.06")})
+    )
+    assert plan.worker_deployment(priced, revision, markup=Decimal(1)) == deployment
+    with pytest.raises(AdmissionDenied):
+        plan.worker_deployment(priced, revision, markup=Decimal(2))
 
 
 @pytest.mark.parametrize(
