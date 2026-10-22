@@ -54,12 +54,12 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_tenant,
 )
-from daimon.testing.ma import MARouter, list_response
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import DEFAULT_BACKEND
+from mux.testing.drivers.anthropic.ma import MARouter, list_response
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import BaseModel
 from rich.console import Console
 from slack_sdk.errors import SlackApiError

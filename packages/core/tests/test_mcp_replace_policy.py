@@ -122,7 +122,7 @@ async def test_attach_backstop_refuses_a_shared_token_for_a_url_attached_meanwhi
 
     import httpx
     from daimon.core.mcp_attach import attach_mcp_server_to_agent
-    from daimon.testing.ma import MARouter, build_fake_anthropic
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 
     agent = _agent(uuid.uuid4(), servers=[{"name": "linear", "type": "url", "url": _URL}])
     updates: list[bytes] = []
@@ -218,7 +218,7 @@ def _stateful_ma(tenant_id: uuid.UUID):
     import re
 
     import httpx
-    from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+    from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
     state = {
         "agent": ma_agent(

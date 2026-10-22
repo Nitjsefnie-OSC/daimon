@@ -33,8 +33,8 @@ from daimon.core.roster import RosterAgent, paginate
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession
 
 PRECEDENCE_LINE = "A channel's own choice beats the server default."

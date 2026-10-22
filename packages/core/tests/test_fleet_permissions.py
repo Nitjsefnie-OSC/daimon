@@ -704,11 +704,11 @@ def test_native_mcp_policy_that_is_dropped_by_compilation_refuses():
 
 
 async def test_openai_attenuated_mcp_allowlist_reaches_actual_sdk_request():
-    from daimon.testing.isolated_sdk import build_async_openai
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from mux.drivers.openai._common import Context
     from mux.drivers.openai.agents import OpenAIAgents
     from mux.drivers.openai.transport import SDKTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.isolated_sdk import build_async_openai
 
     root = parent("openai")
     server = MCPConnection(
@@ -987,9 +987,9 @@ def test_clone_metadata_map_clear_is_allowed_when_root_has_no_stamps():
 
 async def test_actual_anthropic_clone_refuses_opaque_authority_without_extra_io():
     from daimon.testing.ma_models import ma_agent
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
     from mux.drivers.anthropic.resources.agents import AnthropicAgents
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     root = parent()
     scope = root.fleet.scope
@@ -1043,11 +1043,11 @@ async def test_actual_anthropic_clone_refuses_opaque_authority_without_extra_io(
 
 
 async def test_actual_openai_clone_preserves_implicit_execution_and_refuses_added_tool():
-    from daimon.testing.isolated_sdk import build_async_openai
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from mux.drivers.openai._common import Context
     from mux.drivers.openai.agents import OpenAIAgents
     from mux.drivers.openai.transport import SDKTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.isolated_sdk import build_async_openai
 
     root = parent("openai")
     scope = root.fleet.scope
@@ -1939,9 +1939,9 @@ async def test_root_freeze_uses_actual_sdk_owner_capture_and_owned_resource_proj
     from daimon.core.turn.admission import AdmissionGrant
     from daimon.testing.db import require_owned_sessionmaker
     from daimon.testing.factories import make_account, make_tenant
-    from daimon.testing.ma import MARouter
     from daimon.testing.ma_models import ma_agent, ma_environment
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma import MARouter
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     sm = async_sessionmaker(db_committing_engine, expire_on_commit=False)

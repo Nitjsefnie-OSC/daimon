@@ -38,11 +38,12 @@ from daimon.core.stores.domain import Role, RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.teams_graph import GraphUnavailable
-from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.asgi import INIT_BODY, INIT_HEADERS, asgi_lifespan, call_mcp_tool
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

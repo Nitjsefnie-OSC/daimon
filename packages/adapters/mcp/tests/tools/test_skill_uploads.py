@@ -48,10 +48,11 @@ from daimon.core.stores.turn_origins import create_origin, get_active_origin
 from daimon.core.stores.user_skills import load_user_skill
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_agent, ma_session, ma_session_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
@@ -60,7 +61,7 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     not_found_response,
 )
-from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

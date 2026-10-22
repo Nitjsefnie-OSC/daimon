@@ -25,8 +25,8 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.mcp_tokens import list_mcp_tokens
 from daimon.core.stores.security_audit import list_events
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

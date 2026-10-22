@@ -50,11 +50,11 @@ from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.domain import ChatPlatform, Role
 from daimon.core.turn_hold import TurnHold
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_session
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import build_stub_anthropic
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 SHARED = "C-SYN-SHARED"

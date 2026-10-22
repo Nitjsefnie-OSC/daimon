@@ -13,11 +13,11 @@ import pytest
 from anthropic import AsyncAnthropic
 from daimon.adapters.discord import startup_replay
 from daimon.core.stores.domain import ThreadSessionRow
-from daimon.testing.ma_models import ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from daimon.testing.turn_router import turn_events
 from mux.contracts.ids import Scope
 from mux.drivers.anthropic import AnthropicManagedAgents
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 FIXTURE = Path(__file__).parent / "fixtures/startup_replay_main.py"
 SPEC = importlib.util.spec_from_file_location("startup_replay_main_oracle", FIXTURE)

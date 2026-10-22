@@ -25,12 +25,12 @@ from daimon.core.continuity.wakes import enqueue_wake
 from daimon.core.stores import mux_state
 from daimon.core.stores.domain import TaskContinuationRow
 from daimon.core.stores.task_continuations import get_continuation
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ThreadRef
 from mux.contracts.resources import ProviderBinding
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import PostgresDsn
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

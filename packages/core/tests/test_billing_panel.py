@@ -39,13 +39,13 @@ from daimon.core.stores import tenants, usage_events
 from daimon.core.stores.domain import BudgetWindow, ChannelBudgetRow
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.platform_names import KnownName, upsert_user_names
-from daimon.testing import ma_model_usage
 from daimon.testing.factories import (
     make_account,
     make_channel_budget,
     make_ledger_entry,
     make_tenant,
 )
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

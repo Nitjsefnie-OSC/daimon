@@ -34,22 +34,17 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn_hold import RequesterOrg
-from daimon.testing.ma import (
+from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     make_fake_memory_store_handler,
-    resolved_agent_env_router,
     send_events_response,
     sse_response,
 )
-from daimon.testing.ma_models import (
-    ma_agent,
-    ma_environment,
-    ma_model_usage,
-    ma_session,
-    ma_session_agent,
-)
-from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_session_error, make_status_idle

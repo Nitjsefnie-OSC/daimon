@@ -14,7 +14,6 @@ from pathlib import Path
 
 import httpx
 import pytest
-from daimon.testing.conformance.default_capability import MCP_TOOLS
 from mux.contracts.ids import ModelRef, Revision, Scope
 from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolSpec
 from mux.drivers.openai import OpenAIDriver
@@ -23,6 +22,7 @@ from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
+from mux.testing.conformance.default_capability import MCP_TOOLS
 from openai import AsyncOpenAI
 
 URL = "https://qa.example.com/mcp"

@@ -45,8 +45,10 @@ from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState
 from daimon.core.turn_hold import RequesterOrg
-from daimon.testing import build_fake_anthropic, ma_agent, ma_environment, resolved_agent_env_router
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import register_conversations_info

@@ -25,7 +25,6 @@ from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.testing.factories import make_account, make_tenant, make_thread_session
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.events import Event, NativeProvenance
@@ -36,6 +35,7 @@ from mux.errors import ScopeViolation
 from mux.state.lease import Slot
 from mux.state.memory import MemoryStateStore
 from mux.state.store import binding_slot
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 
@@ -363,9 +363,9 @@ async def test_prepared_driver_wires_state_only_on_mux_and_reuses_explicit_root_
 
     from daimon.core.turn.prepare import PreparedTurn
     from daimon.core.turn.run import run_prepared_turn
-    from daimon.testing.ma import list_response, send_events_response
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
     from daimon.testing.turn_fakes import RecordingLifecycle
+    from mux.testing.drivers.anthropic.ma import list_response, send_events_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     from .conftest import make_agent_message, make_status_idle
 
