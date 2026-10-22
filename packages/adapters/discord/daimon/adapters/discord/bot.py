@@ -3869,24 +3869,23 @@ class DaimonBot(commands.Bot):
         # Watches require a complete REST-only owner snapshot and fail closed.
         # Other continuations retain their existing requester-role resolution.
         if row.reason == "watch_fired":
-            member = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            member = access.member
             role = (
                 Role.ADMIN
                 if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
                 else Role.USER
             )
             _role_ids = member_role_ids(member)
+            category_id, category_unresolved = access.category_id, False
         else:
             role, _role_ids = await _requester_role(thread.guild, row.requester_external_user_id)
-        # A continuation posts into the thread too: a protected one is skipped
-        # (the dispatcher logs it) before admission, which then reads the
-        # parent the check cached.
-        post_state = await _channel_protection_state(
-            self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
-        )
-        if not post_state.may_post:
-            raise AdmissionDenied(reason="writers_none")
-        category_id, category_unresolved = await _resolve_category(thread, fetch=False)
+            post_state = await _channel_protection_state(
+                self.runtime.sessionmaker, tenant_id=tenant_id, channel=thread
+            )
+            if not post_state.may_post:
+                raise AdmissionDenied(reason="writers_none")
+            category_id, category_unresolved = await _resolve_category(thread, fetch=False)
         admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
@@ -3988,7 +3987,8 @@ class DaimonBot(commands.Bot):
                 seed = await watch_seed(db, row, now=datetime.now(UTC))
             if seed is None:
                 raise AdmissionDenied(reason="runs_elsewhere")
-            member = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            access = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
+            member = access.member
             live_role = (
                 Role.ADMIN
                 if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)

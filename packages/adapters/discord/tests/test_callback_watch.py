@@ -41,6 +41,8 @@ from .watch_fixtures import (
     "mode",
     [
         "ready",
+        "fresh_category",
+        "protected_category",
         "private_member",
         "private_removed",
         "private_removed_after_bind",
@@ -220,9 +222,26 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
 
         monkeypatch.setattr(bot_module, "post_initial_turn_card", revoke_before_card)
 
+    if mode in {"fresh_category", "protected_category"}:
+        from daimon.core.access_policy import TenantAccessPolicy
+        from daimon.core.stores.access_policy import set_access_policy
+
+        rest.category_id = "900"
+        thread.parent.category_id = 800  # Gateway cache disagrees with REST.
+        protected_id = "900" if mode == "protected_category" else "800"
+        async with db_session_factory.begin() as db:
+            await set_access_policy(
+                db,
+                tenant_id=tenant.id,
+                policy=TenantAccessPolicy(category_rules={protected_id: {"writers": "none"}}),
+            )
+
     bound = []
 
     async def bind(_deps, admission, **_kwargs):
+        if mode == "fresh_category":
+            assert admission.grant.turn_place.category_id == "900"
+
         async def record(**_event):
             pass
 
@@ -260,6 +279,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
             "private_removed",
             "private_removed_after_bind",
             "private_removed_before_card",
+            "protected_category",
             "history_revoked",
             "parent_hidden",
             "lookup_failed",
@@ -268,7 +288,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
             assert current_watch.status == "paused"
             assert current_watch.source_state["reason"].startswith("Watch paused:")
     assert wake is not None
-    if mode in {"ready", "private_member", "private_manager"}:
+    if mode in {"ready", "private_member", "private_manager", "fresh_category"}:
         assert wake.status == "delivered", wake
         assert len([event for event in sent if event["type"] == "user.message"]) == 1, (
             transport_failures,
@@ -313,6 +333,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
             "private_removed",
             "private_removed_after_bind",
             "private_removed_before_card",
+            "protected_category",
             "history_revoked",
             "parent_hidden",
             "lookup_failed",
@@ -323,7 +344,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         else:
             assert wake.status == "skipped", wake
         assert sent == []
-        if mode == "private_removed_before_card":
+        if mode in {"private_removed_before_card", "protected_category"}:
             assert bound == []
             thread.send.assert_not_awaited()
         if mode == "deleted":

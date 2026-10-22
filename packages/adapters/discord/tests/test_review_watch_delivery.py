@@ -37,7 +37,13 @@ from .watch_fixtures import (
 
 @pytest.mark.fresh_schema
 @pytest.mark.parametrize(
-    "mode", ["revoked_during_turn", "private_removed_during_turn", "history_revoked_during_turn"]
+    "mode",
+    [
+        "revoked_during_turn",
+        "private_removed_during_turn",
+        "history_revoked_during_turn",
+        "category_moved_during_turn",
+    ],
 )
 async def test_review_revocation_before_final_delivery(db_session_factory, mode, monkeypatch):
     db_session_factory, now, tenant, principal, mapping, watch, key = await enrolled_page_watch(
@@ -99,6 +105,17 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
                 )
             elif mode == "history_revoked_during_turn":
                 rest.permissions.read_message_history = False
+            elif mode == "category_moved_during_turn":
+                from daimon.core.access_policy import TenantAccessPolicy
+                from daimon.core.stores.access_policy import set_access_policy
+
+                rest.category_id = "900"
+                async with db_session_factory.begin() as db:
+                    await set_access_policy(
+                        db,
+                        tenant_id=tenant.id,
+                        policy=TenantAccessPolicy(category_rules={"900": {"writers": "none"}}),
+                    )
             yield sse_response(
                 [
                     {

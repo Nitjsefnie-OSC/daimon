@@ -103,6 +103,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- Watch channel/category protection uses the category from the fresh Discord REST parent and current DB rules before admission, execution and output. A stale gateway category cannot authorize a watch in a protected category; unverifiable rules or channel metadata refuse output and pause the watch.
+
 - Discord watches compute access entirely from fresh REST guild ownership, roles, member, parent, thread and membership proofs, checking parent visibility, read history and private-thread membership (or Manage Threads) before running and before every output, including the initial thinking card. Locked threads require Manage Threads. Revoked or unverifiable access pauses the watch with a plain reason and never falls back to the parent channel. Slack and Teams watch enrollment remains unsupported.
 
 - Unattended turns (agent chat `start_turn`/`ask`, routines, watches and wakes)
