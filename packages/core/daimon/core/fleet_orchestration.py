@@ -285,6 +285,26 @@ def worker_trigger(reviewed_result: Event | None) -> str:
     )
 
 
+def _worker_source(
+    parent: WorkerPermissions, resolved: ResolvedWorkerSpec
+) -> tuple[str | None, int | None]:
+    """The agent and live version a worker's admission binds: its own source, else the root's pin.
+
+    None when neither is known, so only rows that pin no source can size it.
+    """
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    if resolved.source_agent is not None:
+        ref, revision = resolved.source_agent
+    elif len(parent.source_revisions) == 1:
+        # Admission retrieves the root agent at exactly this revision and refuses a stale one.
+        ((ref, revision),) = parent.source_revisions
+    else:
+        return None, None
+    tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
+    return str(derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=ref.id)), revision.local
+
+
 class FleetOrchestrator:
     """Shared operations for authenticated MCP and platform control adapters."""
 
@@ -425,10 +445,13 @@ class FleetOrchestrator:
         ):
             markup = getattr(self._ports, "markup", None)
             markup = markup if isinstance(markup, Decimal) else Decimal(1)
+            source_id, source_version = _worker_source(parent, resolved)
             hold = manifest_hold_usd(
                 ConfigRevision.create(parent.fleet.root.channel, 1, resolved.backend),
                 tenant_id=parent.fleet.scope.tenant_id,
                 account_id=parent.fleet.scope.account_id,
+                source_agent_id=source_id,
+                source_agent_version=source_version,
             )
             tokens = bounded_gemini_worker_tokens(
                 system,

@@ -2325,6 +2325,29 @@ considers template and source-pinned rows; a channel's turn considers fixed
 plans with neither. A tenant-wide channel row and a template row therefore
 coexist without ambiguity.
 
+### Worker template rows
+
+A fleet worker row normally pins the source agent and its version
+(`source_agent_id`, `source_agent_version`) and usually the root's channel, so
+editing the agent or running it elsewhere refuses its workers. A **worker
+template row** sets `"worker_materialization": true` with `"*"` (or no value)
+for both source fields, and usually `"*"` on platform, channel and account. It
+serves every granted agent of its one tenant, at the agent's live version, in
+any channel: identity comes from the worker request's own admitted source
+agent (the agent the worker runs as), never from the row. `tenant_id` and
+`profile` stay exact, the configuration grant bounds the models, and the
+per-request checks are unchanged (tenant, caller and session account, the
+root's thread and run). A row pins both source fields or neither, and `"*"`
+source pins are refused on any row that is not a worker row. A row pinned to a
+source agent serves only that agent at that version: another agent's worker,
+or the same agent after an edit, falls through to the template. A pinned row
+still wins over the template in its channel. Selection partitions rows by turn
+kind: a root turn considers root templates and pinned rows, a worker considers
+worker rows and pinned rows, and a channel's turn considers only fixed plans.
+So a root template and a worker template coexist in one tenant, and the
+manifest hold a fleet worker is sized for follows the same rule. Workers still publish their per-run counterpart from the resolved
+worker spec, as before.
+
 ### Output delivery pagination
 
 Delivery follows every Files API page through the authorized output port, so

@@ -364,9 +364,10 @@ async def test_same_backend_review_preserves_real_primary_journal_without_admiss
     }
 
 
+@pytest.mark.parametrize("row", ("pinned", "template"))
 @pytest.mark.parametrize("verdict", ("approved", "refused", "wrong_digest", "wrong_contract"))
 async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
-    native_worker, monkeypatch, tmp_path, verdict
+    native_worker, monkeypatch, tmp_path, verdict, row
 ):
     from datetime import timedelta
 
@@ -455,19 +456,24 @@ async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
             return response
 
     wire = ReviewWire()
+    # A worker TEMPLATE ("*" source, any channel/account) serves the same worker
+    # as a row pinned to this agent version and channel.
+    template = row == "template"
     plan = OpenAIDeployment(
         profile=backend.profile,
         tenant_id=root.fleet.scope.tenant_id,
-        platform=request.platform,
-        channel_id=root.fleet.root.channel.channel_id,
-        account_id=root.fleet.scope.account_id,
+        platform="*" if template else request.platform,
+        channel_id="*" if template else root.fleet.root.channel.channel_id,
+        account_id="*" if template else root.fleet.scope.account_id,
         project="offline-project",
         api_key_env="I4_OFFLINE_OPENAI_KEY",
         worker_materialization=True,
-        source_agent_id=derive_agent_uuid(
-            tenant_id=request.tenant_id, ma_agent_id=captured.source.ref.id
-        ),
-        source_agent_version=captured.source.revision.local,
+        source_agent_id="*"  # pyright: ignore[reportArgumentType]
+        if template
+        else derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=captured.source.ref.id),
+        source_agent_version="*"  # pyright: ignore[reportArgumentType]
+        if template
+        else captured.source.revision.local,
         configuration_grant={
             "profiles": [backend.profile],
             "models": [model.id],

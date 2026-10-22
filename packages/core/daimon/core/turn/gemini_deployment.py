@@ -52,6 +52,7 @@ from daimon.core.turn.runtime_manifest import (
     read_counterpart,
     represented_source,
     select_runtime_manifest,
+    template_source,
     validate_counterpart_pins,
     validate_counterpart_request,
 )
@@ -171,6 +172,12 @@ class GeminiPlan(BaseModel):
         ):
             raise ValueError("skill deployment receipt fields must be exact")
         return cast(object, value)
+
+    @model_validator(mode="before")
+    @classmethod
+    def _any_source(cls, data: object) -> object:
+        # "*" (any granted agent of the tenant, at its live version): a worker template.
+        return template_source(data)
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> GeminiPlan:

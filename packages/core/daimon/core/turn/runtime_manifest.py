@@ -2584,6 +2584,19 @@ class CounterpartPlan(Protocol):
     def model_validate(cls, obj: object) -> Self: ...
 
 
+def template_source(data: object) -> object:
+    """Map a worker template's `"*"` source pins to "no pin"; refuse them on any other row."""
+    if not isinstance(data, dict):
+        return data
+    row = cast(dict[str, object], data)
+    fields = [name for name in ("source_agent_id", "source_agent_version") if row.get(name) == "*"]
+    if not fields:
+        return row
+    if row.get("worker_materialization") is not True:
+        raise ValueError("only a worker template row may name any source agent")
+    return {**row, **dict.fromkeys(fields)}
+
+
 def validate_counterpart_pins(
     plan: CounterpartPlan, *, worker_materialization: bool = False
 ) -> None:
@@ -2602,9 +2615,10 @@ def validate_counterpart_pins(
             raise ValueError("root materialization takes its identity from the admitted agent")
         return
     if worker_materialization:
+        # A worker template names no source (both pins absent): it serves any
+        # granted agent of its tenant, at that agent's live version.
         if (
-            plan.source_agent_id is None
-            or plan.source_agent_version is None
+            (plan.source_agent_id is None) != (plan.source_agent_version is None)
             or plan.counterpart_catalog_id is not None
             or plan.counterpart_catalog_revision is not None
             or plan.agent_id is not None
@@ -2635,14 +2649,41 @@ def _matching_rows(
     """`profile` and `tenant_id` are always exact. The other scope fields are
     exact-matched first; `allow_wildcard` additionally accepts `_WILDCARD` rows
     on those fields only — the caller tries exact-only before falling back."""
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    if request.admission.backend_revision_origin != "agent":
+        kind: TurnKind = "channel"
+        source_agent_id, source_agent_version = None, None
+    else:
+        agent = request.admission.agent
+        kind = "worker" if request.worker is not None else "root"
+        source_agent_id = str(derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=agent.id))
+        source_agent_version = agent.version
     return _rows_for(
         rows,
         revision,
         tenant_id=request.scope.tenant_id,
         account_id=request.scope.account_id,
         allow_wildcard=allow_wildcard,
-        agent_origin=request.admission.backend_revision_origin == "agent",
+        kind=kind,
+        source_agent_id=source_agent_id,
+        source_agent_version=source_agent_version,
     )
+
+
+type TurnKind = Literal["channel", "root", "worker"]
+
+
+def _same_agent(pinned: object, actual: str | None) -> bool:
+    """Source pins are UUIDs: compare them as UUIDs, not by spelling."""
+    try:
+        return actual is not None and UUID(str(pinned)) == UUID(actual)
+    except ValueError:
+        return False
+
+
+def _pinned_source(row: dict[str, JsonValue]) -> bool:
+    return row.get("source_agent_id") not in (None, _WILDCARD)
 
 
 def _rows_for(
@@ -2652,7 +2693,9 @@ def _rows_for(
     tenant_id: str,
     account_id: str,
     allow_wildcard: bool,
-    agent_origin: bool,
+    kind: TurnKind,
+    source_agent_id: str | None,
+    source_agent_version: int | None,
 ) -> list[dict[str, JsonValue]]:
 
     def field_matches(row: dict[str, JsonValue], field: str, actual: object) -> bool:
@@ -2662,10 +2705,27 @@ def _rows_for(
         return allow_wildcard and value == _WILDCARD
 
     def origin_eligible(row: dict[str, JsonValue]) -> bool:
-        # An agent's turn runs its own source (pinned, or a template that publishes
-        # the admitted version); a channel's turn runs a fixed plan with no source.
-        sourced = row.get("root_materialization") is True or row.get("source_agent_id") is not None
-        return sourced == agent_origin
+        # A channel's turn runs a fixed plan with no source. An agent's root turn
+        # runs a root template or a row pinned to its source; a worker runs a
+        # worker row or a fixed counterpart pinned to its source. Root and worker
+        # templates never compete, so both coexist in one tenant.
+        root = row.get("root_materialization") is True
+        worker = row.get("worker_materialization") is True
+        pinned = _pinned_source(row)
+        if kind == "channel":
+            return not (root or worker or pinned)
+        if pinned and (
+            not _same_agent(row.get("source_agent_id"), source_agent_id)
+            or (
+                source_agent_version is not None
+                and row.get("source_agent_version") != source_agent_version
+            )
+        ):
+            # Another agent's (or version's) pinned row: fall through to the template.
+            return False
+        if kind == "root":
+            return root or (pinned and not worker)
+        return worker or (pinned and not root)
 
     return [
         row
@@ -2681,7 +2741,12 @@ def _rows_for(
 
 
 def manifest_hold_usd(
-    revision: ConfigRevision, *, tenant_id: str, account_id: str
+    revision: ConfigRevision,
+    *,
+    tenant_id: str,
+    account_id: str,
+    source_agent_id: str | None = None,
+    source_agent_version: int | None = None,
 ) -> Decimal | None:
     """The per-turn hold of the row `select_runtime_manifest` would select, if any.
 
@@ -2698,26 +2763,22 @@ def manifest_hold_usd(
         if len(raw) > _MAX_BYTES:
             return None
         rows = _ROWS.validate_json(raw)
-        # Fleet workers' turns are agent-origin: the rows a worker's selection would see.
-        selected = _rows_for(
-            rows,
-            revision,
-            tenant_id=tenant_id,
-            account_id=account_id,
-            allow_wildcard=False,
-            agent_origin=True,
-        )
-        if not selected:
-            selected = _most_specific(
-                _rows_for(
-                    rows,
-                    revision,
-                    tenant_id=tenant_id,
-                    account_id=account_id,
-                    allow_wildcard=True,
-                    agent_origin=True,
-                )
+
+        # The rows a fleet worker's selection would see; without its source agent,
+        # only rows that pin none.
+        def worker_rows(allow_wildcard: bool) -> list[dict[str, JsonValue]]:
+            return _rows_for(
+                rows,
+                revision,
+                tenant_id=tenant_id,
+                account_id=account_id,
+                allow_wildcard=allow_wildcard,
+                kind="worker",
+                source_agent_id=source_agent_id,
+                source_agent_version=source_agent_version,
             )
+
+        selected = worker_rows(False) or _most_specific(worker_rows(True))
         if len(selected) != 1:
             return None
         hold = Decimal(str(selected[0]["hold_usd"]))
@@ -2790,6 +2851,11 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         return plan_type.model_validate(resolved)
     except (OSError, ValidationError):
         raise AdmissionDenied(reason="backend_unsupported") from None
+
+
+def _worker_template(plan: CounterpartPlan) -> bool:
+    """A worker row that names no source: identity comes from the request's admitted agent."""
+    return plan.worker_materialization and plan.source_agent_id is None
 
 
 def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
@@ -2865,9 +2931,16 @@ def validate_counterpart_request(
         != (plan.tenant_id, plan.platform, plan.channel_id)
         or request.platform != plan.platform
         or revision.profile != plan.profile
-        or plan.source_agent_id
-        != derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
-        or plan.source_agent_version != request.admission.agent.version
+        or (
+            not _worker_template(plan)
+            and (
+                plan.source_agent_id
+                != derive_agent_uuid(
+                    tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+                )
+                or plan.source_agent_version != request.admission.agent.version
+            )
+        )
         or (worker_materialization and (request.worker is None or request.before_native is None))
         or (
             not worker_materialization
@@ -3030,9 +3103,11 @@ async def read_counterpart(
     )
     from daimon.core.ma_identity import derive_agent_uuid
 
+    # Templates (root or worker) bind to the request's own admitted source agent:
+    # the agent this turn runs AS, which for a worker need not be the root.
     expected_source = (
         derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
-        if root
+        if root or _worker_template(plan)
         else plan.source_agent_id
     )
     if (
