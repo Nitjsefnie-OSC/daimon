@@ -1166,6 +1166,16 @@ non-core. Azure deployments can select `gpt-6-luna` for cheap smoke tests;
 see the [model parameters and region guidance](../../deploy/azure/README.md#model-selection).
 Steer, multiagent, vaults, memory stores, workspace export/import and
 native skill versions are explicitly unsupported.
+Its accounting mode is `native_requests`: native settlement over incremental
+model-request observations, matching what its driver emits.
+
+`tests/test_profile_honesty.py` keeps every profile honest. For each capability
+a profile declares `native` or `emulated` it calls the driver's real entry point
+offline and fails if the driver refuses it, and it checks that each
+`accounting_mode.usage_grain` matches the observations the driver emits. A newly
+declared capability needs a probe. The Anthropic profile does not declare
+`steer`, `native_event_replay`, `environments_fork` or `native_schedules`
+because its driver refuses or lacks them.
 
 The self-hosted driver's `SelfHostedDriver` takes injected `Agents` and
 `Environments` ports, an authorization callback and an optional durable binding
