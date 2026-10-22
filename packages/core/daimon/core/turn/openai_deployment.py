@@ -33,8 +33,10 @@ from daimon.core.turn.runtime_manifest import (
     SourceCapabilities,
     fixed_plan_origin_allowed,
     materialize_counterpart,
+    materialize_root_counterpart,
     read_counterpart,
     represented_source,
+    root_counterpart_catalog_id,
     select_runtime_manifest,
     template_source,
     validate_counterpart_pins,
@@ -84,7 +86,8 @@ class OpenAIDeployment(BaseModel):
     worker_materialization: bool = Field(
         default=False, strict=True, exclude_if=lambda value: not value
     )
-    # Agent templates are Gemini-only for now; the field keeps one plan protocol.
+    # A tenant-wide agent template: each admitted agent version's counterpart is
+    # published on its first turn (`materialize_root_counterpart`).
     root_materialization: bool = Field(
         default=False, strict=True, exclude_if=lambda value: not value
     )
@@ -112,9 +115,13 @@ class OpenAIDeployment(BaseModel):
                 )
         elif self.environment_id is None:
             raise ValueError("persistent-workspace deployments require an environment identity")
-        if self.root_materialization:
-            raise ValueError("agent templates are not available for OpenAI yet")
         validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
+        if self.root_materialization:
+            if self.source_capabilities is not None or self.skill_ids:
+                # Skills on a template would attach to every agent version it publishes.
+                raise ValueError("an agent template carries no operator capability inputs")
+            if self.spend_limit_usd_cents is None:
+                raise ValueError("an agent template serves every switched agent: cap its spend")
         if self.source_capabilities is not None:
             if (
                 self.profile != PROFILE
@@ -130,7 +137,11 @@ class OpenAIDeployment(BaseModel):
                 raise ValueError("full source deployment requires exact skills and caller binding")
         elif self.mcp_credential_file is not None:
             raise ValueError("MCP credential requires captured source capabilities")
-        if not self.worker_materialization and self.agent_id is None:
+        if (
+            not self.worker_materialization
+            and not self.root_materialization
+            and self.agent_id is None
+        ):
             raise ValueError("a fixed deployment requires a native agent identity")
         return self
 
@@ -388,6 +399,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         spend_limit = requested
     scope = request.scope
     worker_agent: ResourceRef | None = None
+    # A template's counterpart for this agent version, once its catalog entry is known.
+    root_agent: ResourceRef | None = None
     allocating = False
     counterpart_verified = False
 
@@ -411,8 +424,8 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 account_id=scope.account_id,
             )
 
-        agent = worker_agent
-        if not deployment.worker_materialization:
+        agent = root_agent if deployment.root_materialization else worker_agent
+        if not deployment.worker_materialization and not deployment.root_materialization:
             if deployment.agent_id is None:
                 raise AdmissionDenied(reason="backend_unsupported")
             agent = ref(deployment.agent_id, "agent")
@@ -428,6 +441,13 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             worker = preparation.worker
             if deployment.worker_materialization and worker is not None:
                 if worker_agent is None or checked.agent.ref != worker_agent:
+                    raise AdmissionDenied(reason="backend_unsupported")
+            elif deployment.root_materialization:
+                if (
+                    checked.catalog_id != root_counterpart_catalog_id(preparation)
+                    or checked.agent.ref != root_agent
+                    or checked.agent.spec != preparation.target_spec
+                ):
                     raise AdmissionDenied(reason="backend_unsupported")
             elif (
                 checked.catalog_id != deployment.counterpart_catalog_id
@@ -462,6 +482,11 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             if allocating and id_ is None:
                 return True
             if worker_agent is not None and id_ == worker_agent.id:
+                return True
+        if kind == "agent" and deployment.root_materialization:
+            if allocating and id_ is None:
+                return True
+            if root_agent is not None and id_ == root_agent.id:
                 return True
         return id_ is not None and (kind, id_) in {
             ("agent", deployment.agent_id),
@@ -545,6 +570,33 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         except (OSError, ValueError):
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
 
+    async def materialize_root(preparation: ProviderPreparationRequest) -> AgentRevision:
+        nonlocal allocating, root_agent
+        target = preparation.target_spec
+        if (
+            target is None
+            or any(tool.kind == "custom" for tool in target.tools or ())
+            or target.mcp_servers
+        ):
+            # Nothing executes a template's custom tools, and a template has no
+            # caller MCP credential: refuse before any native write.
+            raise AdmissionDenied(reason="backend_unsupported")
+        resources = NeutralResourceHost(
+            driver(runtime, revision, scope),
+            preparation.deps.sessionmaker,
+            scope=scope,
+            account_scope_id=deployment.project,
+            operation_key="counterpart-read",
+        )
+        await deployment.verify_environment(preparation, resources=resources, expected=None)
+        allocating = True
+        try:
+            row = await materialize_root_counterpart(deployment, preparation, resources=resources)
+        finally:
+            allocating = False
+        root_agent = row.agent.ref
+        return row
+
     async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
         nonlocal allocating, worker_agent
 
@@ -573,6 +625,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         transport_factory=transport,
         read_agent_counterpart=read,
         materialize_worker=materialize if deployment.worker_materialization else None,
+        materialize_root=materialize_root if deployment.root_materialization else None,
         journal=OpenAIRecoveryJournal(),
         usage_store=OpenAIUsageRevisions(),
         account_scope_id=deployment.project,
