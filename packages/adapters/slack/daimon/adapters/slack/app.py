@@ -2400,7 +2400,11 @@ class SlackApp:
                     channel=channel,
                     thread_ts=thread_id,
                     text=admission_refusal_message(
-                        err.reason, self.runtime.settings, foreign=standing.foreign
+                        err.reason,
+                        self.runtime.settings,
+                        foreign=standing.foreign,
+                        cause=err.cause,
+                        provider=err.provider,
                     ),
                 )
             return

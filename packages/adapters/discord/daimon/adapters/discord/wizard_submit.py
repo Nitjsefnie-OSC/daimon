@@ -537,7 +537,9 @@ async def run_wizard_submit_turn_observed(
             if err.reason != "writers_none":
                 await channel.send(
                     "Your answers were recorded.\n\n"
-                    + admission_refusal_message(err.reason, bot.runtime.settings)
+                    + admission_refusal_message(
+                        err.reason, bot.runtime.settings, cause=err.cause, provider=err.provider
+                    )
                 )
             return
 

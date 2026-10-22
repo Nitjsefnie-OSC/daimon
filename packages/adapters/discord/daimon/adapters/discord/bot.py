@@ -205,6 +205,7 @@ from daimon.core.turn.bookkeeping import release_turn_markers
 from daimon.core.turn.ceiling import turn_deadline
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
+    BackendRefusalCause,
     SessionAgentMismatch,
     SessionBusyError,
     SessionPreparationFailed,
@@ -500,7 +501,12 @@ DISCORD_REFUSAL_NOUNS = RefusalNouns.for_platform("discord")
 
 
 def admission_refusal_message(
-    reason: AdmissionDenialReason, settings: Settings, *, in_dm: bool = False
+    reason: AdmissionDenialReason,
+    settings: Settings,
+    *,
+    in_dm: bool = False,
+    cause: BackendRefusalCause | None = None,
+    provider: str | None = None,
 ) -> str:
     """The shared admission refusal in Discord's nouns, naming this deployment's bot."""
     return admission_refusal_text(
@@ -508,6 +514,8 @@ def admission_refusal_message(
         DISCORD_REFUSAL_NOUNS,
         bot_name=_resolve_bot_display_name(settings),
         in_dm=in_dm,
+        cause=cause,
+        provider=provider,
     )
 
 
@@ -4854,7 +4862,11 @@ class DaimonBot(commands.Bot):
                     user_id=str(message.author.id),
                 )
             if err.reason != "writers_none":
-                await target.send(admission_refusal_message(err.reason, self.runtime.settings))
+                await target.send(
+                    admission_refusal_message(
+                        err.reason, self.runtime.settings, cause=err.cause, provider=err.provider
+                    )
+                )
             return
 
         agent = admission.agent

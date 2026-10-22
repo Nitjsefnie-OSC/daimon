@@ -998,3 +998,24 @@ async def test_the_answer_of_an_external_members_turn_offers_no_ask_a_human_butt
     block = lifecycle._feedback_block()  # pyright: ignore[reportPrivateUsage]
     assert [e["value"] for e in block["elements"]] == [_EXTERNAL, _EXTERNAL]
     assert len(block["elements"]) == 2, "no Ask a human button for an external member"
+
+
+@pytest.mark.parametrize("cause", ["channel_pin", "provider_not_allowed", "agent_backend"])
+def test_an_external_members_provider_refusal_keeps_its_cause_and_fix_together(cause: Any) -> None:
+    from daimon.adapters.slack.runtime import SLACK_FOREIGN_REFUSAL_NOUNS, admission_refusal_message
+    from daimon.core.turn.notices import admission_refusal_text
+
+    settings = MagicMock()
+    settings.slack.bot_display_name = "daimon"
+    text = admission_refusal_message(
+        "backend_unsupported", settings, foreign=True, cause=cause, provider="openai"
+    )
+    expected = admission_refusal_text(
+        "backend_unsupported",
+        SLACK_FOREIGN_REFUSAL_NOUNS,
+        bot_name="daimon",
+        cause=cause,
+        provider="openai",
+    )
+    assert text == expected
+    assert "an admin" not in text and "workspace that added Daimon" in text

@@ -30,6 +30,10 @@ AdmissionDenialReason = Literal[
     # a profile that cannot meet it, or one this release cannot run yet.
     "backend_unsupported",
 ]
+# Why a `backend_unsupported` turn refused, for copy that names the fix: the
+# channel's own backend pin, a provider the tenant's allowlist doesn't turn on,
+# or the agent's backend that this deployment can't run.
+BackendRefusalCause = Literal["channel_pin", "provider_not_allowed", "agent_backend"]
 MissingConfigPart = Literal["agent", "environment"]
 
 
@@ -37,13 +41,22 @@ class AdmissionDenied(DaimonError):
     """Raised by `admit()` when the invoker policy, channel protection, balance, cap
     or channel budget gate rejects the turn.
 
-    Carries only a closed reason literal — no rendered user-facing text.
-    Denial copy stays adapter-side.
+    Carries only closed literals — no rendered user-facing text. Denial copy
+    stays adapter-side. A `backend_unsupported` refusal may name its `cause`
+    and the `provider` involved, so the copy can name the fix.
     """
 
-    def __init__(self, *, reason: AdmissionDenialReason) -> None:
+    def __init__(
+        self,
+        *,
+        reason: AdmissionDenialReason,
+        cause: BackendRefusalCause | None = None,
+        provider: str | None = None,
+    ) -> None:
         super().__init__(reason)
         self.reason: AdmissionDenialReason = reason
+        self.cause: BackendRefusalCause | None = cause
+        self.provider: str | None = provider
 
 
 class DmSourceSealedError(DaimonError):

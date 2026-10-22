@@ -49,6 +49,7 @@ from daimon.core.authz import (
 from daimon.core.billing import is_over_cap
 from daimon.core.channel_backend import (
     BackendUnsupported,
+    backend_is_enabled,
     channel_ref,
     check_backend,
     current_backend_and_sharing,
@@ -101,6 +102,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import (
     AdmissionDenialReason,
     AdmissionDenied,
+    BackendRefusalCause,
     DmSourceSealedError,
     MissingTurnConfigError,
     SessionBusyError,
@@ -109,7 +111,7 @@ from daimon.core.turn.outcomes import TurnObservation, current_outcome
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
-from mux.contracts.ids import Scope, ThreadRef
+from mux.contracts.ids import Provider, Scope, ThreadRef
 from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
 from mux.profiles.selfhosted import LOOP
@@ -260,6 +262,36 @@ class Admission:
         ):
             _log_backend_unsupported("admission_origin")
             raise AdmissionDenied(reason="backend_unsupported")
+
+
+def _backend_refusal(
+    revision: ConfigRevision | None,
+    origin: Literal["channel", "agent", "default"] | None,
+    enabled_backends: tuple[Provider, ...] | None,
+    error: Exception | None = None,
+) -> AdmissionDenied:
+    """A `backend_unsupported` refusal naming what to fix, for the refusal copy."""
+    if (
+        isinstance(error, channel_backend.AgentBackendRefused)
+        and error.reason == "backend_not_allowed"
+    ):
+        # The agent's own provider, refused by the allowlist before any revision exists.
+        return AdmissionDenied(
+            reason="backend_unsupported", cause="provider_not_allowed", provider=error.provider
+        )
+    provider = revision.backend if revision is not None else None
+    cause: BackendRefusalCause | None = None
+    if (
+        provider is not None
+        and enabled_backends is not None
+        and not backend_is_enabled(provider, enabled_backends)
+    ):
+        cause = "provider_not_allowed"
+    elif origin == "channel":
+        cause = "channel_pin"
+    elif origin == "agent":
+        cause = "agent_backend"
+    return AdmissionDenied(reason="backend_unsupported", cause=cause, provider=provider)
 
 
 def _require_backend_origin(
@@ -612,14 +644,12 @@ async def admit_impl(
             default = resolve_default(BackendConfig())
             if configured_channel:
                 backend_footer_profile = default.profile
+            retained_default = ConfigRevision.create(channel, 0, default)
             try:
-                check_backend(
-                    ConfigRevision.create(channel, 0, default),
-                    enabled_backends=policy.enabled_backends,
-                )
+                check_backend(retained_default, enabled_backends=policy.enabled_backends)
             except BackendUnsupported as error:
                 _log_backend_unsupported("retained_default_policy", error)
-                raise AdmissionDenied(reason="backend_unsupported") from error
+                raise _backend_refusal(retained_default, None, policy.enabled_backends) from error
     mark("config")
 
     # --- Missing config check (before any MA call) ---
@@ -664,7 +694,9 @@ async def admit_impl(
                     backend=LOOP.provider,
                 )
         if refused:
-            raise AdmissionDenied(reason="backend_unsupported")
+            raise AdmissionDenied(
+                reason="backend_unsupported", cause="agent_backend", provider=LOOP.provider
+            )
 
     # --- Channel backend: its profile must meet the channel's configuration
     # and be runnable here. Before any MA call; a channel never configured has
@@ -680,7 +712,11 @@ async def admit_impl(
         )
     except BackendUnsupported as err:
         _log_backend_unsupported("channel_policy", err)
-        raise AdmissionDenied(reason="backend_unsupported") from err
+        raise _backend_refusal(
+            backend_revision,
+            backend_revision_origin,
+            policy.enabled_backends if selection_enabled else None,
+        ) from err
 
     selfhosted = backend_revision is not None and backend_revision.backend == LOOP.provider
     if selfhosted:
@@ -910,6 +946,9 @@ async def admit_impl(
         except AdmissionDenied as error:
             if error.reason == "backend_unsupported":
                 _log_backend_unsupported("preparation_counterpart", error)
+                if error.cause is None:
+                    # The agent's own backend: its runtime can't serve this agent here.
+                    raise _backend_refusal(revision, "agent", None) from error
             raise
         backend_counterpart = prepared.counterpart
         backend_agent_revision = agent_revision
@@ -936,8 +975,11 @@ async def admit_impl(
                     )
                 except channel_backend.AgentBackendRefused as error:
                     _log_backend_unsupported("source_agent_lookup", error)
-                    raise AdmissionDenied(reason="backend_unsupported") from error
+                    raise AdmissionDenied(
+                        reason="backend_unsupported", cause="agent_backend"
+                    ) from error
                 async with deps.sessionmaker() as selection_session:
+                    source: Literal["channel", "agent", "default"] = "agent"
                     try:
                         (
                             backend_revision,
@@ -961,7 +1003,9 @@ async def admit_impl(
                         )
                     except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
                         _log_backend_unsupported("agent_preference", error)
-                        raise AdmissionDenied(reason="backend_unsupported") from error
+                        raise _backend_refusal(
+                            backend_revision, source, policy.enabled_backends, error
+                        ) from error
                     # Preparation uses another transaction. Publish the immutable
                     # effective revision and its origin before that transaction.
                     await selection_session.commit()
@@ -1315,7 +1359,11 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
             check_backend(admission.backend_revision, enabled_backends=policy.enabled_backends)
         except BackendUnsupported as error:
             _log_backend_unsupported("reauthorize_policy", error)
-            raise AdmissionDenied(reason="backend_unsupported") from error
+            raise _backend_refusal(
+                admission.backend_revision,
+                admission.backend_revision_origin,
+                policy.enabled_backends,
+            ) from error
     if grant.dm_source is not None and dm_source_limited(
         policy,
         source_channel_id=grant.dm_source.channel_id,

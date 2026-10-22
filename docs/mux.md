@@ -119,7 +119,12 @@ the agent's own model, per caller or shared (below), or, per caller only,
 `openai.persistent_workspace` with `gpt-6-luna` or `gemini.inline_reuse`
 with `gemini-3.8-flash`. Anything else is refused as
 `backend_unsupported`, recorded as `admission_denied` in the turn outcome,
-never run on Anthropic in its place.
+never run on Anthropic in its place. The refusal carries a `cause` for its
+copy: `channel_pin` (the channel's own provider pin), `provider_not_allowed`
+(the tenant's allowlist doesn't turn the provider on) or `agent_backend` (the
+agent's provider can't serve it here yet), and the provider involved. Each
+names the chat words that fix it; a refusal with no cause never blames the
+channel.
 
 A channel may also name `gemini-4-argon` (Gemini 4 Argon, 1M-token context)
 on `gemini.inline_reuse`. The agent-preference switch and the default stay on

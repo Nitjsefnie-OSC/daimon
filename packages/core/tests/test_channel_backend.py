@@ -312,6 +312,9 @@ async def test_with_the_flag_on_an_unrunnable_configuration_is_refused_before_an
         await _admit(on, tenant)
 
     assert raised.value.reason == "backend_unsupported"
+    # The refusal names the channel's own pin as the cause.
+    assert raised.value.cause == "channel_pin"
+    assert raised.value.provider == _UNRUNNABLE.backend
     assert calls == []
     # Another channel of the same tenant is not affected.
     assert (await _admit(replace(on), tenant, "chan-2")).backend_revision is None

@@ -366,8 +366,10 @@ class BackendResolution:
 
 
 class AgentBackendRefused(DaimonError):
-    def __init__(self, reason: str) -> None:
+    def __init__(self, reason: str, *, provider: Provider | None = None) -> None:
         self.reason = reason
+        # The provider a `backend_not_allowed` refusal names, for its copy.
+        self.provider = provider
         super().__init__(reason.replace("_", " "))
 
 
@@ -1439,7 +1441,7 @@ async def resolve_turn_backend(
         )
     policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)
     if not backend_is_enabled(selection.backend, policy.enabled_backends):
-        raise AgentBackendRefused("backend_not_allowed")
+        raise AgentBackendRefused("backend_not_allowed", provider=selection.backend)
     if validate_origin is not None:
         checking = validate_origin(selection, "agent", None)
         if inspect.isawaitable(checking):
