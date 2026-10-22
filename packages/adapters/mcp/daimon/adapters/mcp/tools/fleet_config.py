@@ -1,0 +1,348 @@
+"""Chat configuration over the fleet-grant and tenant-provider service owners."""
+
+from __future__ import annotations
+
+from datetime import UTC, datetime
+
+from daimon.adapters.mcp.auth.resolver import AuthIdentity
+from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._ctx import (
+    _auth,  # pyright: ignore[reportPrivateUsage]
+    _require_admin,  # pyright: ignore[reportPrivateUsage]
+)
+from daimon.adapters.mcp.tools._session_gate import session_card_gap
+from daimon.adapters.mcp.tools.setup_target import get_chat_origin
+from daimon.core.channel_backend import (
+    AgentBackendRefused,
+    BackendActor,
+    load_backend_agent,
+    make_backend_service,
+)
+from daimon.core.fleet_configuration import (
+    ConfigurationReference,
+    FleetConfigInput,
+    complete_fleet_config,
+    configuration_refusal,
+    configured_fleet_grant,
+    fleet_config_from_grant,
+    fleet_detail_lines,
+    fleet_worker_names,
+    provider_preview_digest,
+)
+from fastmcp import Context, FastMCP
+from fastmcp.exceptions import ToolError
+from mux.contracts.ids import Provider
+from pydantic import BaseModel, ValidationError
+
+
+class FleetConfigInfo(BaseModel):
+    status: str
+    agent_name: str
+    config: FleetConfigInput | None
+    expected_revision: int
+    preview_digest: str
+    details: tuple[str, ...]
+    summary: str
+
+
+class ProviderAllowlistInfo(BaseModel):
+    status: str
+    providers: tuple[Provider, ...]
+    expected_revision: str
+    preview_digest: str
+    summary: str
+
+
+async def _require_chat(
+    runtime: McpRuntime, auth: AuthIdentity, origin_context_id: str | None, tool: str
+) -> None:
+    if tool == "request_provider_allowlist":
+        _require_admin(auth)
+    if auth.agent_id is not None or auth.platform_user_id is None:
+        raise ToolError("Request this change from your active chat conversation.")
+    origin = await get_chat_origin(runtime, auth, origin_context_id)
+    if origin is None:
+        raise ToolError("Request this change from your active chat conversation.")
+    if await session_card_gap(runtime, auth, origin, tool_name=tool) is not None:
+        raise ToolError("This conversation cannot verify the confirmation card. Nothing changed.")
+
+
+def _actor(auth: AuthIdentity) -> BackendActor:
+    return BackendActor(
+        tenant_id=auth.tenant_id,
+        account_id=auth.account_id,
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+    )
+
+
+async def _request_fleet_config_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    agent_name: str,
+    config: FleetConfigInput | None = None,
+    revoke: bool = False,
+    expected_revision: int | None = None,
+    preview_digest: str | None = None,
+    origin_context_id: str | None = None,
+) -> FleetConfigInfo:
+    await _require_chat(runtime, auth, origin_context_id, "request_fleet_config")
+    service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+    now = datetime.now(UTC)
+    try:
+        agent = await load_backend_agent(
+            runtime.client,
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_name=agent_name,
+        )
+        from daimon.adapters.mcp.tools.agents import (
+            _require_agent_editor,  # pyright: ignore[reportPrivateUsage]
+        )
+
+        await _require_agent_editor(service, agent, _actor(auth), auth)
+        existing = await service.read_fleet_grant(auth.tenant_id, agent.agent_id, now=now)
+        if config is None and not revoke:
+            if preview_digest is not None:
+                raise ToolError("A change needs the exact configuration from its preview.")
+            if existing is None:
+                return FleetConfigInfo(
+                    status="not_configured",
+                    agent_name=agent_name,
+                    config=None,
+                    expected_revision=(
+                        current.local if (current := await service.current(agent)) else 0
+                    ),
+                    preview_digest="",
+                    details=(),
+                    summary="Fleet is off for this agent. Ask the agent's owner or an admin: "
+                    '"Turn on fleet for '
+                    + agent_name
+                    + ", with the research and writing agents, up to 4 workers, $2 per run,"
+                    ' and a 120-second deadline."',
+                )
+            saved = fleet_config_from_grant(
+                existing,
+                worker_names=await fleet_worker_names(
+                    existing, runtime.client, tenant_id=auth.tenant_id
+                ),
+            )
+            preview = await service.preview_fleet_grant(agent, existing, now=now)
+            return FleetConfigInfo(
+                status="current",
+                agent_name=agent_name,
+                config=saved,
+                expected_revision=preview.setting_revision,
+                preview_digest=preview.digest,
+                details=fleet_detail_lines(preview, worker_names=saved.worker_agents),
+                summary="Current fleet limits.",
+            )
+        if config is not None:
+            config = await complete_fleet_config(
+                config, existing, runtime.client, tenant_id=auth.tenant_id
+            )
+        if revoke and config is not None:
+            raise ToolError("Choose either fleet limits or turning fleet off. Nothing changed.")
+        value = (
+            await configured_fleet_grant(
+                config, service, runtime.client, runtime.session_factory, agent, now=now
+            )
+            if config is not None
+            else None
+        )
+        # Freeze the default expiry in the returned config; confirmation cannot move it.
+        frozen = (
+            config.model_copy(update={"expires_at": value.expires_at}) if config and value else None
+        )
+        preview = await service.preview_fleet_grant(agent, value, now=now)
+        status = "preview"
+        summary = (
+            "Show these limits, then call request_fleet_config with this exact config, "
+            "revoke, expected_revision and preview_digest. The requesting owner or "
+            "admin must Confirm "
+            "on the card. Nothing changed yet."
+        )
+        if preview_digest is not None:
+            reference = ConfigurationReference.model_validate(
+                {
+                    "operation": "fleet_revoke" if revoke else "fleet_set",
+                    "agent_name": agent_name,
+                    "config": config,
+                    "expected_revision": expected_revision,
+                    "preview_digest": preview_digest,
+                }
+            )
+            agent = await load_backend_agent(
+                runtime.client,
+                runtime.session_factory,
+                tenant_id=auth.tenant_id,
+                agent_name=agent_name,
+            )
+            assert isinstance(reference.expected_revision, int)
+            if value is None:
+                await service.revoke_fleet_grant(
+                    agent,
+                    reference.expected_revision,
+                    _actor(auth),
+                    expected_preview_digest=reference.preview_digest,
+                    now=now,
+                )
+            else:
+                await service.set_fleet_grant(
+                    agent,
+                    value,
+                    reference.expected_revision,
+                    _actor(auth),
+                    expected_preview_digest=reference.preview_digest,
+                    now=now,
+                )
+            status = "changed"
+            summary = "Fleet access turned off." if revoke else "Fleet limits saved."
+        return FleetConfigInfo(
+            status=status,
+            agent_name=agent_name,
+            config=frozen,
+            expected_revision=preview.setting_revision,
+            preview_digest=preview.digest,
+            details=fleet_detail_lines(
+                preview, worker_names=frozen.worker_agents if frozen else None, previous=existing
+            ),
+            summary=summary,
+        )
+    except AgentBackendRefused as exc:
+        raise ToolError(configuration_refusal(exc.reason) + " Nothing changed.") from exc
+    except ValueError as exc:
+        if not isinstance(exc, ValidationError):
+            raise ToolError(str(exc) + " Nothing changed.") from exc
+        raise ToolError(
+            "Check the fleet limits and use the exact expiry from the preview. Nothing changed."
+        ) from exc
+
+
+async def _request_provider_allowlist_impl(
+    runtime: McpRuntime,
+    auth: AuthIdentity,
+    *,
+    providers: tuple[Provider, ...],
+    expected_revision: str | None = None,
+    preview_digest: str | None = None,
+    origin_context_id: str | None = None,
+) -> ProviderAllowlistInfo:
+    await _require_chat(runtime, auth, origin_context_id, "request_provider_allowlist")
+    service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+    try:
+        policy = await service.tenant_policy(auth.tenant_id)
+        # The existing service validates actor, policy and values without saving.
+        await service.set_tenant_allowlist(
+            auth.tenant_id, providers, policy.revision, _actor(auth), dry_run=True
+        )
+        digest = provider_preview_digest(policy, providers)
+        status = "preview"
+        summary = (
+            "Allowed providers will be: " + (", ".join(providers) or "none") + ". "
+            "This applies across this server. Keys do not enable providers automatically. "
+            "Call request_provider_allowlist again with the same providers, expected_revision "
+            "and preview_digest; the admin must Confirm on the card. Nothing changed yet."
+        )
+        if preview_digest is not None:
+            reference = ConfigurationReference.model_validate(
+                {
+                    "operation": "provider_allowlist",
+                    "providers": providers,
+                    "expected_revision": expected_revision,
+                    "preview_digest": preview_digest,
+                }
+            )
+            if reference.expected_revision != policy.revision or reference.preview_digest != digest:
+                raise ToolError("This preview changed. Preview and confirm again. Nothing changed.")
+            await service.set_tenant_allowlist(
+                auth.tenant_id, providers, policy.revision, _actor(auth)
+            )
+            status = "changed"
+            summary = "Allowed providers saved: " + (", ".join(providers) or "none") + "."
+        return ProviderAllowlistInfo(
+            status=status,
+            providers=providers,
+            expected_revision=policy.revision,
+            preview_digest=digest,
+            summary=summary,
+        )
+    except AgentBackendRefused as exc:
+        raise ToolError(configuration_refusal(exc.reason) + " Nothing changed.") from exc
+    except ValidationError as exc:
+        raise ToolError(
+            "This preview is incomplete. Preview and confirm again. Nothing changed."
+        ) from exc
+
+
+def register_fleet_config_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
+    @mcp.tool
+    async def request_fleet_config(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        agent_name: str,
+        config: FleetConfigInput | None = None,
+        revoke: bool = False,
+        expected_revision: int | None = None,
+        preview_digest: str | None = None,
+        origin_context_id: str | None = None,
+    ) -> FleetConfigInfo:
+        """Configure this agent's fleet of worker agents, with owner/admin confirmation.
+
+        Use agent names, never model lists: e.g. "let this agent work with the
+        research and writing agents, up to 4 workers and $2 per run". config sets
+        worker_agents ("any", a list of names, or null for this agent alone),
+        max_workers, budget_usd and max_worker_seconds (required for a new fleet).
+        On edits, every omitted field keeps its saved value, including expiry,
+        provider caps, token limits and worker selection. Explicit null removes an
+        optional cap; the card marks removals. A current-settings read returns the
+        complete saved config, so it can be edited without reconstructing defaults.
+        Use fleet_agents to list eligible workers. Each worker runs AS that
+        agent, using its own prompt, model, tools and skills; model choices
+        belong in agent settings through request_agent_backend_switch.
+        Worker access defaults to any agent on this server for a NEW config;
+        existing grants stay unchanged until confirmed. Show every detail,
+        especially worker agents, budget, expiry and provider caps.
+        max_run_seconds defaults to 600; max_turns to 1; access expires after
+        90 days unless specified. No provider map means a shared budget; a
+        partial map prevents omitted providers from spending.
+        Omit config to show the current settings; revoke=true turns fleet off.
+        Preview first. Then pass the exact returned config, expected_revision
+        and preview_digest to show the requesting owner's/admin's Confirm card.
+        Pass this turn's origin_context_id. A stale preview changes nothing.
+        """
+        return await _request_fleet_config_impl(
+            runtime,
+            await _auth(ctx),
+            agent_name=agent_name,
+            config=config,
+            revoke=revoke,
+            expected_revision=expected_revision,
+            preview_digest=preview_digest,
+            origin_context_id=origin_context_id,
+        )
+
+    @mcp.tool(tags={"admin"})
+    async def request_provider_allowlist(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        providers: tuple[Provider, ...],
+        expected_revision: str | None = None,
+        preview_digest: str | None = None,
+        origin_context_id: str | None = None,
+    ) -> ProviderAllowlistInfo:
+        """Preview and confirm the server's allowed model providers. Admin-only.
+
+        providers is the complete replacement list, not an addition. Having an API
+        key does not consent to provider use; nothing is enabled automatically.
+        Preview first, explain the server-wide scope and full list, then call with
+        the same providers and returned expected_revision and preview_digest for
+        the admin's Confirm card. Pass this active turn's origin_context_id.
+        """
+        return await _request_provider_allowlist_impl(
+            runtime,
+            await _auth(ctx),
+            providers=providers,
+            expected_revision=expected_revision,
+            preview_digest=preview_digest,
+            origin_context_id=origin_context_id,
+        )

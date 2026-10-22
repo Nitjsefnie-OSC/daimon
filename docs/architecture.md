@@ -17,6 +17,15 @@ retain their resolver and self-healing behavior. The operator entry point
 `daimon selfhosted init` creates or reuses these records without provider
 credentials.
 
+Agent fleet configuration uses `request_fleet_config` in an active chat with a
+verified confirmation card. The owner or a current admin chooses worker agents
+by name and the run's worker, spending and deadline limits. The host resolves the
+names within the tenant. Partial edits retain all omitted limits and the saved
+expiry; the card lists explicit cap removals. Current-settings reads return the
+complete editable configuration. The host reloads the preview and editor permission when Confirm
+is clicked, and applies the revision-checked write. Provider allowlist changes
+use a separate admin-only confirmation; API keys never enable providers by themselves.
+
 Opted-in Discord worker fleets use the existing posted-card renderer and Stop
 guard. The card shows each worker's role, backend, model and current state.
 Complete rows stay in ordinal order within Discord's total text limit; large

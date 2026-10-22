@@ -160,6 +160,8 @@ ANY_KEY: Final[str] = "*"
 CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
     "add_skill": "content_hash",
     "request_agent_backend_switch": "preview_digest",
+    "request_fleet_config": "preview_digest",
+    "request_provider_allowlist": "preview_digest",
     # Every call names its action, so every call asks.
     "microsoft_send": "action",
     # Every call names its method; asks only with tool safety on.
@@ -169,7 +171,13 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
 
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     """Project authoritative backend-selection eligibility into session controls."""
-    return frozenset({"request_agent_backend_switch"}) if enabled else frozenset()
+    return (
+        frozenset(
+            {"request_agent_backend_switch", "request_fleet_config", "request_provider_allowlist"}
+        )
+        if enabled
+        else frozenset()
+    )
 
 
 def microsoft_send_tools(*, enabled: bool, tool_safety_on: bool = False) -> frozenset[str]:

@@ -1,0 +1,435 @@
+"""Fleet and provider configuration references for the existing admin cards."""
+
+from __future__ import annotations
+
+import hashlib
+import json
+from datetime import datetime, timedelta
+from decimal import Decimal
+from typing import TYPE_CHECKING, Literal
+from uuid import UUID
+
+if TYPE_CHECKING:
+    from anthropic import AsyncAnthropic
+    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.stores.domain import BackendAgent
+    from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from daimon.core.neutral_resources import AgentFleetGrant, WorkerLimits
+from daimon.core.stores.domain import CompatibilityPreview, TenantBackendPolicy
+from mux.contracts.ids import ModelRef, Provider
+from mux.profiles import MANAGED_AGENTS, backend_selection
+from pydantic import (
+    BaseModel,
+    ConfigDict,
+    Field,
+    StrictInt,
+    StrictStr,
+    field_validator,
+    model_validator,
+)
+
+
+class FleetConfigInput(BaseModel):
+    """Chat-facing ceilings; the grant expiry and worker duration are distinct."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    worker_agents: Literal["any"] | tuple[str, ...] | None = "any"
+    max_workers: int | None = Field(default=None, gt=0, strict=True)
+    budget_usd: Decimal | None = Field(default=None, gt=0, allow_inf_nan=False)
+    max_worker_seconds: int | None = Field(default=None, gt=0, strict=True)
+    max_run_seconds: int = Field(default=600, gt=0, strict=True)
+    max_turns: int = Field(default=1, gt=0, strict=True)
+    max_root_turns: int = Field(default=3, gt=0, strict=True)
+    expires_at: datetime | None = None
+    provider_limits_usd: dict[Provider, Decimal] | None = None
+    max_model_requests: int | None = Field(default=None, gt=0, strict=True)
+    max_input_tokens: int | None = Field(default=None, gt=0, strict=True)
+    max_output_tokens: int | None = Field(default=None, gt=0, strict=True)
+    native_budget_usd: Decimal | None = None
+    native_root_budget_usd: Decimal | None = None
+    root_cash_budget_usd: Decimal | None = None
+
+    @field_validator("worker_agents")
+    @classmethod
+    def _names(
+        cls, value: Literal["any"] | tuple[str, ...] | None
+    ) -> Literal["any"] | tuple[str, ...] | None:
+        if isinstance(value, tuple) and (
+            not value
+            or any(not name.strip() for name in value)
+            or len({name.casefold() for name in value}) != len(value)
+        ):
+            raise ValueError("Choose a nonempty list of distinct worker agent names.")
+        return value
+
+    def grant(
+        self,
+        now: datetime,
+        *,
+        models: tuple[ModelRef, ...],
+        worker_ids: Literal["any"] | tuple[UUID, ...] | None,
+    ) -> AgentFleetGrant:
+        if self.max_workers is None or self.budget_usd is None or self.max_worker_seconds is None:
+            raise ValueError("A new fleet needs worker count, run budget and a worker deadline.")
+        expires = self.expires_at or now + timedelta(days=90)
+        choices = tuple(
+            (
+                backend_selection(model.provider).model_copy(
+                    update={"model": model.id} if model.provider != MANAGED_AGENTS.provider else {}
+                ),
+                model,
+            )
+            for model in models
+        )
+        return AgentFleetGrant.model_validate_json(
+            json.dumps(
+                {
+                    "worker_agents": worker_ids,
+                    "max_workers": self.max_workers,
+                    "choices": [
+                        (backend.model_dump(mode="json"), model.model_dump(mode="json"))
+                        for backend, model in choices
+                    ],
+                    "max_run_seconds": self.max_run_seconds,
+                    "max_worker_seconds": self.max_worker_seconds,
+                    "max_root_turns": self.max_root_turns,
+                    "native_root_budget_usd": self.native_root_budget_usd,
+                    "root_cash_budget_usd": self.root_cash_budget_usd,
+                    "limits": WorkerLimits.model_validate(
+                        {
+                            "budget_usd": self.budget_usd,
+                            "deadline": expires,
+                            "max_turns": self.max_turns,
+                            "provider_limits_usd": self.provider_limits_usd,
+                            "max_model_requests": self.max_model_requests,
+                            "max_input_tokens": self.max_input_tokens,
+                            "max_output_tokens": self.max_output_tokens,
+                            "native_budget_usd": self.native_budget_usd,
+                        }
+                    ).model_dump(mode="json"),
+                },
+                default=str,
+            )
+        )
+
+
+def fleet_config_from_grant(
+    grant: AgentFleetGrant,
+    *,
+    worker_names: Literal["any"] | tuple[str, ...] | None,
+) -> FleetConfigInput:
+    """Return every stored ceiling, not defaults that could widen an edit."""
+    limits = grant.limits
+    return FleetConfigInput(
+        worker_agents=worker_names,
+        max_workers=grant.max_workers,
+        budget_usd=limits.budget_usd,
+        max_worker_seconds=grant.max_worker_seconds,
+        max_run_seconds=grant.max_run_seconds,
+        max_turns=limits.max_turns,
+        max_root_turns=grant.max_root_turns,
+        expires_at=grant.expires_at,
+        provider_limits_usd=dict(limits.provider_limits_usd)
+        if limits.provider_limits_usd is not None
+        else None,
+        max_model_requests=limits.max_model_requests,
+        max_input_tokens=limits.max_input_tokens,
+        max_output_tokens=limits.max_output_tokens,
+        native_budget_usd=limits.native_budget_usd,
+        native_root_budget_usd=grant.native_root_budget_usd,
+        root_cash_budget_usd=grant.root_cash_budget_usd,
+    )
+
+
+async def fleet_worker_names(
+    grant: AgentFleetGrant,
+    client: AsyncAnthropic,
+    *,
+    tenant_id: UUID,
+) -> Literal["any"] | tuple[str, ...] | None:
+    from daimon.core.defaults.ma_index import find_agent_by_derived_uuid
+    from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+
+    if not isinstance(grant.worker_agents, tuple):
+        return grant.worker_agents
+    names: list[str] = []
+    for agent_id in grant.worker_agents:
+        native = await find_agent_by_derived_uuid(client, tenant_id=tenant_id, agent_id=agent_id)
+        if native is None:
+            raise ValueError(
+                "A previously selected worker agent is unavailable. "
+                "Choose worker agents again; nothing changed."
+            )
+        names.append(native.metadata.get(MA_METADATA_KEY_NAME) or native.name)
+    return tuple(names)
+
+
+async def complete_fleet_config(
+    config: FleetConfigInput,
+    existing: AgentFleetGrant | None,
+    client: AsyncAnthropic,
+    *,
+    tenant_id: UUID,
+) -> FleetConfigInput:
+    if existing is None:
+        return config
+    names = (
+        config.worker_agents
+        if "worker_agents" in config.model_fields_set
+        else await fleet_worker_names(existing, client, tenant_id=tenant_id)
+    )
+    base = fleet_config_from_grant(existing, worker_names=names)
+    return FleetConfigInput.model_validate(
+        {**base.model_dump(), **config.model_dump(exclude_unset=True)}
+    )
+
+
+async def configured_fleet_grant(
+    config: FleetConfigInput,
+    service: AgentBackendService,
+    client: AsyncAnthropic,
+    sessions: async_sessionmaker[AsyncSession],
+    agent: BackendAgent,
+    *,
+    now: datetime,
+) -> AgentFleetGrant:
+    """Resolve tenant-scoped worker names on each preview/click, never trust caller ids."""
+    from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
+    from daimon.core.constants import DEFAULT_AGENT_MODEL
+
+    current = await service.current(agent)
+    provider = (current.backend if current else None) or MANAGED_AGENTS.provider
+    selection = backend_selection(provider)
+    root = ModelRef(
+        provider=provider,
+        id=(current.model if current else None)
+        or (agent.model if provider == MANAGED_AGENTS.provider else selection.model)
+        or DEFAULT_AGENT_MODEL,
+    )
+    existing = await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=now)
+    config = await complete_fleet_config(config, existing, client, tenant_id=agent.tenant_id)
+    models = existing.models if existing else (root,)
+    worker_ids: Literal["any"] | tuple[UUID, ...] | None = None
+    if config.worker_agents == "any":
+        worker_ids = "any"
+    elif config.worker_agents is not None:
+        workers: list[BackendAgent] = []
+        for name in config.worker_agents:
+            try:
+                worker = await load_backend_agent(
+                    client, sessions, tenant_id=agent.tenant_id, agent_name=name
+                )
+            except AgentBackendRefused as exc:
+                raise ValueError(
+                    f'Worker agent "{name}" is not available on this server. '
+                    "Choose an existing agent by name."
+                ) from exc
+            workers.append(worker)
+        worker_ids = tuple(worker.agent_id for worker in workers)
+    value = config.grant(now, models=models, worker_ids=worker_ids)
+    if existing is not None:
+        # Editing agent eligibility or ceilings must not silently rewrite legacy profiles.
+        data = value.model_dump(mode="json")
+        data["choices"] = existing.model_dump(mode="json")["choices"]
+        value = AgentFleetGrant.model_validate_json(json.dumps(data))
+    return value
+
+
+class ConfigurationReference(BaseModel):
+    """Untrusted reference; every host reloads and validates its preview."""
+
+    model_config = ConfigDict(extra="forbid", frozen=True)
+    operation: Literal["fleet_set", "fleet_revoke", "provider_allowlist"]
+    agent_name: str | None = Field(default=None, min_length=1)
+    config: FleetConfigInput | None = None
+    providers: tuple[Provider, ...] | None = None
+    expected_revision: StrictInt | StrictStr
+    preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
+
+    @model_validator(mode="after")
+    def _bound(self) -> ConfigurationReference:
+        if self.operation == "provider_allowlist":
+            if (
+                not isinstance(self.expected_revision, str)
+                or self.providers is None
+                or self.agent_name is not None
+                or self.config is not None
+            ):
+                raise ValueError("provider changes require the current policy revision")
+        elif (
+            type(self.expected_revision) is not int
+            or self.expected_revision < 0
+            or self.agent_name is None
+            or self.providers is not None
+            or ((self.config is not None) != (self.operation == "fleet_set"))
+        ):
+            raise ValueError("fleet changes require an agent and current setting revision")
+        if self.config is not None and self.config.expires_at is None:
+            raise ValueError("confirm the exact expiry returned by the preview")
+        return self
+
+
+def provider_preview_digest(policy: TenantBackendPolicy, providers: tuple[Provider, ...]) -> str:
+    return hashlib.sha256(
+        json.dumps(
+            {
+                "tenant_id": str(policy.tenant_id),
+                "revision": policy.revision,
+                "providers": providers,
+            },
+            sort_keys=True,
+            separators=(",", ":"),
+        ).encode()
+    ).hexdigest()
+
+
+def fleet_detail_lines(
+    preview: CompatibilityPreview,
+    *,
+    worker_names: tuple[str, ...] | Literal["any"] | None = None,
+    previous: AgentFleetGrant | None = None,
+) -> tuple[str, ...]:
+    if preview.fleet_grant is None:
+        return ("Removed: fleet access for this agent, including all worker permissions.",)
+    grant = AgentFleetGrant.model_validate_json(json.dumps(preview.fleet_grant))
+    providers = grant.limits.provider_limits_usd
+    budget = (
+        "Shared across providers; no separate provider budgets."
+        if providers is None
+        else "Provider caps: "
+        + (", ".join(f"{key}: ${value}" for key, value in providers.items()) or "none")
+        + ". Providers omitted from this list cannot spend."
+    )
+    denied = (
+        ()
+        if providers is None
+        else tuple(sorted({m.provider for m in grant.models if providers.get(m.provider, 0) <= 0}))
+    )
+    return (
+        f"Up to {grant.max_workers} workers; ${grant.limits.budget_usd} per run.",
+        "Each worker runs as its selected agent, using that agent's own model and settings.",
+        f"Each worker: up to {grant.max_worker_seconds} seconds; {grant.limits.max_turns} replies.",
+        f"Each run: up to {grant.max_run_seconds} seconds and "
+        f"{grant.max_root_turns} replies from the coordinating agent.",
+        f"Fleet access expires: {grant.expires_at.isoformat()}.",
+        budget,
+        *(
+            ("Cannot spend on: " + ", ".join(denied) + "; add a provider cap to allow it.",)
+            if denied
+            else ()
+        ),
+        (
+            "Worker agents: any on this server."
+            if grant.worker_agents == "any"
+            else "Worker agents: " + ", ".join(worker_names) + "; this agent is always included."
+            if isinstance(worker_names, tuple)
+            else f"Worker agents: this agent and {len(grant.worker_agents)} selected agents."
+            if grant.worker_agents
+            else "Worker agents: this agent only."
+        ),
+        "Funding and server limits are checked again when workers start.",
+        *fleet_removal_lines(previous, grant),
+        *(
+            (f"Worker request cap: {grant.limits.max_model_requests}.",)
+            if grant.limits.max_model_requests is not None
+            else ()
+        ),
+        *(
+            (f"Worker input token cap: {grant.limits.max_input_tokens}.",)
+            if grant.limits.max_input_tokens
+            else ()
+        ),
+        *(
+            (f"Worker output token cap: {grant.limits.max_output_tokens}.",)
+            if grant.limits.max_output_tokens
+            else ()
+        ),
+        *(
+            (f"Native worker budget: ${grant.limits.native_budget_usd}.",)
+            if grant.limits.native_budget_usd is not None
+            else ()
+        ),
+        *(
+            (
+                f"Native root budget: ${grant.native_root_budget_usd}; "
+                f"root cash cap: ${grant.root_cash_budget_usd}.",
+            )
+            if grant.native_root_budget_usd is not None
+            else ()
+        ),
+    )
+
+
+def fleet_removal_lines(before: AgentFleetGrant | None, after: AgentFleetGrant) -> tuple[str, ...]:
+    if before is None:
+        return ()
+    lines: list[str] = []
+    for field, label in (
+        ("max_model_requests", "worker request cap"),
+        ("max_input_tokens", "worker input token cap"),
+        ("max_output_tokens", "worker output token cap"),
+        ("native_budget_usd", "provider spending cap per worker"),
+    ):
+        if getattr(before.limits, field) is not None and getattr(after.limits, field) is None:
+            lines.append("Removed: " + label + ".")
+    for field, label in (
+        ("native_root_budget_usd", "provider spending cap for the coordinating agent"),
+        ("root_cash_budget_usd", "cash spending cap for the coordinating agent"),
+    ):
+        if getattr(before, field) is not None and getattr(after, field) is None:
+            lines.append("Removed: " + label + ".")
+    old = before.limits.provider_limits_usd
+    new = after.limits.provider_limits_usd
+    if old is not None and new is None:
+        lines.append("Removed: provider caps. The run budget is now shared across providers.")
+    elif old is not None and new is not None:
+        for provider in sorted(set(old) - set(new)):
+            lines.append(
+                f"Removed: {provider} spending allocation; this provider now cannot spend."
+            )
+    if before.worker_agents != "any" and after.worker_agents == "any":
+        lines.append("Removed: the restriction to previously selected worker agents.")
+    if before.worker_agents == "any" and after.worker_agents != "any":
+        lines.append("Removed: eligibility for worker agents outside the selection shown above.")
+    elif isinstance(before.worker_agents, tuple) and after.worker_agents != "any":
+        remaining = set(after.worker_agents or ())
+        if set(before.worker_agents) - remaining:
+            lines.append(
+                "Removed: previously selected worker entries not shown above. "
+                "This agent remains eligible."
+            )
+    if before.expires_at != after.expires_at:
+        lines.append(
+            f"Access expiry changed from {before.expires_at.isoformat()} "
+            f"to {after.expires_at.isoformat()}."
+        )
+    return tuple(lines)
+
+
+def configuration_refusal(reason: str) -> str:
+    return {
+        "backend_not_allowed": (
+            "That provider is not allowed here. Ask an admin to enable it "
+            "in the provider allowlist."
+        ),
+        "fleet_provider_limits_exceed_budget": (
+            "The provider caps add up to more than the run budget. "
+            "Lower them or raise the run budget before saving."
+        ),
+        "invalid_fleet_grant": (
+            "These fleet limits cannot be used. "
+            "Check the worker agents, deadline, expiry and token caps before saving."
+        ),
+        "stale_preview": "This preview changed. Preview and confirm again.",
+        "stale_revision": "This setting changed. Preview and confirm again.",
+        "feature_disabled": (
+            "Fleet and provider configuration is currently turned off. "
+            "Ask an admin to make it available."
+        ),
+        "admin_required": "A current admin must confirm this change.",
+    }.get(
+        reason,
+        "This change could not be saved. "
+        "Preview again or ask an admin to check the agent's settings.",
+    )

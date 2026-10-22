@@ -1101,7 +1101,15 @@ class AgentBackendService:
                         enabled_backends=policy.enabled_backends,
                         worker=True,
                     )
-                    value.limits.require_profile(get_profile(choice.profile))
+                    # Agent workers choose their own profile at dispatch. Legacy
+                    # choices on an agent grant don't require funding a denied
+                    # provider; its zero cap still refuses every worker there.
+                    if not (
+                        value.worker_agents is not None
+                        and value.limits.provider_limits_usd is not None
+                        and value.limits.provider_limits_usd.get(choice.backend, 0) <= 0
+                    ):
+                        value.limits.require_profile(get_profile(choice.profile))
             except (ValueError, DaimonError, UnsupportedCapability):
                 raise AgentBackendRefused("invalid_fleet_grant") from None
             lines = value.limits.provider_limits_usd

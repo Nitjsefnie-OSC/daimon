@@ -734,8 +734,10 @@ async def test_update_agent_impl_forwards_only_non_none_fields(
     assert row.applies is None, "a description-only update touches neither model nor system"
 
 
+@pytest.mark.parametrize("requested_model", ["claude-opus-5", "opus 5"])
 async def test_update_agent_impl_returns_applies_for_model_change(
     db_session_factory: async_sessionmaker[AsyncSession],
+    requested_model: str,
 ) -> None:
     tenant_id = uuid.uuid4()
     account_id = uuid.uuid4()
@@ -776,7 +778,7 @@ async def test_update_agent_impl_returns_applies_for_model_change(
         _runtime(client, session_factory=db_session_factory),
         auth,
         name="a",
-        model="claude-opus-5",
+        model=requested_model,
         description=None,
         system=None,
         tools=None,
@@ -5929,3 +5931,36 @@ async def test_an_agent_named_after_the_check_is_refused_not_rewritten(
     assert posts == []
     agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_theirs")
     assert await agent_owner(db_session_factory, tenant_id=tenant.id, agent_id=agent_id) is None
+
+
+def test_native_create_accepts_natural_model_names_and_preserves_controls() -> None:
+    spec = _build_create_spec(
+        name="Writer",
+        model="OPUS 5.5",
+        description=None,
+        system=None,
+        tools=None,
+        mcp_servers=None,
+        skill_repos=None,
+    )
+    assert spec.model == "claude-opus-5-5"
+    from daimon.adapters.mcp.tools.agents import _resolve_native_agent_model
+
+    assert _resolve_native_agent_model({"id": "opus 5.5", "effort": "high"}) == {
+        "id": "claude-opus-5-5",
+        "effort": "high",
+    }
+
+
+@pytest.mark.parametrize("typo", ["opuss", "sonnett", "sonet", "claud sonnet"])
+def test_native_create_refuses_ambiguous_family_typos_before_writing(typo):
+    with pytest.raises(ToolError, match="could mean"):
+        _build_create_spec(
+            name="Writer",
+            model=typo,
+            description=None,
+            system=None,
+            tools=None,
+            mcp_servers=None,
+            skill_repos=None,
+        )

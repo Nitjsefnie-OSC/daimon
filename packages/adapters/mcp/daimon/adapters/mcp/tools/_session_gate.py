@@ -173,7 +173,12 @@ async def _recorded_as_gated(
     # A bind sent while the retired chat channel switch was also gated holds
     # that one more gated tool; it still proves every card it gated.
     legacy = confirmed | ({"request_channel_backend_switch"} if selection else set[str]())
-    for confirmed_tools in dict.fromkeys((confirmed, legacy)):
+    # Pre-fleet-config sessions prove only the tools that were actually gated.
+    before_config = confirmed - {"request_fleet_config", "request_provider_allowlist"}
+    before_config_legacy = before_config | (
+        {"request_channel_backend_switch"} if selection else set[str]()
+    )
+    for confirmed_tools in dict.fromkeys((confirmed, legacy, before_config, before_config_legacy)):
         for asks_before_publishing in (False, True):
             for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
                 tools = session_tools(
