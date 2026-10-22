@@ -1,6 +1,7 @@
 """A fleet worker that runs AS another on-server agent, under the requester's permissions."""
 
 from dataclasses import replace
+from datetime import timedelta
 from decimal import Decimal
 from uuid import uuid4
 
@@ -299,3 +300,163 @@ async def test_spawn_as_agent_refuses_an_agent_outside_the_roots_run(captured, o
             as_agent="researcher",
             agent=root.spec,
         )
+
+
+@pytest.mark.parametrize("mode", ["any", "legacy"])
+async def test_fleet_agents_lists_only_agents_this_run_can_spawn_as(
+    captured, owned, monkeypatch, mode
+):
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from daimon.core.defaults import ma_index
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from daimon.core.turn import runtime_manifest
+
+    _, _, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    _, identity, _, sessions = owned
+    tenant = identity.tenant_id
+    agents = [
+        ma_agent(id="root-source", name="helper", tenant_id=tenant, model="claude-haiku-5-5"),
+        ma_agent(
+            id="researcher-source", name="researcher", tenant_id=tenant, model="claude-haiku-5-5"
+        ),
+        ma_agent(id="pricey-source", name="pricey", tenant_id=tenant, model="claude-opus-5-5"),
+        ma_agent(id="kept-source", name="kept", tenant_id=tenant, model="claude-haiku-5-5"),
+    ]
+    restricted = policy.model_copy(
+        update={"agent_rules": {"kept": AgentRule(runs_in=("another-channel",))}}
+    )
+    value = any_agent(grant) if mode == "any" else grant
+
+    async def listing(client, *, tenant_id):
+        assert tenant_id == tenant
+        return agents
+
+    async def read_grant(deps, admission, *, now):
+        return value
+
+    monkeypatch.setattr(ma_index, "list_agents_by_tenant", listing)
+    monkeypatch.setattr(runtime_manifest, "read_agent_fleet_grant", read_grant)
+    ports = HostFleetPorts(
+        sessions,
+        prices={},
+        markup=Decimal(1),
+        deps=SimpleNamespace(anthropic=None, fleet_enabled=False),
+        preparation=lambda parent: None,
+    )
+
+    @asynccontextmanager
+    async def root_request(parent, deadline=None):
+        yield SimpleNamespace(admission=SimpleNamespace())
+
+    monkeypatch.setattr(ports, "_load_preparation", root_request)
+    listed = await ports.worker_agents(root, restricted)
+    names = [row["name"] for row in listed]
+    assert names == (["helper", "researcher"] if mode == "any" else ["helper"])
+    assert listed[0]["root"] is True and listed[0]["model"] == "claude-haiku-5-5"
+
+
+@pytest.mark.parametrize("fault", [None, "refused", "foreign_capture"])
+async def test_prepare_worker_agent_decides_admission_again_for_that_agent(
+    captured, owned, monkeypatch, fault
+):
+    from types import SimpleNamespace
+
+    from daimon.core import mux_compat
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.scope import ResolvedConfig
+    from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
+    from daimon.core.turn import admission as admission_module
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.admission import Admission, prepare_worker_agent
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+
+    source, admission, _, fleet, _, _ = captured
+    _, identity, actor, sessions = owned
+    researcher, actual = await capture_agent(
+        owned, fleet.scope, ma_id="researcher-source", name="researcher"
+    )
+    root_agent = ma_agent(id="root-source", name="helper", tenant_id=identity.tenant_id)
+    root = ProviderPreparationRequest(
+        SimpleNamespace(anthropic=None, sessionmaker=sessions, tool_safety=None),
+        Admission(
+            actor.account_id,
+            root_agent,
+            ma_environment(tenant_id=identity.tenant_id),
+            ResolvedConfig(
+                agent_name="helper",
+                environment_name="default",
+                responder_ma_agent_id="root-source",
+            ),
+            grant=admission,
+            asks_before_publishing=True,
+            backend_revision_origin="agent",
+            origin_seal_ids=frozenset({"root-seal"}),
+        ),
+        fleet.scope,
+        identity.tenant_id,
+        "discord",
+        "member",
+        "thread",
+        actor.account_id,
+        False,
+        DEFAULT_MA_CAPABILITIES,
+        None,
+        NOW + timedelta(minutes=5),
+        lambda: NOW,
+    )
+    decided = []
+
+    async def retrieve(client, agent_id, *, scope):
+        assert agent_id == "researcher-source" and scope == fleet.scope
+        return actual
+
+    async def reauthorize(deps, again):
+        decided.append(again)
+        if fault == "refused":
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        return again
+
+    async def capture(request):
+        assert request.admission.agent is actual and request.source is None
+        if fault == "foreign_capture":
+            return researcher.model_copy(update={"agent_id": uuid4()})
+        return researcher
+
+    async def rules(*args, **kwargs):
+        return SimpleNamespace(tools=frozenset({"post_message"}), needs_driver=True)
+
+    async def skills(*args, **kwargs):
+        return ()
+
+    monkeypatch.setattr(mux_compat, "retrieve_agent", retrieve)
+    monkeypatch.setattr(admission_module, "reauthorize", reauthorize)
+    monkeypatch.setattr(runtime_manifest, "capture_preparation_source", capture)
+    monkeypatch.setattr(admission_module, "daimon_rule_set_for", rules)
+    monkeypatch.setattr(admission_module, "turn_channel_skills", skills)
+    if fault == "refused":
+        with pytest.raises(AdmissionDenied):
+            await prepare_worker_agent(root.deps, root, researcher)
+        return
+    if fault == "foreign_capture":
+        with pytest.raises(AgentBackendRefused):
+            await prepare_worker_agent(root.deps, root, researcher)
+        return
+    worker = await prepare_worker_agent(root.deps, root, researcher)
+    (again,) = decided
+    # The same requester, run place and scope; the agent and its facts are the worker's own.
+    assert worker.admission.agent is actual and again.agent is actual
+    assert worker.admission.grant.subject == admission.subject
+    assert worker.admission.grant.run_place == admission.run_place
+    assert worker.admission.grant.agent != admission.agent
+    assert worker.admission.config.agent_name == "researcher"
+    assert worker.admission.config.responder_ma_agent_id == actual.id
+    assert worker.admission.daimon_rule_tools == frozenset({"post_message"})
+    assert not worker.admission.asks_before_publishing
+    assert worker.admission.backend_revision_origin is None
+    assert worker.admission.origin_seal_ids == frozenset({"root-seal"})
+    assert worker.scope == root.scope and worker.source is researcher
+    assert root.admission.agent is root_agent  # the root's own request is untouched

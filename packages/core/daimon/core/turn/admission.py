@@ -1708,7 +1708,14 @@ async def prepare_worker_agent(
     admission = replace(
         root.admission,
         agent=actual,
-        config=root.admission.config.model_copy(update={"agent_name": source.name}),
+        config=root.admission.config.model_copy(
+            update={
+                "agent_name": source.name,
+                "responder_ma_agent_id": actual.id,
+                "configuration_target_ma_agent_id": None,
+                "configuration_target_name": None,
+            }
+        ),
         grant=worker_grant,
         memory_read_only=_memory_read_only(policy, worker_grant, bool(seals)),
         asks_before_publishing=_asks_before_publishing(policy, worker_grant),
