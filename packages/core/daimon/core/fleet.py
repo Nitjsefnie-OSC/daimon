@@ -84,6 +84,7 @@ type FleetConflictReason = Literal[
     "recovery_reconciliation_required",
     "retained_revision_changed",
     "result_not_successful",
+    "wake_pending",
 ]
 
 

@@ -627,6 +627,9 @@ def register_fleet_tools(
 
         The host returns waiting or blocked when evidence is incomplete. Status
         excerpts, a reached quorum, or a wake are not result certificates.
+        A blocked run with partial=true still carries the verified results of
+        the workers that succeeded and lists the failed ones: present it as a
+        partial result and name which worker failed, never as a complete one.
         Omit run_id for this turn's run.
         """
         return dict(
