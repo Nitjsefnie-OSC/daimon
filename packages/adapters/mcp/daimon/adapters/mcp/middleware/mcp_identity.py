@@ -394,7 +394,9 @@ class IdentityMiddleware(Middleware):
                 raise ToolError(rule_refusal)
         # Each enable appends a rule to session state, which must be this
         # request's alone: StripSessionIdMiddleware (server.py) sees to it.
-        if identity.hold is not None:
+        if identity.hold is not None or identity.foreign_home_id is not None:
+            # A principal marked foreign is narrowed even on an unheld credential:
+            # it has no channel to be held to, so channel tools refuse it.
             return await self._resolve_held(context, call_next, identity)
         if identity.is_operator:
             return await self._resolve_operator(context, call_next, identity)

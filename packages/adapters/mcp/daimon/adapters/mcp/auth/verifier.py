@@ -50,7 +50,9 @@ REFUSAL_AUDIT_TOOL = "auth/verify"
 """The audit row's tool name for a refusal: the verifier never sees the tool."""
 
 
-def _hold_refusal(row: McpTokenRow, *, hold_claim: object, vault_chat: bool) -> str | None:
+def _hold_refusal(
+    row: McpTokenRow, *, hold_claim: object, vault_chat: bool, held_label: bool
+) -> str | None:
     """Why a token's hold claim and its row disagree, or None when they agree.
 
     A held credential is a vault chat token whose row is bound to the channel the
@@ -59,8 +61,9 @@ def _hold_refusal(row: McpTokenRow, *, hold_claim: object, vault_chat: bool) -> 
     else may carry the claim, and a bound chat row is never admitted without it.
     """
     if hold_claim is None:
-        return "hold_claim_missing" if vault_chat and row.channel_id is not None else None
-    if not vault_chat:
+        bound = vault_chat and (row.channel_id is not None or held_label)
+        return "hold_claim_missing" if bound else None
+    if not vault_chat or not held_label:
         return "hold_claim_unexpected"
     try:
         hold = parse_hold_claim(hold_claim)
@@ -96,8 +99,11 @@ def token_row_refusal(
         return "expired"
     if row.platform is not None and row.platform != identity.platform:
         return "platform_mismatch"  # a channel binding this deployment never minted
-    vault_chat = row.kind == "agent" and row.label == chat_token_label(row.jti)
-    hold_refusal = _hold_refusal(row, hold_claim=hold_claim, vault_chat=vault_chat)
+    held_label = row.kind == "agent" and row.label == chat_token_label(row.jti, held=True)
+    vault_chat = held_label or (row.kind == "agent" and row.label == chat_token_label(row.jti))
+    hold_refusal = _hold_refusal(
+        row, hold_claim=hold_claim, vault_chat=vault_chat, held_label=held_label
+    )
     if hold_refusal is not None:
         return hold_refusal
     if row.kind == "agent":

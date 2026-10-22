@@ -9,7 +9,7 @@ from __future__ import annotations
 
 import datetime as dt
 import uuid
-from typing import cast
+from typing import Any, cast
 
 import jwt as pyjwt
 import pytest
@@ -34,7 +34,7 @@ from daimon.core.config import AnthropicSettings, DatabaseSettings, McpSettings,
 from daimon.core.mcp_auth import mint_agent_mcp_token, mint_chat_mcp_token
 from daimon.core.mcp_hold import HOLD_CLAIM
 from daimon.core.stores.accounts import set_role
-from daimon.core.stores.domain import Role
+from daimon.core.stores.domain import McpTokenRow, Role
 from daimon.core.turn_hold import TurnHold
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -42,6 +42,7 @@ from fastmcp import FastMCP
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.context import Context
 from pydantic import HttpUrl, PostgresDsn, SecretStr
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 
@@ -389,3 +390,219 @@ def test_allowlist_excludes_the_administrative_and_directory_tools() -> None:
         "create_file_upload_url",
     }
     assert not forbidden & set(HELD_TOOL_ALLOWLIST)
+
+
+# --- a principal marked foreign is narrowed on an unheld credential too ---------
+
+
+async def _foreign_slack_account(
+    sessionmaker: async_sessionmaker[AsyncSession], *, role: Role = Role.USER
+) -> uuid.UUID:
+    from daimon.core.stores.identity import mark_principal_foreign
+
+    account_id = await _slack_account(sessionmaker, role=role)
+    async with sessionmaker() as s, s.begin():
+        row = (
+            await s.execute(
+                text("select id from platform_principals where account_id = :a"),
+                {"a": account_id},
+            )
+        ).scalar_one()
+        await mark_principal_foreign(s, principal_id=row, home_id="T-SYN-OTHER")
+    return account_id
+
+
+async def test_a_foreign_principal_with_an_unheld_token_sees_only_the_held_allowlist(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    account_id = await _foreign_slack_account(sessionmaker, role=Role.ADMIN)
+    unheld = await _chat_token(sessionmaker, account_id, None)
+    app = create_mcp_app(settings=_SETTINGS, sessionmaker=sessionmaker)
+
+    listed = await mcp_session(app, token=unheld, method="tools/list")
+    names = {t["name"] for t in listed["result"]["tools"]}  # type: ignore[index]
+    assert names <= set(HELD_TOOL_ALLOWLIST) | HELD_PROXY_TOOLS
+
+    for name in ("get_cli_token", "list_environments", "list_agents"):
+        for params in (
+            {"name": name, "arguments": {}},
+            {"name": "call_tool", "arguments": {"name": name, "arguments": {}}},
+        ):
+            result = await mcp_session(app, token=unheld, method="tools/call", params=params)
+            assert (
+                "limited to its own channel" in str(result).lower()
+                or "not found" in str(result).lower()
+            ), (name, result)
+
+
+async def test_an_unmarked_principal_with_an_unheld_token_is_unchanged(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    account_id = await _slack_account(sessionmaker, role=Role.ADMIN)
+    unheld = await _chat_token(sessionmaker, account_id, None)
+    app = create_mcp_app(settings=_SETTINGS, sessionmaker=sessionmaker)
+
+    assert "list_agents" in await _search_names(app, unheld, "list agents")
+
+
+# --- publishing ---------------------------------------------------------------
+
+
+def test_publish_report_is_not_on_the_held_allowlist() -> None:
+    """It publishes an agent's reader: a copy of its prompt and skills and an agent token."""
+    assert "publish_report" not in HELD_TOOL_ALLOWLIST
+    assert held_tool_refusal("publish_report") is not None
+    # The upload-URL tools stay: they create no agent and no token.
+    assert held_tool_refusal("create_notebook_upload_url") is None
+    assert held_tool_refusal("create_attachment_upload_url") is None
+
+
+async def test_a_held_call_cannot_publish_a_report_or_a_blog_or_an_editable_notebook(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    account_id = await _slack_account(sessionmaker)
+    held = await _chat_token(sessionmaker, account_id, HOLD)
+    app = create_mcp_app(settings=_SETTINGS, sessionmaker=sessionmaker)
+
+    report = await mcp_session(
+        app, token=held, method="tools/call", params={"name": "publish_report", "arguments": {}}
+    )
+    assert "limited to its own channel" in str(report).lower()
+    for flag in ("permanent", "editable"):
+        result = await mcp_session(
+            app,
+            token=held,
+            method="tools/call",
+            params={"name": "create_notebook_upload_url", "arguments": {flag: True}},
+        )
+        assert "scratch, read-only" in str(result).lower(), result
+
+
+# --- rollback: the previous verifier must refuse a held token --------------------
+
+
+def _previous_token_row_refusal(
+    row: McpTokenRow, *, claims: dict[str, object], identity: Any, now: dt.datetime
+) -> str | None:
+    """`token_row_refusal` of the build before held credentials (main d568b40a9), verbatim
+    for the agent branch: no hold claim, and only `vault-chat:` marks a vault chat token."""
+    from daimon.core.mcp_auth import (
+        CHAT_TOKEN_TTL,
+        chat_token_label,
+        registered_agent_claims_match,
+    )
+
+    if row.revoked_at is not None:
+        return "revoked"
+    if row.expires_at is not None and row.expires_at <= now:
+        return "expired"
+    if row.platform is not None and row.platform != identity.platform:
+        return "platform_mismatch"
+    assert row.kind == "agent"
+    if row.account_id != identity.account_id or row.tenant_id != identity.tenant_id:
+        return "account_mismatch"
+    chat = claims.get("chat_agent_id")
+    if row.label == chat_token_label(row.jti):
+        expiry, issued = claims.get("exp"), claims.get("iat")
+        if (
+            chat != row.agent_id
+            or claims.get("agent_id") is not None
+            or claims.get("internal") is not None
+            or type(expiry) is not int
+            or type(issued) is not int
+            or row.expires_at is None
+            or expiry != int(row.expires_at.timestamp())
+            or not 0 < expiry - issued <= int(CHAT_TOKEN_TTL.total_seconds())
+        ):
+            return "chat_binding_mismatch"
+    elif chat is not None:
+        if row.scopes or not registered_agent_claims_match(
+            row, claims, now=now, chat_execution=True
+        ):
+            return "chat_binding_mismatch"
+    elif claims.get("agent_id") != row.agent_id:
+        return "agent_mismatch"
+    if row.channel_id is not None and identity.role is not Role.ADMIN:
+        return "admin_required"
+    return None
+
+
+async def test_the_previous_verifier_refuses_a_held_token_and_still_admits_an_unheld_one(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.mcp_auth import CHAT_TOKEN_LABEL_PREFIX, HELD_CHAT_TOKEN_LABEL_PREFIX
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    account_id = await _slack_account(sessionmaker, role=Role.ADMIN)
+    held, unheld = (
+        await _chat_token(sessionmaker, account_id, HOLD),
+        await _chat_token(sessionmaker, account_id, None),
+    )
+    async with sessionmaker() as s:
+        identity = await get_account_with_tenant(s, account_id=account_id)
+        assert identity is not None
+        rows = {}
+        for name, token in (("held", held), ("unheld", unheld)):
+            claims = pyjwt.decode(
+                token, SECRET, algorithms=["HS256"], options={"verify_exp": False}
+            )
+            row = await get_mcp_token(s, jti=uuid.UUID(claims["jti"]))
+            assert row is not None
+            rows[name] = (row, claims)
+    now = dt.datetime.now(dt.UTC)
+
+    held_row, held_claims = rows["held"]
+    unheld_row, unheld_claims = rows["unheld"]
+    assert held_row.label.startswith(HELD_CHAT_TOKEN_LABEL_PREFIX)
+    assert unheld_row.label.startswith(CHAT_TOKEN_LABEL_PREFIX)
+    assert not held_row.label.startswith(CHAT_TOKEN_LABEL_PREFIX)
+    assert (
+        _previous_token_row_refusal(unheld_row, claims=unheld_claims, identity=identity, now=now)
+        is None
+    )
+    assert (
+        _previous_token_row_refusal(held_row, claims=held_claims, identity=identity, now=now)
+        == "chat_binding_mismatch"
+    )
+    # The hazard this closes: under the ordinary label the previous build admits it.
+    relabelled = held_row.model_copy(update={"label": CHAT_TOKEN_LABEL_PREFIX + str(held_row.jti)})
+    assert (
+        _previous_token_row_refusal(relabelled, claims=held_claims, identity=identity, now=now)
+        is None
+    )
+
+
+async def test_the_new_verifier_ties_the_held_label_to_the_hold_claim(
+    sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.adapters.mcp.auth.verifier import token_row_refusal
+    from daimon.core.mcp_auth import CHAT_TOKEN_LABEL_PREFIX
+    from daimon.core.stores.accounts import get_account_with_tenant
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    account_id = await _slack_account(sessionmaker)
+    token = await _chat_token(sessionmaker, account_id, HOLD)
+    claims = pyjwt.decode(token, SECRET, algorithms=["HS256"], options={"verify_exp": False})
+    async with sessionmaker() as s:
+        identity = await get_account_with_tenant(s, account_id=account_id)
+        row = await get_mcp_token(s, jti=uuid.UUID(claims["jti"]))
+    assert identity is not None and row is not None
+    now = dt.datetime.now(dt.UTC)
+    hold_claim = claims.pop(HOLD_CLAIM)
+
+    assert (
+        token_row_refusal(row, claims=claims, identity=identity, now=now, hold_claim=hold_claim)
+        is None
+    )
+    assert (
+        token_row_refusal(row, claims=claims, identity=identity, now=now, hold_claim=None)
+        == "hold_claim_missing"
+    )
+    ordinary = row.model_copy(update={"label": CHAT_TOKEN_LABEL_PREFIX + str(row.jti)})
+    assert (
+        token_row_refusal(
+            ordinary, claims=claims, identity=identity, now=now, hold_claim=hold_claim
+        )
+        == "hold_claim_unexpected"
+    )

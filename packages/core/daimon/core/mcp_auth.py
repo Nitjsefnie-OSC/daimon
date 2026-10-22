@@ -182,9 +182,17 @@ PANEL_TOKEN_LABEL = "billing-panel"
 EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 
 
-def chat_token_label(jti: uuid.UUID) -> str:
+#: A held chat token's own label. The verifier before held credentials existed
+#: knows only `vault-chat:`; under any other label it re-checks the token as a
+#: remote credential, whose exact four-claim shape a vault token never has, so
+#: it refuses a held token instead of admitting it as an unheld chat credential.
+HELD_CHAT_TOKEN_LABEL_PREFIX = "vault-chat-held:"
+
+
+def chat_token_label(jti: uuid.UUID, *, held: bool = False) -> str:
     """Bind the registry discriminator to a generated id, leaving user labels free."""
-    return f"{CHAT_TOKEN_LABEL_PREFIX}{jti}"
+    prefix = HELD_CHAT_TOKEN_LABEL_PREFIX if held else CHAT_TOKEN_LABEL_PREFIX
+    return f"{prefix}{jti}"
 
 
 async def mint_chat_mcp_token(
@@ -230,7 +238,7 @@ async def mint_chat_mcp_token(
         account_id=account_id,
         tenant_id=identity.tenant_id,
         agent_id=str(agent_id),
-        label=chat_token_label(jti),
+        label=chat_token_label(jti, held=hold is not None),
         created_at=now,
         expires_at=expires_at,
         platform=None if hold is None else hold.platform,

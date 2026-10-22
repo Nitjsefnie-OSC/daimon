@@ -29,7 +29,7 @@ HELD_PROXY_TOOLS: Final = frozenset({"search_tools", "call_tool"})
 #: Every tool a held credential may see or call, each with the reason it is safe
 #: there. Names are the tools' own, not their module's. Anything not listed is
 #: refused: administration, every directory read (agents, skills, environments,
-#: tenant summary), routines, direct messages, credential, key and OAuth
+#: tenant summary), routines, direct messages, `publish_report`, credential, key and OAuth
 #: requests, GitHub and repository tools, agent create/update/fork, fleet,
 #: budgets, rules, `get_cli_token`, `delete_report` and skill uploads.
 HELD_TOOL_ALLOWLIST: Final[Mapping[str, str]] = MappingProxyType(
@@ -60,10 +60,12 @@ HELD_TOOL_ALLOWLIST: Final[Mapping[str, str]] = MappingProxyType(
         "list_sessions": "lists the caller's own conversations",
         "get_session": "reads one of the caller's own conversations",
         "list_session_events": "reads the caller's own transcript through the read policy",
-        # Publishing waits for the requester's approval card before it runs.
-        "publish_report": "publishes only after the requester approves the card",
-        "create_notebook_upload_url": "publishes only after the requester approves the card",
-        "create_attachment_upload_url": "publishes only after the requester approves the card",
+        # Publishing the conversation's own sandbox output waits for the requester's
+        # approval card. These two only mint an upload URL for it: they create no
+        # agent and no token. `publish_report` is not here: it publishes an agent's
+        # reader, which copies the agent's prompt and skills and mints an agent token.
+        "create_notebook_upload_url": "scratch notebook upload, only after the requester approves",
+        "create_attachment_upload_url": "attachment upload, only after the requester approves",
         # Pure utilities.
         "now": "wall-clock time; reads nothing",
         "convert": "time-zone conversion; reads nothing",

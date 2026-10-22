@@ -233,7 +233,7 @@ async def _refresh_chat_credential_locked(
             identity is not None
             and row is not None
             and row.kind == "agent"
-            and row.label == chat_token_label(row.jti)
+            and row.label == chat_token_label(row.jti, held=hold is not None)
             and row.account_id == account_id
             and row.tenant_id == identity.tenant_id
             and row.agent_id == str(agent_id)
