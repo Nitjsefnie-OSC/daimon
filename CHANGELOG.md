@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fleet: slow admissions taking turns on the tenant fleet lock no longer make the budget watcher cancel every worker in the run. While the lock is busy the watcher keeps checking every worker's spend from a lock-free read-only snapshot, logs which transaction holds the lock, and fails closed when one transaction holds it for 10 s or it stays busy for 60 s; a budget read granted late in its lock wait is no longer counted as a slow read.
+
 - Fleet: a plain-language Gemini worker is no longer refused for its deadline. A worker's default deadline is now the sooner of the run's deadline and the Gemini worker runtime limit (120 s), and a later deadline is shortened the same way; Anthropic and OpenAI workers keep the run's deadline.
 
 - Fleet: a plain-language ask such as "compare X vs Y with 3 workers" now works. `fleet_spawn` takes a `task` and an optional granted `model` and fills the rest: the turn's run, the granted backend, an even share of the budget left per remaining worker slot (or per planned worker, when the root passes `planned_workers`), and a spawn refused at admission no longer uses up one of the run's worker slots, and the root's frozen deadline (a later deadline is shortened to it); an exhausted budget is refused before a worker slot is used. `fleet_status` and `fleet_collect` default to the turn's run. The root's own model is allowed in its fleet grant without being listed, and a worker on another model than the root's can declare that it runs without the root's model controls (such as effort); `task` workers do this automatically. Only agents with a fleet grant are affected; every grant cap still applies.
