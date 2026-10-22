@@ -16,7 +16,8 @@ from daimon.adapters.teams.routines_panel import ADMIN_ONLY, NOT_OWNER
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, list_routines_for_tenant
-from daimon.testing import build_fake_anthropic, list_response, ma_agent
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (

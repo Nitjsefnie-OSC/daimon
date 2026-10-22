@@ -33,7 +33,7 @@ from daimon.core.stores.shared_channels import mark_channel_shared
 from daimon.core.stores.thread_agent_bindings import create_binding
 from daimon.core.turn_hold import RequesterOrg, TurnHold
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     build_fake_anthropic,
     combine_handlers,

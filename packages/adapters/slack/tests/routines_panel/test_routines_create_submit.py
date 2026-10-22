@@ -32,8 +32,8 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME, MA_METADATA_KEY_
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.routines import list_routines_for_tenant
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 
 _TEAM_ID = "T_RC"
 _USER_ID = "U_RC_CREATOR"

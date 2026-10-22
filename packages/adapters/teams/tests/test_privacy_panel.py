@@ -25,7 +25,7 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.purge import AccountPurgeResult, PurgeReport
 from daimon.core.stores import microsoft_user_tokens as microsoft_tokens
 from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

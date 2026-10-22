@@ -903,7 +903,7 @@ native session and bound observation recorder. Usage frames can arrive without
 a display event; nullable measurements and pending accounting stay intact.
 The default Anthropic session continues to use its SDK span recorder.
 OpenAI probe reconciliation can read captured Admin Costs and Completions Usage
-exports through `python -m daimon.testing.conformance.usage_reconciliation --costs costs.json
+exports through `python -m mux.testing.conformance.usage_reconciliation --costs costs.json
 --usage usage.json --attestation attestation.json --guard-config budget.json
 --spend-ledger spend.md`. This command reads files only and emits an assessment
 and, when eligible, an unsigned proposal bound to the current hold. Lead approval
