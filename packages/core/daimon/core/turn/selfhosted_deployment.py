@@ -21,7 +21,7 @@ from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, register_hos
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, SessionSpec
-from mux.drivers.selfhosted.transport import DirectTransport, FoundryInvocationsTransport
+from mux.drivers.selfhosted import DirectTransport, FoundryInvocationsTransport
 from mux.errors import ProviderError, ScopeViolation
 from mux.profiles.anthropic import MANAGED_AGENTS
 from pydantic import (
@@ -36,7 +36,7 @@ from pydantic import (
 if TYPE_CHECKING:
     from daimon.core.config import SelfHostedSettings
     from daimon.core.tool_safety import ToolSafetyPolicy
-    from mux.drivers.selfhosted.config import HarnessConfig
+    from mux.drivers.selfhosted import HarnessConfig
 
 _ROWS = TypeAdapter(list[dict[str, JsonValue]])
 _MAX_BYTES = 1_048_576
@@ -215,7 +215,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         require_selfhosted_price,
     )
     from daimon.core.stores.selfhosted_resources import SelfHostedAgents, SelfHostedEnvironments
-    from mux.drivers.selfhosted.config import HarnessConfig
+    from mux.drivers.selfhosted import HarnessConfig
 
     model = revision.model
     settings = load_settings()
@@ -293,7 +293,7 @@ def build_selfhosted_runtime(request: ProviderPreparationRequest) -> SelfHostedH
         environment_pin = environment.revision
         config = HarnessConfig.model_validate(extension.value)
         validate_harness_auth(config, settings.selfhosted, scope.tenant_id)
-        from mux.drivers.selfhosted.events import agent_tool_policy
+        from mux.drivers.selfhosted import agent_tool_policy
 
         agent_policy.update(agent_tool_policy(agent.spec))
         host_policy = host_tool_policy(

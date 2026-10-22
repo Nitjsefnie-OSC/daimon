@@ -36,7 +36,7 @@ from mux.contracts.resources import (
     EnvironmentPatch,
     EnvironmentSpec,
 )
-from mux.drivers.selfhosted.config import validate_resource_spec
+from mux.drivers.selfhosted import validate_resource_spec
 from mux.errors import OperationConflict, ProviderError, ScopeViolation
 from mux.profiles.selfhosted import LOOP
 from mux.state.operations import request_digest

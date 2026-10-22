@@ -13,8 +13,8 @@ import mux.state
 import pytest
 
 # Packages and modules that declare a public surface. Anything else under
-# `mux` (the selfhosted driver, driver submodules, `_private` modules) is
-# implementation detail until it declares `__all__` and is listed here.
+# `mux` (driver submodules, `_private` modules) is implementation detail until
+# it declares `__all__` and is listed here.
 PUBLIC_PACKAGES = ("mux.contracts", "mux.state")
 PUBLIC_MODULES = (
     "mux.errors",
@@ -23,6 +23,9 @@ PUBLIC_MODULES = (
     "mux.drivers.anthropic",
     "mux.drivers.openai",
     "mux.drivers.gemini",
+    "mux.drivers.selfhosted",
+    # The daimon-harness/0 wire format, shared by the host, harness and conformance kit.
+    "mux.drivers.selfhosted.wire",
 )
 
 # Intentional second import paths: a name listed here may be reachable from
