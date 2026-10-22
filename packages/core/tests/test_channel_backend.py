@@ -102,6 +102,14 @@ def test_a_configuration_this_release_cannot_honour_is_refused(config: BackendCo
     assert "model provider" in admission_refusal_text("backend_unsupported", nouns)
 
 
+@pytest.mark.parametrize("capability", ["steer", "native_event_replay", "environments_fork"])
+def test_a_capability_the_default_driver_refuses_is_refused_at_admission(capability: str) -> None:
+    """The Anthropic profile no longer claims what its driver cannot do."""
+    requirement = {capability: CapabilityRequirement(level="required")}
+    with pytest.raises(BackendUnsupported, match=capability):
+        check_backend(_revision(BackendConfig(requires=requirement)))  # type: ignore[arg-type]
+
+
 async def test_set_and_clear_write_immutable_revisions(db_session: AsyncSession) -> None:
     tenant = await make_tenant(db_session)
     channel = channel_ref(tenant.id, "discord", "chan-1")

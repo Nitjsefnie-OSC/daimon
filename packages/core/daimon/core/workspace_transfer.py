@@ -103,7 +103,7 @@ from daimon.core.usage_recording import record_turn_usage
 from daimon.core.workspace_ports_compat import restore_transfer_records
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import Scope
-from mux.drivers.anthropic.outputs import Outputs
+from mux.drivers.anthropic import Outputs
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

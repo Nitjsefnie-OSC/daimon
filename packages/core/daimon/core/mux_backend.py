@@ -17,10 +17,12 @@ from mux.contracts.config import ConfigRevision
 from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
-from mux.drivers.anthropic import AnthropicManagedAgents
-from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
-from mux.drivers.anthropic.resources._secrets import SecretResolver
-from mux.drivers.anthropic.turn import AnthropicEvents
+from mux.drivers.anthropic import (
+    AnthropicEvents,
+    AnthropicManagedAgents,
+    ResourceAuthorization,
+    SecretResolver,
+)
 from mux.errors import ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
 

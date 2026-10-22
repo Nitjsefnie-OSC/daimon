@@ -49,11 +49,13 @@ from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.receipts import DeletionReceipt
 from mux.contracts.resources import ProviderBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
-from mux.drivers.openai import OpenAIDriver
-from mux.drivers.openai._common import Authorization
-from mux.drivers.openai.mcp_auth import MCPSecretResolver
-from mux.drivers.openai.session_controls import SessionControls
-from mux.drivers.openai.transport import Transport
+from mux.drivers.openai import (
+    Authorization,
+    MCPSecretResolver,
+    OpenAIDriver,
+    SessionControls,
+    Transport,
+)
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
 from mux.state.operations import request_digest

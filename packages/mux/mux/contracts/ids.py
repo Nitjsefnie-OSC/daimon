@@ -160,3 +160,18 @@ class SkillRef(Contract):
     version: str | None = None
     source: str | None = None
     digest: str | None = None
+
+
+__all__ = [
+    "ChannelRef",
+    "ModelRef",
+    "PROVIDERS",
+    "Page",
+    "PageRequest",
+    "Provider",
+    "ResourceRef",
+    "Revision",
+    "Scope",
+    "SkillRef",
+    "ThreadRef",
+]

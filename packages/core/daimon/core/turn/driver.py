@@ -119,7 +119,7 @@ from mux.contracts.events import Event
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.usage import UsageObservation
-from mux.drivers.anthropic.transport import LegacyTurnTransport
+from mux.drivers.anthropic import LegacyTurnTransport
 from mux.errors import ProviderError
 from tenacity import AsyncRetrying, retry_if_exception_type, stop_after_attempt
 

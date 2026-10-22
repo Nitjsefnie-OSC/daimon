@@ -410,6 +410,29 @@ type = "forbidden"
 source_modules = ["daimon_harness"]
 forbidden_modules = ["daimon"]
 
+# Daimon reaches a provider driver through its package (`mux.drivers.<provider>`),
+# whose `__all__` is the host-facing API; the driver's submodules and private
+# modules are not an import path. The ignores are the names that stay on a
+# submodule because a package-level export would add a generic name:
+# openai `KEY` and `reserved` and gemini `credential`. The selfhosted driver is
+# not covered yet.
+[[tool.importlinter.contracts]]
+name = "Daimon product code imports provider drivers through their packages"
+type = "forbidden"
+source_modules = ["daimon.core", "daimon.adapters"]
+forbidden_modules = [
+    "mux.drivers.anthropic.**",
+    "mux.drivers.openai.**",
+    "mux.drivers.gemini.**",
+    "mux.contracts._base",
+]
+allow_indirect_imports = true
+ignore_imports = [
+    "daimon.core.turn.openai_deployment -> mux.drivers.openai.mcp_auth",
+    "daimon.core.turn.openai_deployment -> mux.drivers.openai.skill_bindings",
+    "daimon.core.turn.gemini_deployment -> mux.drivers.gemini.mcp_auth",
+]
+
 [tool.pytest.ini_options]
 pythonpath = [".", "tests/golden"]
 asyncio_mode = "auto"
