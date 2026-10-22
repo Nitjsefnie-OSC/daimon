@@ -215,6 +215,9 @@ def _turn_port_kwargs(
 
 
 log = structlog.get_logger(__name__)
+#: How long a turn waits for its end-of-turn finalizer (credential revocation)
+#: before returning; a slower finalizer keeps running in the background.
+_FINALIZE_TIMEOUT_S = 15.0
 
 
 async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: UsageRecorder) -> None:
@@ -863,8 +866,15 @@ async def run_prepared_turn(
         observation.finish(error=exc)
         raise
     finally:
-        if prepared._finalize is not None:  # pyright: ignore[reportPrivateUsage]
-            await prepared._finalize()  # pyright: ignore[reportPrivateUsage]
+        finalize = prepared._finalize  # pyright: ignore[reportPrivateUsage]
+        if finalize is not None:
+            # Credential revocation must survive a second cancel of this task:
+            # the shielded call keeps running even if this wait is cancelled.
+            pending = asyncio.ensure_future(finalize())
+            try:
+                await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
+            except TimeoutError:
+                log.warning("turn.finalize_timeout", timeout_s=_FINALIZE_TIMEOUT_S)
     observation.session_id = result.ma_session_id
     observation.finish(state=result.state, recovered=result.recovered)
     return result

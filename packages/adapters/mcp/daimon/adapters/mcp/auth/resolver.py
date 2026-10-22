@@ -76,6 +76,8 @@ class AuthIdentity:
     bound_channel_id: str | None = None
     # Signed provider prohibition survives agent deletion until token expiry.
     anthropic_disabled: bool = False
+    # A provider turn with no confirmation card: confirmation-gated tools refuse.
+    no_confirmation_surface: bool = False
 
     @property
     def is_operator(self) -> bool:

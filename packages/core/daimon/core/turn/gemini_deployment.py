@@ -632,7 +632,12 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         """
         nonlocal minted
         from daimon.core.ma_identity import derive_agent_uuid
-        from daimon.core.mcp_auth import mint_agent_mcp_token, token_jti, validate_agent_mcp_token
+        from daimon.core.mcp_auth import (
+            NO_CONFIRMATION_LABEL,
+            mint_agent_mcp_token,
+            token_jti,
+            validate_agent_mcp_token,
+        )
         from daimon.core.mcp_oauth.discovery import list_mcp_tools
         from daimon.core.stores.accounts import get_account_with_tenant
 
@@ -667,7 +672,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 account_id=account,
                 tenant_id=tenant,
                 agent_id=agent_id,
-                label="gemini-agent-turn",
+                label=NO_CONFIRMATION_LABEL,
                 secret=secret,
                 now=now,
                 ttl_days=ttl_s / 86400,  # pyright: ignore[reportArgumentType]

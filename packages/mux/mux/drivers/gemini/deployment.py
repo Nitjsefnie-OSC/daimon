@@ -85,12 +85,24 @@ class _ConfiguredTransport:
         self._storage_tokens: set[RedactedCredential] = set()
         # Interaction id -> digests of mount headers sent (never the token).
         self._mount_echoes = MountEchoBook()
+        # Shared like the storage tokens: each call gets a fresh SDKTransport, and
+        # every later read must scrub a credential an earlier create dispatched.
+        self._mcp_tokens: set[RedactedCredential] = set()
 
     def mount_echo_digests(self, interaction_id: str) -> frozenset[str]:
         return self._mount_echoes.get(interaction_id)
 
     def bind_mount_echo(self, interaction_id: str, digests: AbstractSet[str]) -> None:
         self._mount_echoes.add(interaction_id, digests)
+
+    def _sdk(self, client: genai.Client) -> SDKTransport:
+        return SDKTransport(
+            client,
+            protect_storage_credentials=self._protect_storage_credentials,
+            storage_tokens=self._storage_tokens,
+            mount_echoes=self._mount_echoes,
+            mcp_tokens=self._mcp_tokens,
+        )
 
     @asynccontextmanager
     async def _client(self) -> AsyncIterator[genai.Client]:
@@ -144,48 +156,23 @@ class _ConfiguredTransport:
 
     async def count_input_tokens(self, request: Mapping[str, JsonValue]) -> int:
         async with self._client() as client:
-            return await SDKTransport(
-                client,
-                protect_storage_credentials=self._protect_storage_credentials,
-                storage_tokens=self._storage_tokens,
-                mount_echoes=self._mount_echoes,
-            ).count_input_tokens(request)
+            return await self._sdk(client).count_input_tokens(request)
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
         async with self._client() as client:
-            return await SDKTransport(
-                client,
-                protect_storage_credentials=self._protect_storage_credentials,
-                storage_tokens=self._storage_tokens,
-                mount_echoes=self._mount_echoes,
-            ).create(request)
+            return await self._sdk(client).create(request)
 
     async def get(self, interaction_id: str) -> Object:
         async with self._client() as client:
-            return await SDKTransport(
-                client,
-                protect_storage_credentials=self._protect_storage_credentials,
-                storage_tokens=self._storage_tokens,
-                mount_echoes=self._mount_echoes,
-            ).get(interaction_id)
+            return await self._sdk(client).get(interaction_id)
 
     async def cancel(self, interaction_id: str) -> Object:
         async with self._client() as client:
-            return await SDKTransport(
-                client,
-                protect_storage_credentials=self._protect_storage_credentials,
-                storage_tokens=self._storage_tokens,
-                mount_echoes=self._mount_echoes,
-            ).cancel(interaction_id)
+            return await self._sdk(client).cancel(interaction_id)
 
     async def download_snapshot(self, environment_id: str) -> bytes:
         async with self._client() as client:
-            return await SDKTransport(
-                client,
-                protect_storage_credentials=self._protect_storage_credentials,
-                storage_tokens=self._storage_tokens,
-                mount_echoes=self._mount_echoes,
-            ).download_snapshot(environment_id)
+            return await self._sdk(client).download_snapshot(environment_id)
 
     async def open_stream(
         self,
@@ -196,12 +183,7 @@ class _ConfiguredTransport:
         lifetime = self._client()
         client = await lifetime.__aenter__()
         try:
-            source = await SDKTransport(
-                client,
-                protect_storage_credentials=self._protect_storage_credentials,
-                storage_tokens=self._storage_tokens,
-                mount_echoes=self._mount_echoes,
-            ).open_stream(interaction_id, after=after)
+            source = await self._sdk(client).open_stream(interaction_id, after=after)
         except BaseException:
             await lifetime.__aexit__(None, None, None)
             raise

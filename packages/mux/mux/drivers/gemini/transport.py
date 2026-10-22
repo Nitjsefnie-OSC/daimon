@@ -291,7 +291,7 @@ def _secret_path(value: JsonValue, secret: str, path: str = "$") -> str | None:
     return None
 
 
-def scrub_mcp_echo(value: Object, tokens: set[RedactedCredential]) -> Object:
+def scrub_mcp_echo(value: Object, tokens: AbstractSet[RedactedCredential]) -> Object:
     """Remove the echo of our own MCP server credential header, and nothing else.
 
     If an interaction echoes its request tools, our `mcp_server` entry may carry
@@ -470,6 +470,7 @@ class SDKTransport:
         protect_storage_credentials: bool = False,
         storage_tokens: set[RedactedCredential] | None = None,
         mount_echoes: MountEchoBook | None = None,
+        mcp_tokens: set[RedactedCredential] | None = None,
     ) -> None:
         self._protect_storage_credentials = protect_storage_credentials
         self._storage_tokens: set[RedactedCredential] = (
@@ -477,8 +478,9 @@ class SDKTransport:
         )
         # Interaction id -> digests of the mount headers sent for it.
         self._mount_echoes = mount_echoes if mount_echoes is not None else MountEchoBook()
-        # The MCP credentials this transport dispatched; any echo is scrubbed or refused.
-        self._mcp_tokens: set[RedactedCredential] = set()
+        # The MCP credentials dispatched (shared across a configured transport's
+        # per-call instances); any echo is scrubbed or refused on every read.
+        self._mcp_tokens: set[RedactedCredential] = mcp_tokens if mcp_tokens is not None else set()
         # google-genai 2.7 forwards attempts as Stainless max_retries, so
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]

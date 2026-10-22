@@ -189,6 +189,12 @@ EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 HELD_CHAT_TOKEN_LABEL_PREFIX = "vault-chat-held:"
 
 
+#: Registry label of a per-turn credential minted for a provider turn that has
+#: no confirmation card (a Gemini agent template). The server refuses every
+#: confirmation-gated or publishing tool for it (`no_confirmation_surface`).
+NO_CONFIRMATION_LABEL = "gemini-agent-turn"
+
+
 def chat_token_label(jti: uuid.UUID, *, held: bool = False) -> str:
     """Bind the registry discriminator to a generated id, leaving user labels free."""
     prefix = HELD_CHAT_TOKEN_LABEL_PREFIX if held else CHAT_TOKEN_LABEL_PREFIX

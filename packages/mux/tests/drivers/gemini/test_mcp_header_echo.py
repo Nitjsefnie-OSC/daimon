@@ -208,3 +208,70 @@ def test_a_pinned_full_source_echo_scrubs_mount_and_mcp_together() -> None:
     clean = checked_storage_response(body, protected=True, tokens={mount}, mcp_tokens={TOKEN})
     encoded = json.dumps(clean)
     assert TOKEN not in encoded and mount not in encoded
+
+
+@pytest.mark.parametrize("leak", [False, True])
+async def test_the_configured_transport_scrubs_every_later_read_after_one_create(
+    monkeypatch: pytest.MonkeyPatch, leak: bool
+) -> None:
+    """Production makes a fresh SDKTransport per call: the dispatched header must still
+    be known to a separate GET, cancel and stream, and a leak there must refuse."""
+    from mux.drivers.gemini import deployment
+
+    from .test_deployment_isolation import owned_clients
+
+    async def already_bound(request: Object) -> Object:
+        return request
+
+    monkeypatch.setattr(transport_module, "refresh_bound_request", already_bound)
+    reads: list[str] = []
+
+    def respond(request: httpx.Request) -> httpx.Response:
+        echoed = completed(tools=[mcp_tool([OURS])], text="leaked " + TOKEN if leak else "answer")
+        if request.method == "POST" and "cancel" in request.url.path:
+            reads.append("cancel")
+            return httpx.Response(200, json=echoed)
+        if request.method == "POST":
+            reads.append("create")
+            return httpx.Response(200, json=completed(tools=[mcp_tool([OURS])]))
+        if "stream" in str(request.url) or "text/event-stream" in request.headers.get("accept", ""):
+            reads.append("stream")
+            frame = {"event_type": "interaction.completed", "interaction": echoed}
+            return httpx.Response(
+                200,
+                headers={"content-type": "text/event-stream"},
+                content=("data: " + json.dumps(frame) + "\n\n").encode(),
+            )
+        reads.append("get")
+        return httpx.Response(200, json=echoed)
+
+    owned_clients(monkeypatch, respond)
+    gemini = deployment.configured_transport(api_key="offline-selected")
+    created = await gemini.create(
+        {"agent": "agents/base", "agent_config": {"type": "antigravity"}, "tools": [mcp_tool()]}
+    )
+    assert "headers" not in created["tools"][0]  # pyright: ignore[reportIndexIssue,reportArgumentType]
+
+    async def stream_first() -> Object:
+        source = await gemini.open_stream("native")
+        try:
+            return await anext(aiter(source))
+        finally:
+            closer = getattr(source, "aclose", None)
+            if callable(closer):
+                await closer()  # pyright: ignore[reportUnknownVariableType]
+
+    for name, read in (
+        ("get", lambda: gemini.get("native")),
+        ("cancel", lambda: gemini.cancel("native")),
+        ("stream", stream_first),
+    ):
+        if leak:
+            with pytest.raises(ProviderError) as refused:
+                await read()
+            assert refused.value.native_code == "mcp_token_echo", name
+            assert TOKEN not in str(refused.value)
+        else:
+            value = await read()
+            assert TOKEN not in json.dumps(value), name
+    assert reads[0] == "create" and {"get", "cancel", "stream"} <= set(reads)

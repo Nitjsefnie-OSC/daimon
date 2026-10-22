@@ -362,3 +362,176 @@ async def test_a_real_turn_revokes_its_credential_however_it_ends(template, monk
             for body in sent
             for t in body.get("tools", [])
         ), "the credential travels only in the MCP server entry"
+
+
+GATED = ("add_skill", "publish_report", "create_notebook_upload_url")
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(template, monkeypatch):
+    from daimon.core.mcp_oauth import discovery
+
+    request, *_ = template
+    catalogue = frozenset({"search_tools", "call_tool", *GATED})
+
+    async def listed(_url, _token):
+        return catalogue
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", listed)
+    from daimon.core.turn.runtime_manifest import capture_preparation_source, represented_source
+
+    captured = await capture_preparation_source(request, fresh=True)
+    (representation,) = [r for r in captured.representations if r.target.mcp_servers]
+    (connection,) = representation.target.mcp_servers
+    allowed = set(connection.tool_policy["allowed_tools"])  # pyright: ignore[reportArgumentType]
+    assert allowed == {"search_tools", "call_tool"}
+    assert set(representation.unavailable_mcp_tools) == {f"mcp_tool:daimon-mcp:{t}" for t in GATED}
+    assert represented_source(captured, representation.target) == representation
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+@pytest.mark.parametrize("label", ["template", "ordinary"])
+async def test_the_server_refuses_gated_tools_for_a_template_turn_credential(template, label):
+    from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
+    from daimon.adapters.mcp.middleware.mcp_identity import (
+        IdentityMiddleware,
+        production_agent_id_resolver,
+        production_internal_resolver,
+        production_is_admin_resolver,
+        production_role_resolver,
+        production_subject_resolver,
+        production_tenant_resolver,
+    )
+    from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.mcp_auth import NO_CONFIRMATION_LABEL, mint_agent_mcp_token
+    from daimon.testing.asgi import mcp_session
+    from fastmcp import FastMCP
+
+    request, *_ = template
+    secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
+    app = FastMCP(
+        "gated", auth=DaimonJWTVerifier(secret=secret, sessionmaker=request.deps.sessionmaker)
+    )
+    identity = IdentityMiddleware(
+        subject_resolver=production_subject_resolver,
+        tenant_resolver=production_tenant_resolver,
+        role_resolver=production_role_resolver,
+        agent_id_resolver=production_agent_id_resolver,
+        is_admin_resolver=production_is_admin_resolver,
+        internal_resolver=production_internal_resolver,
+        sessionmaker=request.deps.sessionmaker,
+    )
+    app.add_middleware(identity)
+    ran: list[str] = []
+
+    async def add_skill() -> str:
+        ran.append("add_skill")
+        return "added"
+
+    async def describe_agent() -> str:
+        ran.append("describe_agent")
+        return "ok"
+
+    app.tool(add_skill, name="add_skill")
+    app.tool(describe_agent, name="describe_agent")
+    app.add_transform(AgentChatAwareBM25SearchTransform(max_results=5))
+    http = app.http_app()
+    async with request.deps.sessionmaker.begin() as db:
+        token = await mint_agent_mcp_token(
+            db,
+            account_id=request.admission.account_id,
+            tenant_id=request.tenant_id,
+            agent_id=derive_agent_uuid(
+                tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+            ),
+            label=NO_CONFIRMATION_LABEL if label == "template" else "other-chat-execution",
+            secret=secret,
+            now=datetime.now(UTC),
+            ttl_days=600 / 86400,  # pyright: ignore[reportArgumentType]
+            chat_execution=True,
+        )
+    try:
+
+        async def call(name: str, *, proxied: bool = False) -> dict[str, object]:
+            params: dict[str, object] = (
+                {"name": "call_tool", "arguments": {"name": name, "arguments": {}}}
+                if proxied
+                else {"name": name, "arguments": {}}
+            )
+            return await mcp_session(http, token=token, method="tools/call", params=params)
+
+        gated = await call("add_skill")
+        proxied = await call("add_skill", proxied=True)
+        harmless = await call("describe_agent", proxied=True)
+    finally:
+        await identity.drain_audit()
+    assert "describe_agent" in ran and "error" not in harmless
+    # The proxy never runs a gated tool, for any credential.
+    assert '"isError": true' in json.dumps(proxied)
+    if label == "template":
+        assert ran.count("add_skill") == 0, "the server refuses the gated tool by name too"
+        assert "confirmation card" in json.dumps(gated)
+    else:
+        assert ran.count("add_skill") == 1
+
+
+async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch):
+    import asyncio
+    from types import SimpleNamespace
+
+    from daimon.core.turn import run as run_module
+
+    released, finished = asyncio.Event(), asyncio.Event()
+
+    async def finalize() -> None:
+        await released.wait()
+        finished.set()
+
+    async def forever(*_args, **_kwargs):
+        await asyncio.sleep(3600)
+
+    monkeypatch.setattr(run_module, "run_prepared_turn_impl", forever)
+    observation = SimpleNamespace(
+        activate=lambda: __import__("contextlib").nullcontext(),
+        finish=lambda **_: None,
+        thread_id=None,
+    )
+    prepared = SimpleNamespace(
+        admission=SimpleNamespace(
+            observation=observation,
+            account_id=None,
+            agent=SimpleNamespace(id="agent"),
+            backend_footer_profile=None,
+        ),
+        ma_session_id="session",
+        _finalize=finalize,
+    )
+    deps = SimpleNamespace(
+        backend_selection_enabled=False,
+        running_turns=SimpleNamespace(track=lambda: __import__("contextlib").nullcontext()),
+    )
+    task = asyncio.create_task(
+        run_module.run_prepared_turn(
+            deps,  # pyright: ignore[reportArgumentType]
+            prepared,  # pyright: ignore[reportArgumentType]
+            tenant_id=None,  # pyright: ignore[reportArgumentType]
+            platform="discord",
+            thread_id="t",
+            external_user_id="u",
+            user_message="m",
+            lifecycle=None,  # pyright: ignore[reportArgumentType]
+            cancel=asyncio.Event(),
+            reseed_user_message=None,  # pyright: ignore[reportArgumentType]
+            recovery_lifecycle=None,  # pyright: ignore[reportArgumentType]
+        )
+    )
+    await asyncio.sleep(0.05)
+    task.cancel()
+    await asyncio.sleep(0.05)
+    task.cancel()  # a second cancel lands while the finally is revoking
+    with pytest.raises(asyncio.CancelledError):
+        await task
+    assert not finished.is_set()
+    released.set()
+    await asyncio.wait_for(finished.wait(), timeout=2)
