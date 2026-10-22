@@ -24,7 +24,7 @@ from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.provider_actions import ProviderActionApproval, ProviderActionRequester
 from daimon.core.turn.run import _turn_port_kwargs
-from daimon.testing.turn_fakes import deps_for as deps_for
+from daimon.testing.turn_fakes import deps_for_pinned_mux as deps_for_pinned_mux
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.resources import ProviderBinding
@@ -237,7 +237,7 @@ async def test_preparation_dispatches_before_any_anthropic_binding(
 
     monkeypatch.setitem(preparation._PROVIDER_PREPARATIONS, PROFILE, hook)
     async with transport.client() as client:
-        deps = deps_for(client, db_session_factory)
+        deps = deps_for_pinned_mux(client, db_session_factory)
         result = await bind_session_impl(
             deps,
             admission(),
@@ -275,7 +275,8 @@ async def test_missing_preparation_fails_before_native_binding(
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(
-            deps_for(client, db_session_factory), turn_path=cast(Literal["legacy", "mux"], path)
+            deps_for_pinned_mux(client, db_session_factory),
+            turn_path=cast(Literal["legacy", "mux"], path),
         )
         with pytest.raises(AdmissionDenied, match="backend_unsupported"):
             await bind_session_impl(
@@ -333,7 +334,7 @@ async def test_foreign_provider_preparation_is_refused(
     async with transport.client() as client:
         with pytest.raises(ScopeViolation):
             await bind_session_impl(
-                deps_for(client, db_session_factory),
+                deps_for_pinned_mux(client, db_session_factory),
                 admission(),
                 tenant_id=TENANT,
                 platform="slack",
@@ -421,7 +422,7 @@ async def test_preparation_ceiling_keeps_the_host_failure_contract(
     async with transport.client() as client:
         with pytest.raises(TurnError) as error:
             await bind_session_impl(
-                deps_for(client, db_session_factory),
+                deps_for_pinned_mux(client, db_session_factory),
                 admission(),
                 tenant_id=TENANT,
                 platform="slack",
@@ -512,7 +513,7 @@ async def test_injected_backend_cannot_bypass_default_channel_admission(
 
     async with transport.client() as client:
         deps = replace(
-            deps_for(client, db_session_factory),
+            deps_for_pinned_mux(client, db_session_factory),
             backend=openai_backend,
             backend_session_ref=native_session,
         )
@@ -617,7 +618,7 @@ async def test_missing_runtime_constructor_refuses_without_provider_or_key_acces
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(
-            deps_for(client, db_session_factory),
+            deps_for_pinned_mux(client, db_session_factory),
             channel_backends=True,
             turn_runtime_factory=runtime_module.build_channel_runtime,
         )
@@ -651,7 +652,7 @@ async def test_channel_runtime_refuses_invalid_admission_before_constructor(
     )
     transport = ScriptedTransport()
     async with transport.client() as client:
-        deps = replace(deps_for(client, db_session_factory), channel_backends=True)
+        deps = replace(deps_for_pinned_mux(client, db_session_factory), channel_backends=True)
         selected = admission()
         scope = SCOPE
         if invalid == "no-config":
@@ -707,7 +708,7 @@ async def test_scoped_runtime_lookup_never_shares_a_profile_between_channel_revi
 
     transport = ScriptedTransport()
     async with transport.client() as client:
-        deps = deps_for(client, db_session_factory)
+        deps = deps_for_pinned_mux(client, db_session_factory)
         lookups: list[runtime_module.ScopedTurnRuntimes] = []
         for revision in (REVISION, REVISION.model_copy(update={"local": 2, "digest": "second"})):
             selected = replace(admission(), backend_revision=revision)
@@ -763,7 +764,7 @@ async def test_runtime_mapping_cardinality_is_lazy_and_keeps_injected_profiles(
     transport = ScriptedTransport()
     async with transport.client() as client:
         deps = replace(
-            deps_for(client, db_session_factory),
+            deps_for_pinned_mux(client, db_session_factory),
             turn_runtimes={injected: runtime} if injected is not None else {},
         )
         request = ProviderPreparationRequest(

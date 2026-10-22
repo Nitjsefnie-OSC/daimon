@@ -100,6 +100,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "report-host",
         "mux",
         "harness",
+        "harness-conformance",
     }
     # No status override: GitHub's default needs gate skips after failure/skip.
     assert not any(status in deploy["if"] for status in ("always()", "failure()", "cancelled()"))
@@ -115,13 +116,14 @@ def test_pytest_jobs_use_four_workers_with_worksteal_except_discord() -> None:
     assert set(pytest_jobs) == {
         "pytest-db",
         "pytest-discord",
+        "pytest-mux-leg",
         "pytest-light",
         "pytest-notebook-host",
     }
     for name, job in pytest_jobs.items():
         for command in _pytest_commands(job):
             assert "-n auto" not in command
-            if name == "pytest-discord":
+            if name in ("pytest-discord", "pytest-mux-leg"):
                 assert " -n 2 " in command
             elif "-m slow" not in command:
                 assert " -n 4 --dist worksteal " in command
@@ -174,7 +176,15 @@ def test_every_sharded_job_loads_the_plugin_the_checker_discovers() -> None:
             "shards" in leg for leg in job.get("strategy", {}).get("matrix", {}).get("include", [])
         )
     }
-    assert with_plugin == with_shards == {"pytest-db", "pytest-discord"}
+    assert (
+        with_plugin
+        == with_shards
+        == {
+            "pytest-db",
+            "pytest-discord",
+            "pytest-mux-leg",
+        }
+    )
 
 
 def test_every_discord_leg_keeps_the_hang_diagnostics() -> None:
@@ -448,3 +458,20 @@ def test_mcp_cutover_shell_drains_every_minter_before_strict_admission(
     else:
         assert second.returncode == 0 and clock.read_text() == "1000"
         assert len((tmp_path / "updates").read_text().splitlines()) == 1
+
+
+def test_mux_leg_is_a_blocking_ratchet_outside_the_deploy_gate() -> None:
+    """The mux leg selects mux through the environment and ratchets its known failures."""
+    jobs = _workflow("ci.yml")["jobs"]
+    job = jobs["pytest-mux-leg"]
+    assert not job.get("continue-on-error")
+    assert job["env"]["DAIMON_TURN__PATH"] == "mux"
+    assert job["env"]["DAIMON_TURN__CHANNEL_BACKENDS"] == "true"
+    assert all("-p daimon.testing.mux_leg_known" in c for c in _pytest_commands(job))
+    # Production defaults to legacy, so a mux failure must not hold back the staging deploy.
+    assert "pytest-mux-leg" not in jobs["deploy-gcp"]["needs"]
+    assert (_ROOT / "tests" / "mux_leg_known_failures.txt").is_file()
+    # The legacy legs never load the ratchet or select mux.
+    for name in ("pytest-db", "pytest-discord"):
+        assert "mux_leg_known" not in " ".join(_pytest_commands(jobs[name]))
+        assert "DAIMON_TURN__PATH" not in jobs[name]["env"]

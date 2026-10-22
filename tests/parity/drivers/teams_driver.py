@@ -62,6 +62,7 @@ from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
 from daimon.testing.asgi import asgi_lifespan
+from daimon.testing.turn_leg import turn_leg
 from microsoft_teams.apps.token_manager import TokenManager
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
@@ -303,6 +304,7 @@ class TeamsDriver:
             admin_team_id=_ADMIN_TEAM if admins else None,
         )
         settings.crypto.keys = (SecretStr(self._fernet_key),)
+        settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.mcp.public_url = None if turn else "https://mcp.example.com/mcp"
         settings.mcp.jwt_secret = None if turn else SecretStr("x" * 32)
         settings.mcp.app_root_url = None

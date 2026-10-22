@@ -18,7 +18,7 @@ from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_account, make_tenant, make_tenant_config
-from daimon.testing.turn_fakes import deps_for
+from daimon.testing.turn_fakes import deps_for_pinned_mux
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.profiles.selfhosted import LOOP
 
@@ -72,7 +72,7 @@ async def test_admits_without_anthropic_key_or_calls(
 
     monkeypatch.setenv("DAIMON_SELFHOSTED__ADMISSION_ENABLED", "true")
     deps = replace(
-        deps_for(ForbiddenAnthropic(), db_session_factory),
+        deps_for_pinned_mux(ForbiddenAnthropic(), db_session_factory),
         channel_backends=True,
         agent_backends=agent_backends,
     )
@@ -220,7 +220,7 @@ async def test_agent_selected_selfhosted_is_refused_before_anthropic(
     )
     await db_session.commit()
     deps = replace(
-        deps_for(ForbiddenAnthropic(), db_session_factory),
+        deps_for_pinned_mux(ForbiddenAnthropic(), db_session_factory),
         channel_backends=True,
         agent_backends=agent_backends,
     )

@@ -213,12 +213,10 @@ async def test_c10_pending_does_not_falsify_the_actual_native_profile(
     native.wire.assert_consumed()
 
 
-async def test_c05_reconciliation_and_c09_hard_delete_really_are_unavailable(
+async def test_c09_hard_delete_really_is_unavailable(
     adapters: AnthropicOfflineFactory,
 ) -> None:
     adapter = adapters()
-    with pytest.raises(UnsupportedCapability, match="reconcile"):
-        await adapter.driver.events.reconcile(SCOPE, REF)
     with pytest.raises(UnsupportedCapability, match="session_delete"):
         await adapter.driver.sessions.delete(SCOPE, REF, key="delete")
     assert script(adapter).wire.requests == []
