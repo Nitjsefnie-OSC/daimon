@@ -41,6 +41,7 @@ from daimon.core.stores.direct_messages import dm_enabled, get_conversation, set
 from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn_hold import RequesterOrg
 from slack_sdk.errors import SlackApiError
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.exc import SQLAlchemyError
@@ -183,6 +184,7 @@ async def handle_dm_command(runtime: SlackRuntime, payload: dict[str, Any]) -> N
             admission = await admit(
                 runtime.turn_deps,
                 tenant_id=tenant_id,
+                requester_org=RequesterOrg.HOST,
                 platform="slack",
                 external_user_id=user_id,
                 channel_id=channel_id,

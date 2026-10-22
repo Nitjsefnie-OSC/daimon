@@ -201,7 +201,7 @@ def steps(authored: DefaultManifest, outputs: dict[str, str], *, failed: bool) -
                     "type": "mcp_server_tool_call",
                     "id": name,
                     "name": name,
-                    "server_name": "daimon-mcp",
+                    "server_name": "daimon_mcp",
                     "arguments": {},
                 },
                 {
@@ -321,7 +321,7 @@ async def test_f2_gemini_default_capabilities_through_real_loopback(
                     for t in tools
                     if isinstance(t, dict) and t.get("type") == "mcp_server"
                 ]
-                assert server["name"] == "daimon-mcp" and server["url"] == MCP_URL
+                assert server["name"] == "daimon_mcp" and server["url"] == MCP_URL
                 assert server["allowed_tools"] == [{"mode": "auto", "tools": sorted(MCP_TOOLS)}]
                 authorization = object_value(server["headers"])["Authorization"]
                 assert isinstance(authorization, str)

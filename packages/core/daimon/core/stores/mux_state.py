@@ -678,11 +678,12 @@ async def update_fleet_root_finance(
 
 
 async def list_fleet_root_finances(
-    session: AsyncSession, *, tenant_id: uuid.UUID
+    session: AsyncSession, *, tenant_id: uuid.UUID, locking: bool = True
 ) -> tuple[OperationRecord, ...]:
     """Retained financial roots, including unknown pre-allocation holds across actors.
 
     Caller takes the tenant financial fence first. Column reads avoid stale ORM JSON.
+    Without `locking` this reads the caller's read-only snapshot and locks nothing.
     """
     statement = (
         select(MuxOperation.record)
@@ -692,8 +693,9 @@ async def list_fleet_root_finances(
             MuxOperation.record["result"]["root_finance"].is_not(None),
         )
         .order_by(MuxOperation.key)
-        .with_for_update()
     )
+    if locking:
+        statement = statement.with_for_update()
     bodies = await read_persisted_columns(session, statement, reject_new=True)
     records = tuple(OperationRecord.model_validate(row.record) for row in bodies)
     if any(record.tenant_id != str(tenant_id) for record in records):

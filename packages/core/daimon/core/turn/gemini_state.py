@@ -31,7 +31,7 @@ from daimon.core.stores.gemini_runtime_state import (
 )
 from daimon.core.turn.errors import AdmissionDenied
 from mux.contracts.ids import ModelRef, Scope
-from mux.drivers.gemini.flash import FLASH_MODELS, FlashAttempt
+from mux.drivers.gemini.flash import ATTEMPT_MODELS, FlashAttempt
 from mux.drivers.gemini.storage import Records
 from pydantic import BaseModel, JsonValue, TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -193,7 +193,7 @@ class _FlashAccounting:
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None:
         if (
             model.provider != "gemini"
-            or model.id not in FLASH_MODELS
+            or model.id not in ATTEMPT_MODELS
             or attempt < 1
             or self._pending.get() is not None
         ):
@@ -237,6 +237,11 @@ class _FlashAccounting:
                 http_status=receipt.http_status,
                 interaction_id=receipt.interaction_id,
             )
+            status = receipt.http_status
+            if receipt.outcome == "refused" and status is not None and 400 <= status < 500:
+                # Google rejected the request itself: no interaction, nothing
+                # to bill. Release the hold instead of stranding it as unknown.
+                row.update(held_usd="0", actual_usd="0", released_usd=row.get("held_usd"))
 
         await self._update(publish)
         self._pending.set(None)

@@ -47,6 +47,7 @@ from daimon.core.routine_delivery import (
     render_fallback_dm,
     render_fallback_post,
 )
+from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.tenants import get_tenant
@@ -196,10 +197,12 @@ def make_discord_routine_poster(
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
         policy = cleared
-        keep_inside = keeps_routine_inside(policy, row)
+        # An isolated or shared channel's result never leaves it, not even by DM.
+        held = await result_is_held(sessionmaker, row, platform="discord")
+        keep_inside = keeps_routine_inside(policy, row) or held
 
         async def fallback(reason: str) -> DeliveryOutcome:
-            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+            if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
             return await _dm_fallback(row, reason, tenant.external_id)
 
@@ -217,7 +220,10 @@ def make_discord_routine_poster(
             return await fallback("destination_unavailable")
         parent_channel_id, category_id, _guild_id, permission_source = placement
         # The parent is known now, also for a thread saved without it.
-        keep_inside = keeps_routine_inside(policy, row, parent_channel_id=parent_channel_id)
+        held = held or await result_is_held(
+            sessionmaker, row, platform="discord", parent_channel_id=parent_channel_id
+        )
+        keep_inside = keeps_routine_inside(policy, row, parent_channel_id=parent_channel_id) or held
         creator = row.created_by_user_id
         if (
             creator is None

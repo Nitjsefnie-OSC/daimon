@@ -83,6 +83,7 @@ class Preview(BaseModel):
     cost_line: str = "List price: unknown. Worst case per reply: unknown."
     allowed: bool = True
     digest: str = "d" * 64
+    target_model: str | None = None
     # Mirrors `_BackendConsentFacts` on the real `CompatibilityPreview`: no
     # drops are declared in these stubs, so the CLI's drop-consent gate reads
     # the same "nothing to accept" shape it reads from the real preview.
@@ -141,7 +142,9 @@ def seam(monkeypatch):
     )
     service = SimpleNamespace(enabled=True, _sessions=factory)
     service.preview = AsyncMock(
-        side_effect=lambda actual, target: Preview(target_backend=target or DEFAULT_BACKEND)
+        side_effect=lambda actual, target, model=None: Preview(
+            target_backend=target or DEFAULT_BACKEND
+        )
     )
     service.current = AsyncMock(return_value=None)
     service.tenant_policy = AsyncMock(
@@ -150,11 +153,11 @@ def seam(monkeypatch):
     service.read_selection = cb.AgentBackendService.read_selection.__get__(service)
     service.refused = None
 
-    async def change(actual, target, local, actor, *, expected_preview_digest):
+    async def change(actual, target, local, actor, *, expected_preview_digest, model=None):
         calls.append((actual, target, local, actor, expected_preview_digest))
         if service.refused:
             raise Refused(service.refused)
-        return SimpleNamespace(backend=target, local=local + 1)
+        return SimpleNamespace(backend=target, local=local + 1, model=model)
 
     async def clear(actual, local, actor, *, expected_preview_digest):
         return await change(

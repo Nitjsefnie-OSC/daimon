@@ -198,6 +198,9 @@ class PlatformPrincipal(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     active_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Home organisation id of a person verified to belong to another organisation.
+    # Sticky: written once by admission, never cleared by code.
+    foreign_home_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PrincipalLink(Base):
@@ -1408,6 +1411,35 @@ class AgentMemoryStore(Base):
     )
 
 
+class AgentChannelMemoryStore(Base):
+    """Per-(tenant, agent, platform, channel) MA memory store binding: a held channel's memory.
+
+    A held turn (another organisation's requester, or a shared channel) mounts
+    this store instead of the agent-wide one and no personal store. `channel_id`
+    is the parent channel; threads under it share the row.
+    """
+
+    __tablename__ = "agent_channel_memory_store"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "agent_id", "platform", "channel_id", name="pk_agent_channel_memory_store"
+        ),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    memory_store_id: Mapped[str] = mapped_column(Text, nullable=False)
+    created_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class AgentPersonalMemoryStore(Base):
     """Per-(tenant, agent, account) MA memory store binding: one person's own memory.
 
@@ -2342,6 +2374,38 @@ class ThreadParticipationScope(Base):
     )
 
 
+class ProgressPlanScope(Base):
+    """An explicit progress-plans setting at one scope.
+
+    Same shape and meaning as `ThreadParticipationScope`: one row per (tenant,
+    platform, scope, scope_id), an empty scope_id for the workspace row, and no
+    row means "inherit". `daimon.core.scope_cascade.resolve_cascade` turns the
+    rows into an effective mode.
+    """
+
+    __tablename__ = "progress_plan_scopes"
+    __table_args__ = (
+        PrimaryKeyConstraint(
+            "tenant_id", "platform", "scope", "scope_id", name="pk_progress_plan_scopes"
+        ),
+        CheckConstraint(
+            "scope IN ('workspace', 'channel', 'thread')", name="ck_progress_plan_scopes_scope"
+        ),
+        CheckConstraint("mode IN ('on', 'off', 'disabled')", name="ck_progress_plan_scopes_mode"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE")
+    )
+    platform: Mapped[str] = mapped_column(Text)
+    scope: Mapped[str] = mapped_column(Text)
+    scope_id: Mapped[str] = mapped_column(Text)
+    mode: Mapped[str] = mapped_column(Text, nullable=False)
+    updated_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+
+
 class ThreadAutoResponse(Base):
     """One row per reply the agent posted in a thread unprompted.
 
@@ -2453,6 +2517,35 @@ class TurnOrigin(Base):
     # Set by `archive_thread` on this turn's own thread; the adapter archives
     # the thread after the turn's last post.
     archive_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The origin channel is shared with another organisation.
+    shared_channel: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+
+class SharedChannel(Base):
+    """A channel known to be shared with another organisation, recorded once and kept.
+
+    `source` is who revealed it: the platform's own signal, or a verified client
+    requester seen there. Every turn in it is held to it (`daimon.core.turn_hold`).
+    """
+
+    __tablename__ = "shared_channels"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "platform", "channel_id", name="pk_shared_channels"),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_shared_channels_tenants"
+        ),
+        CheckConstraint("source IN ('platform', 'client')", name="ck_shared_channels_source"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class PendingSkillAdd(Base):
@@ -3750,6 +3843,8 @@ class AgentBackendRevisionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # The admin-picked model; null is the provider's default (0118, so last).
+    model: Mapped[str | None] = mapped_column(Text)
 
 
 class FleetRun(Base):
