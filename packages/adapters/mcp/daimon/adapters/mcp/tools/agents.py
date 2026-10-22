@@ -33,6 +33,7 @@ from daimon.adapters.mcp.tools._ctx import (
     _auth,  # pyright: ignore[reportPrivateUsage]
     _require_admin,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools._owner import caller_owns_agent, may_own
 from daimon.adapters.mcp.tools._pin_guard import require_pin_write_access
 from daimon.adapters.mcp.tools._rule_view import (
     load_caller_view,
@@ -52,6 +53,7 @@ from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
+from daimon.core.agent_ownership import record_agent_creator
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -520,6 +522,14 @@ async def _create_agent_impl(
     )
     if outcome.anthropic_id is None:
         raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
+    if may_own(auth):
+        # The person who created it owns it: they may edit it without an admin.
+        await record_agent_creator(
+            runtime.session_factory,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=outcome.anthropic_id),
+            account_id=auth.account_id,
+        )
     queue_agent_face(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -816,11 +826,13 @@ async def _require_mcp_replace_allowed(
         agent=agent,
         caller=reachability.admin_caller(auth),
         default=runtime.deployment_default,
+        owned=await caller_owns_agent(runtime, auth, agent.id),
     )
     if outcome != "allow":
         raise ToolError(
             f"'{agent.name}' already has {', '.join(repr(n) for n in replaced)} at another URL "
-            f"and is shared, so repointing it needs {admin_noun(auth.platform)}, and the caller "
+            f"and is shared, so repointing it needs its owner or {admin_noun(auth.platform)}, "
+            "and the caller "
             "is not one. Nothing was changed. Do not retry under another name."
         )
     return True
@@ -1038,6 +1050,20 @@ def _require_selectable_model(backend: Provider | None, model: str | None) -> No
         raise ToolError(f"{model} isn't available on {backend or 'the default'} here.{offer}")
 
 
+async def _require_agent_editor(
+    service: channel_backend.AgentBackendService,
+    agent: BackendAgent,
+    actor: channel_backend.BackendActor,
+    auth: AuthIdentity,
+) -> None:
+    """The agent's owner or a current admin; the service checks again when it writes."""
+    if not await service.may_edit(agent, actor):
+        raise ToolError(
+            f"Changing '{agent.name}' needs its owner or {admin_noun(auth.platform)}. "
+            "Nothing changed. Do not retry."
+        )
+
+
 async def _set_agent_backend_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -1048,7 +1074,6 @@ async def _set_agent_backend_impl(
     preview_only: bool = False,
     model: str | None = None,
 ) -> dict[str, JsonValue]:
-    _require_admin(auth)
     _require_selectable_model(backend, model)
     if auth.agent_id is not None:
         raise ToolError("An agent key cannot change the model provider.")
@@ -1077,6 +1102,7 @@ async def _set_agent_backend_impl(
             tenant_id=auth.tenant_id,
             agent_name=name,
         )
+        await _require_agent_editor(service, agent, actor, auth)
         preview = await service.preview(agent, backend, model)
         if preview_only:
             return {
@@ -1147,13 +1173,12 @@ async def _request_agent_backend_switch_impl(
     accepted_drops: tuple[str, ...] | None = None,
     model: str | None = None,
 ) -> AgentBackendSwitchInfo:
-    _require_admin(auth)
     _require_selectable_model(target_backend, model)
     if auth.agent_id is not None or auth.platform_user_id is None:
-        raise ToolError("Request this change from an admin's active chat conversation.")
+        raise ToolError("Request this change from your active chat conversation.")
     origin = await get_chat_origin(runtime, auth, origin_context_id)
     if origin is None:
-        raise ToolError("Request this change from an admin's active chat conversation.")
+        raise ToolError("Request this change from your active chat conversation.")
 
     from daimon.adapters.mcp.tools._session_gate import session_card_gap
     from daimon.core.channel_backend import (
@@ -1185,6 +1210,16 @@ async def _request_agent_backend_switch_impl(
             tenant_id=auth.tenant_id,
             agent_name=agent_name,
         )
+        await _require_agent_editor(
+            service,
+            agent,
+            BackendActor(
+                tenant_id=auth.tenant_id,
+                account_id=auth.account_id,
+                subject=mcp_subject(auth, is_admin=auth.is_admin),
+            ),
+            auth,
+        )
         preview = await service.preview(agent, target_backend, model)
         if not preview.allowed:
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
@@ -1192,7 +1227,7 @@ async def _request_agent_backend_switch_impl(
         summary = (
             "Show this compatibility and cost preview. If they want to proceed, call "
             "request_agent_backend_switch again with its expected_revision and preview_digest; "
-            "the requesting admin must Confirm on the card. Nothing has changed yet."
+            "the requester must Confirm on the card. Nothing has changed yet."
         )
         if preview_digest is not None:
             reference = BackendSwitchReference.model_validate(
@@ -1260,7 +1295,7 @@ async def _request_agent_backend_switch_impl(
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     if channel_backend.backend_selection_enabled(runtime.settings.turn):
 
-        @mcp.tool(tags={"admin"})
+        @mcp.tool
         async def set_agent_backend(  # pyright: ignore[reportUnusedFunction]
             ctx: Context,
             name: str,
@@ -1271,8 +1306,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ) -> dict[str, JsonValue]:
             """Set an enabled model provider, or clear the agent setting with backend=null.
 
-            Admin only, for direct coding-tool or API requests. Chat turns use
-            request_agent_backend_switch so the admin confirms the preview.
+            The agent's owner or an admin, for direct coding-tool or API requests. Chat
+            turns use request_agent_backend_switch so the requester confirms the preview.
             The returned preview names compatibility limits and list prices.
             Existing threads keep their provider; channel settings still apply.
             expected_revision refuses a setting changed since it was read.
@@ -1394,7 +1429,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         for Opus unless an older version is explicitly requested. List fields
         (``tools``, ``mcp_servers``, ``skills``) are added to, never replaced; shorter
         lists remove nothing. Use ``remove_skill`` or ``detach_mcp_server`` to remove.
-        Daimon requires ``fork_agent`` first; channel/workspace defaults require admin.
+        Daimon requires ``fork_agent`` first. Needs the agent's owner (whoever created it
+        in chat, or whom an admin named) or an admin.
 
         Prompt, model and skill changes reach a conversation on its next message, not the
         one running now. ``skills`` accepts names such as
@@ -1430,7 +1466,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         For Linear or other bearer-authenticated endpoints, use
         ``request_mcp_token`` instead;
         ``detach_mcp_server`` disconnects it. Fork Daimon with ``fork_agent`` before
-        directly changing its setup. Channel or workspace defaults need admin.
+        directly changing its setup. Needs the agent's owner or an admin.
 
         Connects the server; its tools are available from the agent's next message,
         not the one running now. Reusing a server name replaces the URL; the same
@@ -1490,7 +1526,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
     if backend_selection_enabled(runtime.settings.turn):
 
-        @mcp.tool(tags={"admin"})
+        @mcp.tool
         async def request_agent_backend_switch(  # pyright: ignore[reportUnusedFunction]
             ctx: Context,
             agent_name: str,
@@ -1503,7 +1539,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
-            Use when an admin asks to switch an agent to Anthropic, OpenAI or Gemini,
+            Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
+            or Gemini,
             optionally naming a model: "switch agent to gemini-4-argon". ``model`` is one
             of the returned ``models`` (Gemini: gemini-3.8-flash or gemini-4-argon); omit
             it for the provider's default. The switch applies to
@@ -1515,7 +1552,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             First call without preview_digest and show the returned compatibility,
             shared-thread limits, what won't be available, and the cost line. Call again
             with the same model and that preview's expected_revision, preview_digest and
-            exact declared_drops as accepted_drops: the requesting admin must Confirm
+            exact declared_drops as accepted_drops: the requester must Confirm
             on the card before anything is changed. A stale preview or expired card
             changes nothing; preview again. Pass this active turn's origin_context_id.
             """

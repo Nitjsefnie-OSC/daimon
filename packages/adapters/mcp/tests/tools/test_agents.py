@@ -4755,7 +4755,7 @@ async def test_update_agent_impl_rejects_non_admin_system_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4804,7 +4804,7 @@ async def test_update_agent_impl_rejects_non_admin_skills_patch_when_agent_reach
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4828,7 +4828,7 @@ async def test_update_agent_impl_rejects_non_admin_mcp_servers_patch_when_agent_
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4852,7 +4852,7 @@ async def test_update_agent_impl_rejects_non_admin_tools_patch_when_agent_reacha
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _update_agent_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -4930,7 +4930,7 @@ async def test_attach_mcp_server_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs an admin"):
+    with pytest.raises(ToolError, match="Changing 'scoped-agent' needs its owner or an admin"):
         await _attach_mcp_server_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
@@ -5667,3 +5667,142 @@ async def test_create_agent_impl_renders_no_face_for_the_deployment_default(
 
     assert (tenant_id, "daimon") not in agent_identity._face_tasks  # pyright: ignore[reportPrivateUsage]
     assert rendered == []
+
+
+async def _owned_scoped_agent(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> tuple[uuid.UUID, uuid.UUID, uuid.UUID]:
+    """A tenant whose default is 'scoped-agent', owned by one account; and a second member."""
+    from daimon.core.stores import agent_owners
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord")
+        await set_fields(
+            session,
+            scope=TenantScopeRef(tenant_id=tenant.id),
+            tenant_id=tenant.id,
+            agent_name="scoped-agent",
+            mode="agent",
+        )
+        owner = await make_account(session, tenant=tenant)
+        member = await make_account(session, tenant=tenant)
+        await agent_owners.set_owner(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_scoped"),
+            owner_account_id=owner.id,
+            source="admin_assigned",
+        )
+    return tenant.id, owner.id, member.id
+
+
+async def test_the_agents_owner_may_change_its_prompt_and_connections(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant_id, owner_id, _ = await _owned_scoped_agent(db_session_factory)
+    captured, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    auth = AuthIdentity(
+        account_id=owner_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="owner-user",
+    )
+    await _update_agent_impl(
+        _runtime(client, session_factory=db_session_factory),
+        auth,
+        name="scoped-agent",
+        model=None,
+        description=None,
+        system="the owner's prompt",
+        tools=None,
+        mcp_servers=None,
+        skills=None,
+        expected_ma_agent_id="ag_scoped",
+    )
+    assert captured["system"].endswith("the owner's prompt")
+
+
+@pytest.mark.parametrize("who", ["member", "agent_key", "client"])
+async def test_only_the_owner_person_passes_the_owner_gate(
+    db_session_factory: async_sessionmaker[AsyncSession], who: str
+) -> None:
+    tenant_id, owner_id, member_id = await _owned_scoped_agent(db_session_factory)
+    captured, client = _scoped_agent_router(
+        tenant_id=tenant_id, account_id=owner_id, agent_name="scoped-agent"
+    )
+    auth = AuthIdentity(
+        account_id=member_id if who == "member" else owner_id,
+        tenant_id=tenant_id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="someone",
+        agent_id=uuid.uuid4() if who == "agent_key" else None,
+        foreign_home_id="other-org" if who == "client" else None,
+    )
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
+        await _update_agent_impl(
+            _runtime(client, session_factory=db_session_factory),
+            auth,
+            name="scoped-agent",
+            model=None,
+            description=None,
+            system="not theirs",
+            tools=None,
+            mcp_servers=None,
+            skills=None,
+            expected_ma_agent_id="ag_scoped",
+        )
+    assert "system" not in captured
+
+
+async def test_create_agent_records_the_person_who_created_it_as_owner(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.agent_ownership import agent_owner
+    from daimon.core.stores import security_audit
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord")
+        creator = await make_account(session, tenant=tenant)
+    created = ma_agent(name="demo")
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response([]))
+    router.add(
+        "POST",
+        r"/v1/agents",
+        lambda _req, _m: httpx.Response(200, json=created.model_dump(mode="json")),
+    )
+    router.add(
+        "GET",
+        r"/v1/agents/([^/]+)",
+        lambda _req, _m: httpx.Response(200, json=created.model_dump(mode="json")),
+    )
+    auth = AuthIdentity(
+        account_id=creator.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="creator-user",
+    )
+    await _create_agent_impl(
+        _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory),
+        auth,
+        AgentSpec(name="demo", model="claude-opus-4-5"),
+    )
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=created.id)
+    assert (
+        await agent_owner(db_session_factory, tenant_id=tenant.id, agent_id=agent_id) == creator.id
+    )
+    async with db_session_factory() as session:
+        rows = await security_audit.list_events(
+            session, tenant_id=tenant.id, agent_id=agent_id, tool_name="agent_owner"
+        )
+    assert [(row.operation, row.account_id) for row in rows] == [("create", creator.id)]

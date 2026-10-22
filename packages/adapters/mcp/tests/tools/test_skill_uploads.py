@@ -471,7 +471,7 @@ async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
 ) -> None:
     world = await _world(db_session_factory)
     member = world.auth(admin=False)
-    with pytest.raises(ToolError, match="needs an admin"):
+    with pytest.raises(ToolError, match="needs its owner or an admin"):
         await _add_skill_impl(
             world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
         )
@@ -484,7 +484,7 @@ async def test_a_member_cannot_change_an_unbound_agent_or_a_default(
             agent_name="helper",
             mode="agent",
         )
-    with pytest.raises(ToolError, match="needs an admin"):
+    with pytest.raises(ToolError, match="needs its owner or an admin"):
         await _add_skill_impl(
             world.runtime, member, agent_name="helper", expected_ma_agent_id=None, skill_md=_MD
         )
@@ -762,7 +762,7 @@ async def test_a_member_cannot_change_an_agent_only_a_thread_uses(
             responder_name="helper",
             kind="handoff",
         )
-    with pytest.raises(ToolError, match="needs a server admin"):
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
         await _add_skill_impl(
             world.runtime,
             world.auth(admin=False, platform="discord"),
@@ -1108,7 +1108,7 @@ async def test_a_member_cannot_version_a_skill_a_default_fork_shares(
             mode="agent",
         )
 
-    with pytest.raises(ToolError, match="needs a server admin"):
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
         await _preview_then_confirm(world, admin=False, skill_md=_MD + "More.\n")
     assert len(world.created) == 1, "nothing new was uploaded"
 
@@ -1312,7 +1312,7 @@ async def test_with_cards_off_a_member_still_cannot_add_to_a_shared_agent(
         )
     auth, origin = await _cards_off_turn(world, owned=False)
 
-    with pytest.raises(ToolError, match="needs a server admin"):
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
         await _add_from(world, auth, origin)
     assert world.created == []
 

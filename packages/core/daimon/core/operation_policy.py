@@ -1,8 +1,10 @@
 """Pure operation policy for shared-agent changes.
 
 Spec edits (including skill add/remove) refuse defaults-managed targets even
-for admins, then allow admins. Attachment writes allow admins first, then
-refuse managed targets. Other callers cannot make these shared-agent changes.
+for admins, then allow admins and the agent's owner. Attachment writes allow
+admins first, then refuse managed targets, then allow the owner, except repo
+and skill-repo binds, which spend the workspace's GitHub installation. Other
+callers cannot make these shared-agent changes.
 
 New MCP connections are attachment writes: a private token or OAuth grant
 still adds servers and tools to the shared agent spec. Only key_add and
@@ -60,6 +62,12 @@ _ATTACHMENT_OPERATIONS: frozenset[OperationKind] = frozenset(
 
 _POSTED_TOKEN_OPERATIONS: frozenset[OperationKind] = frozenset({"key_add", "keys_import"})
 
+#: Operations that bind the workspace's GitHub installation, not the owner's own
+#: credential: an agent's owner may not make them, only an admin.
+_OWNER_INELIGIBLE: frozenset[OperationKind] = frozenset(
+    {"repo_bind", "skill_repo_connect", "github_connect", "github_grant"}
+)
+
 
 class TargetFacts(BaseModel):
     """The facts about a target agent that the policy table reads.
@@ -73,6 +81,9 @@ class TargetFacts(BaseModel):
 
     is_daimon_managed: bool
     is_reachable_in_tenant: bool
+    # The caller is the agent's recorded owner. Never counts for an operation
+    # that spends someone else's credential (`_OWNER_INELIGIBLE`).
+    owned_by_caller: bool = False
 
 
 def _family(operation: OperationKind) -> OperationFamily:
@@ -109,6 +120,7 @@ def _decide_operation(
         reach=AgentReach(
             managed=target.is_daimon_managed,
             reachable=target.is_reachable_in_tenant,
+            owned=target.owned_by_caller and operation not in _OWNER_INELIGIBLE,
         ),
     )
     if decision:

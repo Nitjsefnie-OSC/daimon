@@ -566,3 +566,39 @@ async def test_an_unknown_model_names_the_choices_before_any_lookup(backend, mod
     assert "Pick one of:" in str(refused.value)
     _require_selectable_model("gemini", None)
     _require_selectable_model("gemini", "gemini-4-argon")
+
+
+async def test_the_agents_owner_may_request_a_switch_and_a_member_may_not(active_chat):
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_owners
+
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    member = replace(auth, role=Role.USER, is_admin=False)
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="needs its owner or a server admin"):
+        await _request_agent_backend_switch_impl(
+            runtime,
+            member,
+            agent_name="Researcher",
+            target_backend="openai",
+            origin_context_id=str(origin.id),
+        )
+    async with runtime.session_factory.begin() as session:
+        await agent_owners.set_owner(
+            session,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id="agent_owned"),
+            owner_account_id=auth.account_id,
+            source="admin_assigned",
+        )
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        member,
+        agent_name="Researcher",
+        target_backend="openai",
+        origin_context_id=str(origin.id),
+    )
+    assert preview.status == "preview" and preview.expected_revision == 0

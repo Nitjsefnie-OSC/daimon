@@ -88,6 +88,7 @@ async def decide_mcp_replacement(
     agent: BetaManagedAgentsAgent,
     caller: AdminCaller,
     default: DeploymentDefault,
+    owned: bool = False,
 ) -> PolicyOutcome:
     """Attachment-family decision for replacing one of ``agent``'s MCP servers.
 
@@ -98,7 +99,9 @@ async def decide_mcp_replacement(
     answer depends on them.
     """
     is_daimon_managed = agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true"
-    facts = TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
+    facts = TargetFacts(
+        is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False, owned_by_caller=owned
+    )
     if needs_reachability_read(
         "mcp_replace", is_admin=caller.is_server_admin, is_daimon_managed=is_daimon_managed
     ):
@@ -114,6 +117,7 @@ async def decide_mcp_replacement(
                 caller=caller,
                 is_daimon_managed=is_daimon_managed,
             )
+            facts = facts.model_copy(update={"owned_by_caller": owned})
     return decide_operation("mcp_replace", is_admin=caller.is_server_admin, target=facts)
 
 

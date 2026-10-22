@@ -270,6 +270,8 @@ class AgentReach:
 
     managed: bool = False
     reachable: bool = False
+    # The caller is the agent's recorded owner (`daimon.core.stores.agent_owners`).
+    owned: bool = False
 
 
 DenyReason = Literal[
@@ -507,22 +509,26 @@ def _decide_shared_agent_change(req: Request) -> Decision:
     """The shared-agent mutation table (`daimon.core.operation_policy`).
 
     A posted-token write always passes. A spec edit refuses a managed agent even
-    for an admin, then passes an admin; an attachment write passes an admin
-    before the managed check. Every other target needs an admin.
+    for an admin, then passes an admin or the agent's owner; an attachment write
+    passes an admin before the managed check, then the owner. Every other target
+    needs an admin.
     """
     reach = req.reach or AgentReach()
+    owner = reach.owned and not req.subject.via_agent_key and not req.subject.client
     if req.operation_family == "posted_token":
         return ALLOW
     if req.operation_family == "spec":
         if reach.managed:
             return _deny("managed_agent")
-        if req.subject.is_admin:
+        if req.subject.is_admin or owner:
             return ALLOW
     else:
         if req.subject.is_admin:
             return ALLOW
         if reach.managed:
             return _deny("managed_agent")
+        if owner:
+            return ALLOW
     return _deny("admin_required")
 
 

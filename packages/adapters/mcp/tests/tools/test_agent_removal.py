@@ -608,7 +608,7 @@ async def test_remove_skill_impl_rejects_non_admin_when_agent_reachable(
     )
 
     auth = AuthIdentity(account_id=account_id, tenant_id=tenant_id, role=Role.USER, is_admin=False)
-    with pytest.raises(ToolError, match="needs an admin"):
+    with pytest.raises(ToolError, match="needs its owner or an admin"):
         await _remove_skill_impl(
             _runtime(client, session_factory=db_session_factory),
             auth,
