@@ -933,12 +933,53 @@ async def _reserve_fleet_worker(
 
 #: Consecutive slow budget reads tolerated before a run's workers are cancelled.
 BUDGET_READ_TIMEOUT_LIMIT = 3
-#: Seconds the tenant fleet lock may stay held by admissions before the watch fails closed.
+#: Seconds one transaction may hold the tenant fleet lock against the watch before it
+#: fails closed. A holder this long is stuck (or holding over slow work), not admitting.
 BUDGET_LOCK_BUSY_LIMIT_S = 10.0
+#: Seconds the lock may stay busy while its holders keep changing (admissions making
+#: progress) before the watch fails closed anyway: the longest the run's usage goes unread.
+BUDGET_LOCK_CONTENDED_LIMIT_S = 60.0
+
+# The granted holder of one advisory key, from the same transaction the watch opened.
+_LOCK_HOLDER = text(
+    """
+    SELECT a.pid, a.xact_start, a.state, a.wait_event_type, a.wait_event,
+           extract(epoch FROM clock_timestamp() - a.xact_start) AS xact_s,
+           left(a.query, 120) AS query
+    FROM pg_locks AS l JOIN pg_stat_activity AS a ON a.pid = l.pid
+    WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+      AND l.classid = ((hashtextextended(:key, 0) >> 32) & 4294967295)::oid
+      AND l.objid = (hashtextextended(:key, 0) & 4294967295)::oid
+    LIMIT 1
+    """
+)
 
 
 class _BudgetLockBusy(Exception):
     """The tenant fleet lock is held by a writer; this poll is skipped, not failed."""
+
+    def __init__(self, holder: dict[str, object] | None) -> None:
+        self.holder = holder
+        super().__init__("tenant fleet lock busy")
+
+
+async def _lock_holder(session: AsyncSession, key: str) -> dict[str, object] | None:
+    """Who holds the key now, for the log and the stuck check; None if not visible."""
+    try:
+        async with session.begin_nested():
+            row = (await session.execute(_LOCK_HOLDER, {"key": key})).mappings().first()
+    except DBAPIError:
+        return None
+    if row is None:
+        return None
+    return {
+        "pid": row["pid"],
+        "xact_start": row["xact_start"].isoformat() if row["xact_start"] else None,
+        "state": row["state"],
+        "wait": f"{row['wait_event_type']}:{row['wait_event']}",
+        "xact_s": round(float(row["xact_s"]), 3) if row["xact_s"] is not None else None,
+        "query": row["query"],
+    }
 
 
 async def watch_fleet_budget(
@@ -960,7 +1001,9 @@ async def watch_fleet_budget(
     Caller registers each worker's cancellation event in the same mapping only
     after its admission commits, and sets finished when the run ends. A cancelled or
     completed cohort never ends the active run watch; unavailable usage still
-    fails closed and requests cancellation of all registered workers.
+    fails closed and requests cancellation of all registered workers. A busy tenant
+    lock is logged with its holder and fails closed only when one transaction holds
+    it past BUDGET_LOCK_BUSY_LIMIT_S or it stays busy past BUDGET_LOCK_CONTENDED_LIMIT_S.
     """
     if parent.fleet.enabled is not True or parent.fleet.depth != 0:
         raise FleetConflict("fleet watch requires explicit root opt-in")
@@ -969,6 +1012,9 @@ async def watch_fleet_budget(
         raise ValueError("budget poll and read timeout must be positive finite durations")
     timeouts = 0
     busy_since: float | None = None
+    holder_key: tuple[object, object] | None = None
+    holder_since: float | None = None
+    lock_key = f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"
     # Wait in line for the tenant lock, but leave room inside the read timeout.
     lock_wait_ms = max(1, int(min(1.5, timeout * 0.75) * 1000))
     try:
@@ -976,7 +1022,9 @@ async def watch_fleet_budget(
             started = asyncio.get_running_loop().time()
             watched = tuple(cancelled.items())
             try:
-                async with asyncio.timeout(timeout):
+                # The read gets its whole timeout after the lock wait, so a lock granted
+                # late in the wait is not then counted as a slow read.
+                async with asyncio.timeout(timeout + lock_wait_ms / 1000):
                     async with sessionmaker.begin() as session:
                         # Admissions take the tenant fleet lock repeatedly during dispatch; a held
                         # lock past the short wait below is busy, not unavailable usage.
@@ -984,17 +1032,19 @@ async def watch_fleet_budget(
                         # admissions' repeated short holds), but only briefly.
                         await session.execute(text(f"SET LOCAL lock_timeout = '{lock_wait_ms}ms'"))
                         try:
-                            await session.execute(
-                                text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-                                {"key": f"fleet:{uuid.UUID(parent.fleet.scope.tenant_id)}"},
-                            )
+                            # A savepoint keeps the transaction usable to name the holder.
+                            async with session.begin_nested():
+                                await session.execute(
+                                    text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+                                    {"key": lock_key},
+                                )
                         except DBAPIError as error:
                             if (
                                 "lock timeout" not in str(error.orig).lower()
                                 and getattr(error.orig, "sqlstate", None) != "55P03"
                             ):
                                 raise
-                            raise _BudgetLockBusy from None
+                            raise _BudgetLockBusy(await _lock_holder(session, lock_key)) from None
                         await session.execute(text("SET LOCAL lock_timeout = 0"))
                         usages = await produce_fleet_budget(
                             session,
@@ -1004,16 +1054,30 @@ async def watch_fleet_budget(
                         )
                         if any(worker_id not in usages for worker_id, _ in watched):
                             raise FleetConflict("watched worker is unavailable")
-            except _BudgetLockBusy:
+            except _BudgetLockBusy as busy:
                 now = asyncio.get_running_loop().time()
                 busy_since = busy_since if busy_since is not None else now
-                if now - busy_since < BUDGET_LOCK_BUSY_LIMIT_S:
+                holder = busy.holder
+                # One holder transaction is its backend and start; an unseen holder counts
+                # as one that never changes, as before.
+                current = (
+                    (holder["pid"], holder["xact_start"]) if holder is not None else (None, None)
+                )
+                if current != holder_key or holder_since is None:
+                    holder_key, holder_since = current, now
+                    log.info("fleet.budget_lock_busy", holder=holder)
+                stuck = now - holder_since >= BUDGET_LOCK_BUSY_LIMIT_S
+                contended = now - busy_since >= BUDGET_LOCK_CONTENDED_LIMIT_S
+                if not (stuck or contended):
                     await asyncio.sleep(poll_interval)
                     continue
                 log.warning(
                     "fleet.budget_read_unavailable",
                     reason="lock_busy",
                     error_class="BudgetLockBusy",
+                    holder=holder,
+                    busy_s=round(now - busy_since, 3),
+                    holder_s=round(now - holder_since, 3),
                 )
                 for event in cancelled.values():
                     event.set()
@@ -1043,7 +1107,7 @@ async def watch_fleet_budget(
                 for event in cancelled.values():
                     event.set()
                 return "usage_unavailable"
-            timeouts, busy_since = 0, None
+            timeouts, busy_since, holder_key, holder_since = 0, None, None, None
             for worker_id, event in watched:
                 usage = usages.get(worker_id)
                 if event.is_set() or usage is None:
