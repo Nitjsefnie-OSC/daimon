@@ -2883,6 +2883,22 @@ def _assert_usage_belongs_to_the_holder(queued: _QueuedTurn) -> None:
     ], "the holder's own settlement records the call once, under the holder"
 
 
+def _record_native_abandons(monkeypatch: pytest.MonkeyPatch) -> list[str]:
+    """Give every turn I/O the optional `abandon_native` hook a native codec
+    (Gemini) has, recording each call. A queued turn never started the work the
+    lease holder is running, so it must never stop it."""
+    from daimon.core.turn.io import LegacyTurnIO, MuxTurnIO
+
+    calls: list[str] = []
+
+    async def abandon_native(self: object) -> None:
+        calls.append(type(self).__name__)
+
+    for cls in (LegacyTurnIO, MuxTurnIO):
+        monkeypatch.setattr(cls, "abandon_native", abandon_native, raising=False)
+    return calls
+
+
 async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring_the_session(
     db_session: AsyncSession,
     db_schema: str,
@@ -2891,6 +2907,7 @@ async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring
     """On the mux path a turn that finds the thread's lease held waits for it, at
     most until its own ceiling, then ends through the ordinary ceiling outcome. It
     never ran on the mapping, whose holder is using it, so the mapping stays live."""
+    abandons = _record_native_abandons(monkeypatch)
     started = asyncio.get_running_loop().time()
     queued = await _run_turn_behind_a_busy_lease(
         db_session,
@@ -2911,6 +2928,7 @@ async def test_a_turn_queued_behind_a_lease_ends_at_the_ceiling_without_retiring
     assert not [r for r in requests if r == "GET /v1/sessions/sess_live/events"], (
         "a queued turn does not read the session's events to settle them"
     )
+    assert abandons == [], "a queued turn does not stop the holder's native work"
     _assert_usage_belongs_to_the_holder(queued)
 
 
@@ -2919,6 +2937,7 @@ async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
     db_schema: str,
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
+    abandons = _record_native_abandons(monkeypatch)
     queued = await _run_turn_behind_a_busy_lease(
         db_session,
         db_schema,
@@ -2935,6 +2954,7 @@ async def test_a_turn_stopped_while_queued_behind_a_lease_ends_as_an_interrupt(
     assert [(r.ma_session_id, r.status) for r in rows] == [("sess_live", "live")]
     assert not [r for r in requests if r.startswith("POST")]
     assert not [r for r in requests if r == "GET /v1/sessions/sess_live/events"]
+    assert abandons == [], "a queued turn does not stop the holder's native work"
     _assert_usage_belongs_to_the_holder(queued)
 
 
