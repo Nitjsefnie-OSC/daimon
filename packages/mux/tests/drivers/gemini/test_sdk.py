@@ -471,6 +471,7 @@ HIGH_DEMAND = {
     [
         (500, HIGH_DEMAND, "overloaded", "high_demand"),
         (500, {"error": {"code": 500, "message": "internal"}}, "upstream", None),
+        (500, {"error": {"code": "api_error", "message": "internal"}}, "upstream", None),
         (503, HIGH_DEMAND, "overloaded", "503"),
         (400, HIGH_DEMAND, "invalid_request", None),
     ],

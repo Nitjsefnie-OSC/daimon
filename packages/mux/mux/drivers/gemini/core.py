@@ -1,7 +1,8 @@
 """Inline configuration and logical sessions over documented Interactions calls."""
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Sequence
+import random
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
 from uuid import uuid4
@@ -75,10 +76,13 @@ from mux.state.store import StateStore
 
 BASE_AGENT = "antigravity-preview-05-2026"
 INTERACTION_READ_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
-"""Bounded ~15.5s backoff for transient 5xx/network failures on interactions.get.
+"""Bounded (at most ~15.5s, jittered) backoff for transient 5xx/network failures
+on interactions.get.
 
 The interaction was already accepted, so only the read is retried; nothing is
 re-created or resent. Callers bound the whole read with their own deadline.
+The backoff sleeps outside the storage transaction: holding the per-account
+lock for seconds would make sibling sessions on the account fail as busy.
 """
 
 
@@ -89,6 +93,15 @@ def now() -> datetime:
 def transient_read_failure(error: ProviderError) -> bool:
     """Capacity, 5xx and network failures; 4xx and malformed replies stay final."""
     return error.retryable and error.category in ("overloaded", "upstream", "transient_network")
+
+
+class TransientRead(ProviderError):
+    """A transient interactions.get failure, retried by `Base.retrying` after the
+    storage transaction has rolled back and released its lock."""
+
+    def __init__(self, error: ProviderError) -> None:
+        super().__init__(error.category, retryable=error.retryable, native_code=error.native_code)
+        self.error = error
 
 
 def refuse(*features: str) -> NoReturn:
@@ -238,29 +251,31 @@ class Base:
             raise OperationConflict(key)
         return prior[2]
 
-    async def _read(self, interaction: str) -> Object:
+    async def retrying[T](self, attempt: Callable[[], Awaitable[T]]) -> T:
+        """Run `attempt` (which opens its own transaction) again after a transient read."""
         for delay in INTERACTION_READ_RETRY_DELAYS_S:
             try:
-                return await self._transport.get(interaction)
-            except ProviderError as exc:
-                if not transient_read_failure(exc):
-                    raise
-            await asyncio.sleep(delay)
+                return await attempt()
+            except TransientRead:
+                pass
+            await asyncio.sleep(random.uniform(delay / 2, delay))
         try:
-            return await self._transport.get(interaction)
-        except ProviderError as exc:
-            if not transient_read_failure(exc):
-                raise
+            return await attempt()
+        except TransientRead as exc:
+            error = exc.error
             raise ProviderError(
-                exc.category,
-                retryable=exc.retryable,
-                native_code=f"{exc.native_code or exc.category}_read_retries_exhausted",
-            ) from exc
+                error.category,
+                retryable=error.retryable,
+                native_code=f"{error.native_code or error.category}_read_retries_exhausted",
+            ) from error
 
     async def _get(self, record: SessionRecord, interaction: str) -> Object:
+        """Callers run inside `retrying`, so a transient failure leaves the lock first."""
         try:
-            raw = await self._read(interaction)
+            raw = await self._transport.get(interaction)
         except ProviderError as exc:
+            if transient_read_failure(exc):
+                raise TransientRead(exc) from exc
             if exc.category == "not_found":
                 raise ContinuityLost(
                     record.session.binding.id,
@@ -675,6 +690,9 @@ class GeminiSessions(Base):
             return session
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
+        return await self.retrying(lambda: self._retrieve(scope, ref))
+
+    async def _retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         async with self._storage.transaction() as records:
             record = self._record(records, scope, ref)
             if record.current is not None:
@@ -827,6 +845,21 @@ class GeminiEvents(Base):
         *,
         key: str,
         expected_turn: str | None = None,
+    ) -> SendReceipt:
+        # Every history read precedes begin_operation, so a retried attempt
+        # starts from a rolled-back transaction and can never dispatch twice.
+        return await self.retrying(
+            lambda: self._send(scope, session, events, key=key, expected_turn=expected_turn)
+        )
+
+    async def _send(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None,
     ) -> SendReceipt:
         self._check(scope, session, "session")
         if not events:
@@ -1157,6 +1190,9 @@ class GeminiEvents(Base):
             return page_values(tuple(self._record(records, scope, session).events.values()), page)
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
+        return await self.retrying(lambda: self._reconcile(scope, session))
+
+    async def _reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
             for interaction, root in record.interactions.items():
@@ -1229,17 +1265,20 @@ class GeminiEvents(Base):
             return StopObservation(
                 receipt_operation_id=receipt.operation_id, stopped=False, observed_at=now()
             )
+        try:
+            async with asyncio.timeout(max(0, (deadline - now()).total_seconds())):
+                return await self.retrying(lambda: self._observe_stop(scope, receipt))
+        except TimeoutError:
+            return StopObservation(
+                receipt_operation_id=receipt.operation_id, stopped=False, observed_at=now()
+            )
+
+    async def _observe_stop(self, scope: Scope, receipt: CancelReceipt) -> StopObservation:
         async with self._storage.transaction() as records:
             record = self._record(records, scope, receipt.session)
             if record.root != receipt.turn_id or record.current is None:
                 raise ProviderError("conflict", retryable=False)
-            try:
-                async with asyncio.timeout(max(0, (deadline - now()).total_seconds())):
-                    raw = await self._get(record, record.current)
-            except TimeoutError:
-                return StopObservation(
-                    receipt_operation_id=receipt.operation_id, stopped=False, observed_at=now()
-                )
+            raw = await self._get(record, record.current)
             self._observe(record, raw, receipt.turn_id)
             outcome = OUTCOMES.get(string(raw["status"]))
             return StopObservation(

@@ -89,18 +89,19 @@ def checked_storage_response(
 
 
 def high_demand(error: Exception) -> bool:
-    """Gemini reports capacity blips as HTTP 500 api_error ("high demand")."""
-    message: object = getattr(error, "message", None)
-    if isinstance(message, str) and "high demand" in message.lower():
-        return True
+    """Gemini reports capacity blips as HTTP 500 api_error ("high demand").
+
+    Other 5xx bodies, including a plain api_error, stay retryable upstream.
+    """
+    messages: list[object] = [getattr(error, "message", None)]
     # Interactions errors carry `body`; the google-genai APIError carries `details`.
     body: object = getattr(error, "body", None) or getattr(error, "details", None)
     if isinstance(body, dict):
         payload = cast(dict[str, object], body)
         nested = payload.get("error", payload)
         if isinstance(nested, dict):
-            return cast(dict[str, object], nested).get("code") == "api_error"
-    return False
+            messages.append(cast(dict[str, object], nested).get("message"))
+    return any(isinstance(m, str) and "high demand" in m.lower() for m in messages)
 
 
 def normalize_error(error: Exception) -> ProviderError:
