@@ -22,7 +22,7 @@ from dataclasses import dataclass, replace
 from datetime import UTC, datetime
 from decimal import ROUND_CEILING, Decimal, InvalidOperation, localcontext
 from functools import partial
-from typing import get_args
+from typing import Literal, get_args
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
@@ -1027,6 +1027,43 @@ async def _lock_holder(session: AsyncSession, key: str) -> dict[str, object] | N
     }
 
 
+type WorkerCancelReason = Literal[
+    "terminal",
+    "budget",
+    "usage_unavailable",
+    "watch_cancelled",
+    "watch_ended",
+    "run_deadline",
+    "shutdown",
+]
+
+
+def cancel_workers(
+    events: Mapping[uuid.UUID, asyncio.Event],
+    reason: WorkerCancelReason,
+    *,
+    run_id: uuid.UUID | None,
+    detail: str | None = None,
+) -> None:
+    """Set workers' cancel events, logging why once, with a closed category.
+
+    A worker interrupted at send or stream open shows only `interrupted`; this line
+    names the cause. Events already set are left alone and not logged again.
+    """
+    pending = [(worker_id, event) for worker_id, event in events.items() if not event.is_set()]
+    if not pending:
+        return
+    (log.info if reason == "terminal" else log.warning)(
+        "fleet.worker_cancel",
+        reason=reason,
+        detail=detail,
+        run_id=str(run_id) if run_id is not None else None,
+        worker_ids=[str(worker_id) for worker_id, _ in pending],
+    )
+    for _, event in pending:
+        event.set()
+
+
 async def watch_fleet_budget(
     *,
     sessionmaker: async_sessionmaker[AsyncSession],
@@ -1125,8 +1162,7 @@ async def watch_fleet_budget(
                         busy_s=round(now - busy_since, 3),
                         holder_s=round(now - holder_since, 3),
                     )
-                    for event in cancelled.values():
-                        event.set()
+                    cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
                     return "usage_unavailable"
                 # Contention must not blind the watch: decide from a lock-free,
                 # read-only snapshot of the same producer. The locked refresh that
@@ -1150,8 +1186,7 @@ async def watch_fleet_budget(
                         error_class="TimeoutError",
                         snapshot=True,
                     )
-                    for event in cancelled.values():
-                        event.set()
+                    cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
                     return "usage_unavailable"
                 except Exception as error:
                     log.warning(
@@ -1160,8 +1195,7 @@ async def watch_fleet_budget(
                         error_class=type(error).__name__,
                         snapshot=True,
                     )
-                    for event in cancelled.values():
-                        event.set()
+                    cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
                     return "usage_unavailable"
                 snapshot_read = True
             except TimeoutError:
@@ -1177,8 +1211,7 @@ async def watch_fleet_budget(
                     reason="read_unavailable",
                     error_class="TimeoutError",
                 )
-                for event in cancelled.values():
-                    event.set()
+                cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
                 return "usage_unavailable"
             except Exception as error:
                 log.warning(
@@ -1186,8 +1219,7 @@ async def watch_fleet_budget(
                     reason="read_unavailable",
                     error_class=type(error).__name__,
                 )
-                for event in cancelled.values():
-                    event.set()
+                cancel_workers(cancelled, "usage_unavailable", run_id=parent.fleet.run_id)
                 return "usage_unavailable"
             timeouts = 0
             if not snapshot_read:
@@ -1197,17 +1229,21 @@ async def watch_fleet_budget(
                 if event.is_set() or usage is None:
                     continue
                 if usage.reason == "terminal":
-                    event.set()
+                    cancel_workers({worker_id: event}, "terminal", run_id=parent.fleet.run_id)
                 elif not usage.admitted:
                     log.warning("fleet.budget_cancel", reason=usage.reason or "not_admitted")
-                    event.set()
+                    cancel_workers(
+                        {worker_id: event},
+                        "budget",
+                        run_id=parent.fleet.run_id,
+                        detail=usage.reason or "not_admitted",
+                    )
             delay = max(0, poll_interval - (asyncio.get_running_loop().time() - started))
             with suppress(TimeoutError):
                 await asyncio.wait_for(finished.wait(), timeout=delay)
         return "finished"
     except asyncio.CancelledError:
-        for event in cancelled.values():
-            event.set()
+        cancel_workers(cancelled, "watch_cancelled", run_id=parent.fleet.run_id)
         raise
 
 

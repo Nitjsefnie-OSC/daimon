@@ -2686,3 +2686,85 @@ async def test_admission_refusals_stay_bounded_by_twice_max_workers(sm):
         assert not (await reserve(sm, parent, worker)).admitted
     with pytest.raises(FleetConflict, match="allows 2 workers"):
         await add(sm, parent, ordinal=4, budget="0.01")
+
+
+def test_worker_cancels_say_why_once():
+    """Fleet r11: an out-of-memory restart interrupted every worker with no cause logged."""
+    from daimon.core.channel_budget import cancel_workers
+    from structlog.testing import capture_logs
+
+    run_id, a, b = uuid4(), uuid4(), uuid4()
+    events = {a: asyncio.Event(), b: asyncio.Event()}
+    events[b].set()
+    with capture_logs() as logs:
+        cancel_workers(events, "shutdown", run_id=run_id)
+        cancel_workers(events, "watch_ended", run_id=run_id)
+    assert all(event.is_set() for event in events.values())
+    (entry,) = [log for log in logs if log["event"] == "fleet.worker_cancel"]
+    assert entry["reason"] == "shutdown" and entry["run_id"] == str(run_id)
+    # Only the worker this call actually cancelled is named.
+    assert entry["worker_ids"] == [str(a)]
+
+
+async def test_host_shutdown_names_itself_as_the_cancel_reason(sm):
+    """The r11 repro: the host's lifespan ends mid-dispatch; workers must not just vanish."""
+    from daimon.core.fleet_orchestration import HostFleetPorts
+    from structlog.testing import capture_logs
+
+    ports = HostFleetPorts(sm, prices={}, markup=Decimal(1))
+    run_id, worker_id = uuid4(), uuid4()
+    cancel, finished = asyncio.Event(), asyncio.Event()
+
+    async def watching():
+        await finished.wait()
+
+    task = asyncio.create_task(watching())
+    ports._watches[run_id] = ({worker_id: cancel}, finished, task)  # pyright: ignore[reportPrivateUsage]
+    with capture_logs() as logs:
+        await ports.close()
+    assert cancel.is_set() and finished.is_set() and task.done()
+    (entry,) = [log for log in logs if log["event"] == "fleet.worker_cancel"]
+    assert (entry["reason"], entry["run_id"], entry["worker_ids"]) == (
+        "shutdown",
+        str(run_id),
+        [str(worker_id)],
+    )
+
+
+async def test_watch_logs_why_it_releases_a_terminal_worker(sm):
+    from daimon.core import channel_budget
+    from structlog.testing import capture_logs
+
+    parent, run = await setup(sm)
+    a = await add(sm, parent)
+    assert (await reserve(sm, parent, a)).admitted
+    async with sm.begin() as db:
+        await fleet.finish(
+            db,
+            tenant_id=run.tenant_id,
+            worker_id=a.id,
+            expected_version=(await read(sm, parent, a)).worker.version,
+            status="cancelled",
+            error_code="stopped",
+        )
+    cancelled = {a.id: asyncio.Event()}
+    finished = asyncio.Event()
+    with capture_logs() as logs:
+        watch = asyncio.create_task(
+            channel_budget.watch_fleet_budget(
+                sessionmaker=sm,
+                parent=parent,
+                prices=tariffs(parent),
+                markup=Decimal(1),
+                cancelled=cancelled,
+                finished=finished,
+                poll_interval=0.01,
+                read_timeout=READ_TIMEOUT_S,
+            )
+        )
+        await asyncio.wait_for(cancelled[a.id].wait(), 5)
+        finished.set()
+        assert await asyncio.wait_for(watch, 5) == "finished"
+    assert any(
+        log["event"] == "fleet.worker_cancel" and log["reason"] == "terminal" for log in logs
+    )
