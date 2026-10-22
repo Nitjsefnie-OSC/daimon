@@ -1346,3 +1346,48 @@ gap. Lower cursors cannot lower it, and `replay_after_seq` remains read-only.
 Selfhosted production profile defaults to `gpt-6.1-sol`. All harness tests,
 interop and live test deployments use `gpt-6-luna`; production defaults are
 asserted as strings only and are never sent to a model in tests.
+
+## Test doubles and the harness conformance kit
+
+`mux.testing` holds test doubles and conformance kits; product code never imports it.
+
+`mux.testing.fake_model_server` is an offline, scripted fake of the OpenAI Responses API
+(including Azure OpenAI deployment URLs), OpenAI Chat Completions and Anthropic Messages, each
+streaming and not. It is a plain ASGI app that needs only httpx and pydantic. A script is a
+queue of steps per conversation (`say`, `call_tool`, `fail`, with per-response usage and delays),
+and the server records every request so a test can assert what an engine sent. Mount it with
+`httpx.ASGITransport`, or serve it on loopback (needs `uvicorn`, which mux does not depend on):
+
+```python
+from mux.testing.fake_model_server import FakeModelServer, call_tool, say
+from mux.testing.fake_model_server.runner import serve
+
+async with serve() as (url, fake):  # point the engine's model base URL at `url`
+    fake.script([call_tool("write", {"path": "a", "content": "b"}), say("done")])
+```
+
+`mux.testing.harness_conformance` checks any `daimon-harness/0` service over HTTP: turn
+lifecycle, idempotent replay and 409 on key reuse, events by sequence, the `after_seq` fence and
+`history_gap` for a cursor ahead of the log, `replay_after_seq`, approvals, cancel, restart
+without re-run, usage per model request, skills, MCP and built-in tool projection. Each case
+reports PASS, SKIP with a reason, or FAIL.
+
+```python
+from mux.testing.harness_conformance import HarnessTarget, format_report, run_conformance
+
+target = HarnessTarget(base_url=harness_url, token=token, model=fake, restart=restart_hook)
+print(format_report(await run_conformance(target)))
+```
+
+Configure the harness under test to use the fake's URL as its model endpoint. The `restart`
+hook stops the harness and starts a new one on the same home, returning the new URL if it
+changed; without it the restart case is skipped. From a shell, with the harness already
+configured:
+
+```sh
+python -m mux.testing.harness_conformance --harness-url http://127.0.0.1:8088 --token "$HARNESS_TOKEN" --fake-port 9099
+```
+
+`HarnessTarget.tool_name` and `mcp_tool_name` map tool names for engines that prefix them.
+`tests/harness_conformance` runs the kit against `apps/harness` offline in CI, once per model
+loop (the Codex loop runs when `HARNESS_CODEX_BINARY` points at the pinned binary).
