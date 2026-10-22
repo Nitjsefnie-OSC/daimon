@@ -57,21 +57,32 @@ def is_plain_text_mention_event(event: dict[str, Any], *, bot_names: Iterable[st
     return mentions_by_name(_SLACK_TOKEN.sub(" ", text), bot_names)
 
 
+_EVENT_TEAM_KEYS = ("user_team", "user_team_id", "source_team")
+
+
 def foreign_event_team(event: Mapping[str, Any], *, team_id: str) -> str | None:
     """The other workspace an event says its sender belongs to, or None.
 
     Slack Connect allows channels shared between workspaces.  The field that
     carries the sender's home workspace ID is ambiguous across SDK versions and
-    documentation (``user_team`` vs ``user_team_id`` vs
-    ``source_team``), so we defensively check all three.  The first present
-    value that differs from ``team_id`` is the sender's home (possibly
-    empty: still foreign). Pure: no I/O.
+    documentation (``user_team`` vs ``user_team_id`` vs ``source_team``), so we
+    check all three.  Only a non-empty team id that differs from ``team_id`` is
+    evidence of another workspace; an empty or odd value is not (see
+    `ambiguous_event_team`). Pure: no I/O.
     """
-    for key in ("user_team", "user_team_id", "source_team"):
+    for key in _EVENT_TEAM_KEYS:
         value = event.get(key)
-        if value is not None and value != team_id:
-            return str(value)
+        if isinstance(value, str) and value and value != team_id:
+            return value
     return None
+
+
+def ambiguous_event_team(event: Mapping[str, Any]) -> bool:
+    """Whether an event team field is present but not a usable team id (not a string)."""
+    return any(
+        event.get(key) is not None and not isinstance(event.get(key), str)
+        for key in _EVENT_TEAM_KEYS
+    )
 
 
 def is_slack_connect_external(event: dict[str, Any], *, team_id: str) -> bool:
@@ -106,3 +117,18 @@ def is_external_interactive(payload: dict[str, Any]) -> bool:
     sender_team: Any = user.get("team_id")
     host_team: Any = team.get("id")
     return sender_team is not None and host_team is not None and bool(sender_team != host_team)
+
+
+def payload_proves_host(payload: dict[str, Any]) -> bool:
+    """Whether an interactive payload positively says its user is in the host workspace.
+
+    Needs both ``user.team_id`` and ``team.id`` present and equal. A payload that
+    omits either proves nothing, so the caller verifies with ``users.info``.
+    """
+    raw_user = payload.get("user")
+    raw_team = payload.get("team")
+    if not isinstance(raw_user, dict) or not isinstance(raw_team, dict):
+        return False
+    sender: Any = cast("dict[str, Any]", raw_user).get("team_id")
+    host: Any = cast("dict[str, Any]", raw_team).get("id")
+    return isinstance(sender, str) and bool(sender) and sender == host

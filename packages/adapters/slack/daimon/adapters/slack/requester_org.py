@@ -14,7 +14,7 @@ from dataclasses import dataclass
 from typing import Any
 
 from daimon.adapters.slack.admin import SlackRequester
-from daimon.adapters.slack.gating import foreign_event_team
+from daimon.adapters.slack.gating import ambiguous_event_team, foreign_event_team
 from daimon.core.turn_hold import RequesterOrg
 
 __all__ = ["RequesterStanding", "decide_requester_org"]
@@ -42,15 +42,17 @@ def decide_requester_org(
 ) -> RequesterStanding:
     """The requester's organisation: `HOST` only on a positive `users.info` verdict.
 
-    An event team field naming another team makes the requester `OTHER`. Without one,
+    An event team field naming another (non-empty) team makes the requester `OTHER`;
+    an empty hint is ignored and an unreadable one makes them `UNKNOWN`. Without one,
     a requester `users.info` places in another workspace is `OTHER`, and one it cannot
     place anywhere is `UNKNOWN` (another organisation for this turn only).
     """
     event_team = foreign_event_team(event, team_id=requester.host_team_id) if event else None
     if event_team is not None:
-        home = event_team or requester.team_id
-        org = RequesterOrg.OTHER if home else RequesterOrg.UNKNOWN
-        return RequesterStanding(org, home or None, is_admin=False)
+        return RequesterStanding(RequesterOrg.OTHER, event_team, is_admin=False)
+    if event and ambiguous_event_team(event):
+        # A team hint we cannot read proves nothing either way: no persistent writes.
+        return RequesterStanding(RequesterOrg.UNKNOWN, None, is_admin=False)
     if requester.is_host_member:
         return RequesterStanding(RequesterOrg.HOST, None, is_admin=requester.is_admin)
     home = requester.team_id

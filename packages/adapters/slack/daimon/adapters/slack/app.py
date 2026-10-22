@@ -17,7 +17,7 @@ import functools
 import json
 import time
 import uuid
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import UTC, datetime
 from typing import Any, Literal, cast
 
@@ -113,6 +113,7 @@ from daimon.adapters.slack.errors import (
 from daimon.adapters.slack.external_access import (
     external_action_allowed,
     external_submission_allowed,
+    host_only_notice,
     refusal_view,
     refuse_external_click,
 )
@@ -128,6 +129,7 @@ from daimon.adapters.slack.gating import (
     is_external_interactive,
     is_plain_text_mention_event,
     mentions_bot,
+    payload_proves_host,
 )
 from daimon.adapters.slack.github_connect import (
     ACTION_CANCEL,
@@ -762,9 +764,12 @@ class SlackApp:
         if req.type == "interactive" and payload.get("type") == "view_submission":
             view_vs: dict[str, Any] = payload.get("view") or {}
             cb_id: str = str(view_vs.get("callback_id") or "")
-            if is_external_interactive(payload) and not external_submission_allowed(cb_id):
-                # A member of another workspace submits only the feedback form
-                # opened from their own answer; everything else is the host's.
+            if not external_submission_allowed(cb_id) and not await self._submitter_is_host(
+                payload
+            ):
+                # Only the feedback form opened from their own answer is open to
+                # a member of another workspace, or to anyone whose workspace the
+                # payload and users.info cannot place; everything else is the host's.
                 log.info("slack.on_request.external_submission_refused", callback_id=cb_id)
                 await client.send_socket_mode_response(
                     SocketModeResponse(
@@ -1248,95 +1253,58 @@ class SlackApp:
             # Log req.type for unknown commands so the envelope type can be
             # confirmed from staging logs.
             cmd: str = str(payload.get("command") or "")
+            runtime = self.runtime
+            handler: Callable[[], Coroutine[Any, Any, None]] | None = None
             if cmd == "/dm-me":
-                self._spawn(handle_dm_command(self.runtime, payload))
+                handler = lambda: handle_dm_command(runtime, payload)  # noqa: E731
             elif cmd == "/help":
-                self._spawn(handle_help_command(self.runtime, payload))
+                # The help text is open to everyone: it reveals nothing of the host's.
+                self._spawn(handle_help_command(runtime, payload))
             elif cmd == "/here":
-                self._spawn(handle_here_command(self.runtime, payload))
+                handler = lambda: handle_here_command(runtime, payload)  # noqa: E731
             elif cmd == "/routines":
-                self._spawn(handle_routines_command(self.runtime, payload))
+                handler = lambda: handle_routines_command(runtime, payload)  # noqa: E731
             elif cmd == "/billing":
-                self._spawn(handle_billing_command(self.runtime, payload))
+                handler = lambda: handle_billing_command(runtime, payload)  # noqa: E731
             elif cmd == "/privacy":
-                self._spawn(handle_privacy_command(self.runtime, payload))
+                handler = lambda: handle_privacy_command(runtime, payload)  # noqa: E731
             elif cmd == "/github" and str(payload.get("text") or "").strip().startswith("connect"):
-                self._spawn(handle_github_command(self.runtime, payload))
+                handler = lambda: handle_github_command(runtime, payload)  # noqa: E731
             elif cmd in ("/agent-setup", "/github"):
-                self._spawn(handle_agent_setup_command(self.runtime, payload))
+                handler = lambda: handle_agent_setup_command(runtime, payload)  # noqa: E731
             elif cmd == "/memory":
-                self._spawn(handle_memory_command(self.runtime, payload))
+                handler = lambda: handle_memory_command(runtime, payload)  # noqa: E731
             else:
                 log.info(
                     "slack.on_request.unknown_command",
                     command=cmd,
                     req_type=req.type,
                 )
+            if handler is not None:
+                # Slash payloads carry no sender workspace, so every command but
+                # /help needs a users.info-verified host member.
+                self._spawn(self._gated_slash(payload, handler))
         elif req.type == "interactive":
             if payload.get("type") == "block_actions":
                 actions: list[dict[str, Any]] = payload.get("actions") or []
                 action_id: str = str(actions[0].get("action_id") or "") if actions else ""
                 # A member of another workspace (Slack Connect) reaches only the
-                # allowlisted controls; the rest are the host's, refused before
-                # any handler resolves reads against the host tenant. The
-                # allowed handlers bind the click to the clicker's own turn.
-                if is_external_interactive(payload) and not external_action_allowed(action_id):
+                # allowlisted controls; everything else is the host's. A click
+                # whose payload does not prove host membership is checked with
+                # users.info first; a failed or unplaceable lookup counts as external.
+                if action_id == "cancel_turn" or external_action_allowed(action_id):
+                    # Own-turn controls: each handler binds the click to the
+                    # clicker's own turn, so no membership check is needed here.
+                    self._route_block_action(payload, action_id)
+                elif is_external_interactive(payload):
                     log.info("slack.on_request.external_block_action_refused")
                     self._spawn(self._refuse_external_click(payload))
-                    return
-                if action_id == "cancel_turn":
-                    # Existing cancel path — KEEP unchanged.
-                    self._spawn(self._handle_block_action(payload))
-                elif (
-                    action_id.startswith("routine_action:")
-                    or action_id == "routines_refresh"
-                    or action_id == "routines_create"
-                ):
-                    self._spawn(handle_routine_action(self.runtime, payload))
-                elif action_id == "billing_topup":
-                    self._spawn(handle_topup_select(self.runtime, payload))
-                elif action_id == REDEEM_OPEN_ACTION_ID:
-                    self._spawn(handle_redeem_open(self.runtime, payload))
-                elif action_id in PANEL_ACTION_IDS:
-                    self._spawn(handle_panel_action(self.runtime, payload))
-                elif action_id in (
-                    "privacy_delete_open",
-                    "privacy_export",
-                    "privacy_slack_disconnect",
-                ):
-                    self._spawn(handle_privacy_block_action(self.runtime, payload))
-                elif action_id.startswith("agent_setup__"):
-                    self._spawn(handle_agent_setup_action(self.runtime, payload))
-                elif action_id.startswith("github_new_repo__"):
-                    from daimon.adapters.slack.agent_setup.github_new_repo import handle_action
-
-                    self._spawn(handle_action(self.runtime, payload))
-                elif action_id.startswith("github_link__"):
-                    from daimon.adapters.slack.agent_setup.github_link import handle_action
-
-                    self._spawn(handle_action(self.runtime, payload))
-                elif action_id.startswith("github_request__"):
-                    from daimon.adapters.slack.agent_setup.github_requests import handle_action
-
-                    self._spawn(handle_action(self.runtime, payload))
-                elif action_id == SLACK_CREDENTIAL_ACTION_ID:
-                    self._spawn(handle_credential_request_click(self.runtime, payload))
-                elif action_id == ACTION_UPDATE:
-                    self._spawn(handle_github_update_click(self.runtime, payload))
-                elif action_id == ACTION_CANCEL:
-                    self._spawn(handle_github_cancel_click(self.runtime, payload))
-                elif action_id.startswith("feedback_vote:"):
-                    self._spawn(handle_feedback_vote(self.runtime, payload))
-                elif action_id == FEEDBACK_DETAILS_ACTION_ID:
-                    self._spawn(handle_feedback_details_click(self.runtime, payload))
-                elif action_id == ASK_HUMAN_ACTION_ID:
-                    self._spawn(handle_ask_human_click(self.runtime, payload))
-                elif action_id.startswith(PROVIDER_ACTION_PREFIX):
-                    self._spawn(self._provider_actions.handle_click(payload))
-                elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
-                    self._spawn(self._confirmations.handle_click(payload))
-                elif action_id == HAND_OVER_ACTION_ID:
-                    self._spawn(handle_hand_over_click(self.runtime, payload))
+                elif payload_proves_host(payload):
+                    self._route_block_action(payload, action_id)
+                else:
+                    # Slack did not say whose workspace the clicker is in:
+                    # users.info decides before anything runs.
+                    self._spawn(self._verify_then_route_block_action(payload, action_id))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs.
@@ -1432,6 +1400,120 @@ class SlackApp:
         The bot's own join of a shared channel is where the first-answer notice
         for people from the other organisation will attach.
         """
+
+    def _route_block_action(self, payload: dict[str, Any], action_id: str) -> None:
+        """Hand a verified block action to its handler."""
+        if action_id == "cancel_turn":
+            # Existing cancel path — KEEP unchanged.
+            self._spawn(self._handle_block_action(payload))
+        elif (
+            action_id.startswith("routine_action:")
+            or action_id == "routines_refresh"
+            or action_id == "routines_create"
+        ):
+            self._spawn(handle_routine_action(self.runtime, payload))
+        elif action_id == "billing_topup":
+            self._spawn(handle_topup_select(self.runtime, payload))
+        elif action_id == REDEEM_OPEN_ACTION_ID:
+            self._spawn(handle_redeem_open(self.runtime, payload))
+        elif action_id in PANEL_ACTION_IDS:
+            self._spawn(handle_panel_action(self.runtime, payload))
+        elif action_id in (
+            "privacy_delete_open",
+            "privacy_export",
+            "privacy_slack_disconnect",
+        ):
+            self._spawn(handle_privacy_block_action(self.runtime, payload))
+        elif action_id.startswith("agent_setup__"):
+            self._spawn(handle_agent_setup_action(self.runtime, payload))
+        elif action_id.startswith("github_new_repo__"):
+            from daimon.adapters.slack.agent_setup.github_new_repo import handle_action
+
+            self._spawn(handle_action(self.runtime, payload))
+        elif action_id.startswith("github_link__"):
+            from daimon.adapters.slack.agent_setup.github_link import handle_action
+
+            self._spawn(handle_action(self.runtime, payload))
+        elif action_id.startswith("github_request__"):
+            from daimon.adapters.slack.agent_setup.github_requests import handle_action
+
+            self._spawn(handle_action(self.runtime, payload))
+        elif action_id == SLACK_CREDENTIAL_ACTION_ID:
+            self._spawn(handle_credential_request_click(self.runtime, payload))
+        elif action_id == ACTION_UPDATE:
+            self._spawn(handle_github_update_click(self.runtime, payload))
+        elif action_id == ACTION_CANCEL:
+            self._spawn(handle_github_cancel_click(self.runtime, payload))
+        elif action_id.startswith("feedback_vote:"):
+            self._spawn(handle_feedback_vote(self.runtime, payload))
+        elif action_id == FEEDBACK_DETAILS_ACTION_ID:
+            self._spawn(handle_feedback_details_click(self.runtime, payload))
+        elif action_id == ASK_HUMAN_ACTION_ID:
+            self._spawn(handle_ask_human_click(self.runtime, payload))
+        elif action_id.startswith(PROVIDER_ACTION_PREFIX):
+            self._spawn(self._provider_actions.handle_click(payload))
+        elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
+            self._spawn(self._confirmations.handle_click(payload))
+        elif action_id == HAND_OVER_ACTION_ID:
+            self._spawn(handle_hand_over_click(self.runtime, payload))
+
+    async def _verified_host_member(self, team_id: str, user_id: str) -> bool:
+        """Whether users.info places `user_id` in the host workspace; False when it cannot say."""
+        if not (team_id and user_id):
+            return False
+        try:
+            client = await resolve_web_client(self.runtime, team_id=team_id)
+            if client is None:
+                return False
+            requester = await resolve_requester(client, user_id=user_id, host_team_id=team_id)
+        except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
+            log.warning("slack.host_member_check_failed", team_id=team_id, exc_info=exc)
+            return False
+        return requester is not None and requester.is_host_member
+
+    async def _submitter_is_host(self, payload: dict[str, Any]) -> bool:
+        """Whether a submission is from a host member: the payload's proof, else users.info."""
+        if is_external_interactive(payload):
+            return False
+        if payload_proves_host(payload):
+            return True
+        user: dict[str, Any] = payload.get("user") or {}
+        return await self._verified_host_member(
+            _payload_team_id(payload), str(user.get("id") or "")
+        )
+
+    async def _verify_then_route_block_action(
+        self, payload: dict[str, Any], action_id: str
+    ) -> None:
+        user: dict[str, Any] = payload.get("user") or {}
+        if await self._verified_host_member(_payload_team_id(payload), str(user.get("id") or "")):
+            self._route_block_action(payload, action_id)
+            return
+        log.info("slack.on_request.unverified_block_action_refused")
+        await self._refuse_external_click(payload)
+
+    async def _gated_slash(
+        self,
+        payload: dict[str, Any],
+        handler: Callable[[], Coroutine[Any, Any, None]],
+    ) -> None:
+        """Run a slash command for a verified host member; anyone else gets the host-only line."""
+        team_id = str(payload.get("team_id") or "")
+        user_id = str(payload.get("user_id") or "")
+        if await self._verified_host_member(team_id, user_id):
+            await handler()
+            return
+        log.info("slack.on_request.unverified_slash_refused", command=payload.get("command"))
+        try:
+            client = await resolve_web_client(self.runtime, team_id=team_id)
+            if client is not None:
+                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+                    channel=str(payload.get("channel_id") or ""),
+                    user=user_id,
+                    text=host_only_notice(self._workspace_names.get(team_id)),
+                )
+        except (SlackApiError, aiohttp.ClientError, InvalidToken, SQLAlchemyError) as exc:
+            log.warning("slack.slash_refusal_notice_failed", team_id=team_id, exc_info=exc)
 
     async def _refuse_external_click(self, payload: dict[str, Any]) -> None:
         """Say a control is for the host workspace's people, as an ephemeral to the clicker."""
