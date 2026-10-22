@@ -1455,8 +1455,13 @@ def fleet_root_permissions(
     policy: TenantAccessPolicy,
     now: datetime,
     seal_ids: frozenset[str] = frozenset(),
+    implicit_root_model: bool = True,
 ) -> WorkerPermissions:
-    """Compose captured source; caller joins origin/binding and rechecks grant epoch."""
+    """Compose captured source; caller joins origin/binding and rechecks grant epoch.
+
+    `implicit_root_model` grants the source agent's own model even when the grant
+    does not list it. Only the root gets that; a worker agent's model must be granted.
+    """
     from daimon.core.memory_resource import memory_mount
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
@@ -1517,7 +1522,11 @@ def fleet_root_permissions(
     duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
     deadline = min(grant.expires_at, now + timedelta(seconds=duration))
     limits = grant.limits.model_copy(update={"deadline": deadline})
-    backend_grants, models = _with_root_model(grant, spec.model, policy=policy, fleet=fleet)
+    backend_grants, models = (
+        _with_root_model(grant, spec.model, policy=policy, fleet=fleet)
+        if implicit_root_model
+        else (grant.backends, grant.models)
+    )
     return freeze_root_permissions(
         WorkerPermissions(
             fleet=fleet,
@@ -1541,6 +1550,65 @@ def fleet_root_permissions(
         policy=policy,
         now=now,
     )
+
+
+def worker_agent_allowed(
+    grant: AgentFleetGrant, root_agent_id: uuid.UUID | None, agent_id: uuid.UUID
+) -> bool:
+    """Whether the grant lets this run's workers run as `agent_id`.
+
+    Field absent (stored and legacy grants): the root's own agent only. "any": any
+    agent the requester may use in the run's place (authorize decides that per
+    spawn). A list: only those logical agent ids. The root's own agent is always
+    allowed.
+    """
+    if agent_id == root_agent_id:
+        return True
+    mode = getattr(grant, "worker_agents_mode", None)
+    if mode == "any":
+        return True
+    listed = getattr(grant, "worker_agents", None)
+    return listed is not None and agent_id in listed
+
+
+def agent_worker_permissions(
+    root: WorkerPermissions,
+    source: BackendAgent,
+    admission: AdmissionGrant,
+    grant: AgentFleetGrant,
+    *,
+    policy: TenantAccessPolicy,
+    now: datetime,
+) -> WorkerPermissions:
+    """The authority a worker runs under when it runs AS another on-server agent.
+
+    The agent's own captured source is the ceiling (its prompt, model, tools,
+    skills), inside the root's run: the same fleet facts, subject and finite run
+    limits, so money, the run binding and the wake stay the root's. Its model must
+    be one the grant lists; unlike the root, it is never implied. SPAWN_WORKER is
+    then asked for this agent, which requires the requester may start a turn with
+    and run it in the run's place, as the agent-visibility rule says everywhere.
+    """
+    if not worker_agent_allowed(grant, root.agent_id, source.agent_id):
+        raise WorkerSpecRefused("scope", "not_subset")
+    if (
+        admission.subject != root.subject
+        or admission.run_place != root.fleet.place
+        or admission.thread_id != root.fleet.root.thread_id
+    ):
+        raise WorkerSpecRefused("origin", "unbound")
+    worker_root = fleet_root_permissions(
+        source,
+        admission,
+        grant,
+        fleet=root.fleet,
+        policy=policy,
+        now=now,
+        seal_ids=root.seal_ids,
+        implicit_root_model=False,
+    )
+    # The run's own finite limits (deadline, budget, provider lines) bind every worker.
+    return replace(worker_root, limits=root.limits)
 
 
 def freeze_root_permissions(
