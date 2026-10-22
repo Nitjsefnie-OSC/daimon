@@ -1636,6 +1636,10 @@ class McpToken(Base):
             "(platform IS NULL) = (channel_id IS NULL) AND (channel_id IS NULL OR kind = 'agent')",
             name="ck_mcp_tokens_channel",
         ),
+        CheckConstraint(
+            "surface IS NULL OR (surface = 'provider_turn' AND kind = 'agent')",
+            name="ck_mcp_tokens_surface",
+        ),
     )
 
     jti: Mapped[uuid.UUID] = mapped_column(
@@ -1671,6 +1675,8 @@ class McpToken(Base):
     # NULL for a token bound to no channel.
     platform: Mapped[str | None] = mapped_column(Text, nullable=True)
     channel_id: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # `provider_turn`: a chat-execution credential with no confirmation surface.
+    surface: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class SlackBotToken(Base):

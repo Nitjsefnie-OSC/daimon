@@ -677,6 +677,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 now=now,
                 ttl_days=ttl_s / 86400,  # pyright: ignore[reportArgumentType]
                 chat_execution=True,
+                surface="provider_turn",
             )
         minted = token, token_jti(token)
         try:

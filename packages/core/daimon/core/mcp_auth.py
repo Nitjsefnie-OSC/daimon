@@ -42,7 +42,7 @@ from daimon.core.authz import (
 from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
-from daimon.core.stores.domain import McpTokenRow
+from daimon.core.stores.domain import McpTokenRow, McpTokenSurface
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -189,9 +189,9 @@ EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 HELD_CHAT_TOKEN_LABEL_PREFIX = "vault-chat-held:"
 
 
-#: Registry label of a per-turn credential minted for a provider turn that has
-#: no confirmation card (a Gemini agent template). The server refuses every
-#: confirmation-gated or publishing tool for it (`no_confirmation_surface`).
+#: Registry label of a per-turn credential minted for a Gemini agent-template
+#: turn. A name for people reading the registry only: what the server refuses
+#: follows the row's `surface` (`provider_turn`), never its label.
 NO_CONFIRMATION_LABEL = "gemini-agent-turn"
 
 
@@ -277,6 +277,7 @@ async def mint_agent_mcp_token(
     platform: str | None = None,
     channel_id: str | None = None,
     chat_execution: bool = False,
+    surface: McpTokenSurface | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -300,6 +301,11 @@ async def mint_agent_mcp_token(
     `platform` and `channel_id` bind the token to the channel it was minted in
     (`coding_token_channel`). They live on the row only, never in the JWT, so
     the verifier reads the binding from the database like the revocation.
+
+    `surface="provider_turn"` registers a chat-execution credential for an
+    OpenAI or Gemini turn, which has no confirmation card: the server refuses
+    every confirmation-gated or publishing tool for it. Registry-only, never a
+    claim, so the token's exact claim shape is unchanged.
     """
     # Registered chat execution retains the ordinary chat surface. External
     # agent keys keep their existing restricted agent-chat surface. The signed
@@ -308,6 +314,8 @@ async def mint_agent_mcp_token(
 
     if chat_execution and not 0 < ttl_days * 86400 <= 900:
         raise ValueError("registered chat execution requires a TTL of at most 900 seconds")
+    if surface is not None and not chat_execution:
+        raise ValueError("a provider-turn surface is a chat-execution credential")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
     jti = uuid.uuid4()
     expires_at = now + dt.timedelta(days=ttl_days)
@@ -322,6 +330,7 @@ async def mint_agent_mcp_token(
         expires_at=expires_at,
         platform=platform,
         channel_id=channel_id,
+        surface=surface,
     )
     return pyjwt.encode(
         {

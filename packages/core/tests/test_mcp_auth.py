@@ -576,3 +576,41 @@ async def test_selfhosted_chat_credential_keeps_no_anthropic_flag_without_resour
     )
     claims = pyjwt.decode(token, secret, algorithms=["HS256"])
     assert claims["anthropic_disabled"] is True
+
+
+async def test_a_provider_turn_surface_is_registry_only_and_needs_chat_execution(
+    db_session: AsyncSession,
+) -> None:
+    """The surface lives on the row the verifier reads, never in the token's claims."""
+    from daimon.core.stores.mcp_tokens import get_mcp_token
+
+    tenant_id, account_id = await _seed_tenant_and_account(db_session)
+    secret = b"a" * 32
+    now = dt.datetime(2026, 6, 23, 12, 0, 0, tzinfo=dt.UTC)
+    token = await mint_agent_mcp_token(
+        db_session,
+        account_id=account_id,
+        tenant_id=tenant_id,
+        agent_id=uuid.uuid4(),
+        label="any label",
+        secret=secret,
+        now=now,
+        ttl_days=600 / 86400,  # pyright: ignore[reportArgumentType]
+        chat_execution=True,
+        surface="provider_turn",
+    )
+    decoded = pyjwt.decode(token, secret, algorithms=["HS256"], options=_NO_EXP)
+    assert set(decoded) == {"sub", "chat_agent_id", "jti", "exp"}
+    row = await get_mcp_token(db_session, jti=uuid.UUID(decoded["jti"]))
+    assert row is not None and row.surface == "provider_turn"
+    with pytest.raises(ValueError, match="chat-execution"):
+        await mint_agent_mcp_token(
+            db_session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=uuid.uuid4(),
+            label="external key",
+            secret=secret,
+            now=now,
+            surface="provider_turn",
+        )

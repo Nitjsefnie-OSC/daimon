@@ -24,7 +24,7 @@ from decimal import Decimal
 from typing import Any, cast
 
 from daimon.core._models import McpToken
-from daimon.core.stores.domain import McpTokenKind, McpTokenRow
+from daimon.core.stores.domain import McpTokenKind, McpTokenRow, McpTokenSurface
 from sqlalchemy import CursorResult, String, and_, delete, func, or_, select, update
 from sqlalchemy.ext.asyncio import AsyncSession
 
@@ -44,6 +44,7 @@ async def create_mcp_token_row(
     max_issued_usd: Decimal | None = None,
     platform: str | None = None,
     channel_id: str | None = None,
+    surface: McpTokenSurface | None = None,
 ) -> None:
     """Insert a new mcp_tokens row.
 
@@ -66,6 +67,7 @@ async def create_mcp_token_row(
         max_issued_usd=max_issued_usd,
         platform=platform,
         channel_id=channel_id,
+        surface=surface,
     )
     session.add(orm)
     await session.flush()
