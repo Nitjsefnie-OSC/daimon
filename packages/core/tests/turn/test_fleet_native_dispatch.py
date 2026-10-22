@@ -18,9 +18,9 @@ from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
 from daimon.core.stores import access_policy, fleet, mux_state
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.runtime_manifest import capture_preparation_source
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_transport import ScriptedTransport
 from mux.contracts.resources import AgentPatch
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from sqlalchemy import update
 
 from .test_frozen_root import freeze

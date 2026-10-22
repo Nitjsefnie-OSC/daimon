@@ -13,8 +13,8 @@ from daimon.adapters.mcp.tools.reachability import require_admin_for_reachable_a
 from daimon.core.scope import DeploymentDefault, TenantScopeRef
 from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

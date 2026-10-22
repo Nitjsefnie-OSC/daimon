@@ -53,15 +53,16 @@ from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.turn.posture import ExemptReason
 from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
     FakeMemoryStoreState,
     NotHandled,
     combine_handlers,
     json_body,
     make_fake_memory_store_handler,
 )
-from daimon.testing.ma import build_fake_anthropic as build_fake_anthropic_http
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session, ma_session_agent
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic as build_fake_anthropic_http
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -2681,7 +2682,7 @@ async def test_read_only_source_projection_keeps_implicit_memory_without_provisi
     from daimon.core.sessions import project_session_resources
     from daimon.core.stores import agent_memory_stores
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
@@ -2743,7 +2744,7 @@ async def test_source_projection_requires_app_vault_only_for_a_live_grant(
     from daimon.core.sessions import project_session_resources
     from daimon.core.stores import github_access, github_app_installations
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
@@ -2867,7 +2868,7 @@ async def test_projection_reads_bound_resource_intent_without_resolving_secrets(
     from daimon.core.sessions import project_session_resources
     from daimon.core.stores import agent_mcp_credentials as credentials
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     sessions = async_sessionmaker(db_committing_engine, expire_on_commit=False)
     require_owned_sessionmaker(sessions)
@@ -2953,10 +2954,10 @@ async def worker_source_context(
     from daimon.core.neutral_resources import resolve_worker_spec
     from daimon.core.sessions import project_session_resources
     from daimon.testing.db import require_owned_sessionmaker
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.contracts.extensions import ExtensionConfig
     from mux.contracts.ids import ChannelRef, Scope, ThreadRef
     from mux.contracts.resources import AgentSpec, ResourceBinding
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     from .test_fleet_permissions import POLICY, parent
 
@@ -3023,7 +3024,7 @@ async def worker_source_context(
         root, root.spec, policy=POLICY, now=datetime(2026, 10, 12, 18, tzinfo=UTC)
     )
     from daimon.core.memory_resource import ensure_memory_store_and_mount
-    from daimon.testing.ma import MARouter
+    from mux.testing.drivers.anthropic.ma import MARouter
 
     router = MARouter()
     memory_handler = make_fake_memory_store_handler(FakeMemoryStoreState())
@@ -3102,8 +3103,8 @@ async def test_worker_source_context_refuses_before_resources_or_native_io(
 ):
     from dataclasses import replace
 
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.errors import ScopeViolation, UnsupportedCapability
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     (
         sessions,
@@ -3200,8 +3201,8 @@ async def test_worker_memory_grant_refuses_before_resource_or_session_effects(
 ):
     from dataclasses import replace
 
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.errors import ScopeViolation, UnsupportedCapability
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     sessions, tenant, account, _, environment, worker, source = await worker_source_context(
         db_committing_engine, warm=fault != "cold"
@@ -3342,9 +3343,9 @@ async def test_actual_sdk_source_unrepresented_intent_refuses_before_allocation(
 )
 async def test_source_environment_projection_retains_unrepresented_native_policy(failure):
     from daimon.core.mux_compat import retrieve_environment, source_environment_record
-    from daimon.testing.ma import MARouter
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.contracts.ids import Scope
+    from mux.testing.drivers.anthropic.ma import MARouter
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     config = {
         "type": "cloud",

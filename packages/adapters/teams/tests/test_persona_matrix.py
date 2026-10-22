@@ -38,10 +38,15 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.testing import build_fake_anthropic, list_response, ma_agent, ma_session
-from daimon.testing.ma import MARouter, sse_response
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    list_response,
+    sse_response,
+)
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (

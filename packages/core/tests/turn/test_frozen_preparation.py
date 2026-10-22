@@ -348,7 +348,7 @@ async def test_naive_grant_clock_is_typed_refused_or_disabled_noop(root_turn, op
 @pytest.mark.parametrize("field", ["model", "system", "version", "tools", "environment"])
 async def test_fresh_native_drift_refuses_under_retained_source_authority(root_turn, field):
     import httpx
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
     deps, prepared, *_ = root_turn
     parent = await retained(root_turn)
@@ -587,8 +587,8 @@ def test_environment_facade_preserves_null_description_and_validates_authority(f
 async def test_after_source_await_refuses_before_environment_read(root_turn, change):
     import httpx
     from daimon.core.errors import TurnError
-    from daimon.testing.ma import MARouter
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma import MARouter
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     deps, prepared, *_ = root_turn
     parent = await retained(root_turn)

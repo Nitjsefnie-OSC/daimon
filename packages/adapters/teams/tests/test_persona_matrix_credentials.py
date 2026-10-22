@@ -23,8 +23,8 @@ from daimon.core.stores.credential_requests import (
     peek_credential_request,
 )
 from daimon.core.stores.identity import get_or_create_platform_principal
-from daimon.testing import build_fake_anthropic, ma_agent
-from daimon.testing.ma import MARouter
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

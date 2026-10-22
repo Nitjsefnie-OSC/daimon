@@ -44,10 +44,10 @@ from daimon.core.confirmation import prompt_for_tool_call
 from daimon.core.turn import approvals, driver, outcomes
 from daimon.testing import effect_recorder, turn_fakes
 from daimon.testing.effect_recorder import EffectRecorder, database_metadata, json_value
-from daimon.testing.ma import not_found_response
-from daimon.testing.ma_transport import Json, ScriptedReply, ScriptedTransport
 from http_turn import HttpTurnFixtures, synchronize_approval_poll, synchronize_cancel_timer
 from mutations import apply as apply_mutation
+from mux.testing.drivers.anthropic.ma import not_found_response
+from mux.testing.drivers.anthropic.ma_transport import Json, ScriptedReply, ScriptedTransport
 from runner import TURN_CONTROL_KWARGS
 from sqlalchemy import ColumnDefault, DateTime
 from sqlalchemy.ext.asyncio import AsyncSession, create_async_engine
@@ -381,7 +381,10 @@ def pytest_runtest_setup(item: Any) -> None:
 
     for module in tuple(sys.modules.values()):
         name = getattr(module, "__name__", "")
-        if not (name.startswith(("daimon.", "jwt.")) or name == item.module.__name__):
+        # mux.testing holds the MA fakes that used to live in daimon.testing.
+        if not (
+            name.startswith(("daimon.", "jwt.", "mux.testing.")) or name == item.module.__name__
+        ):
             continue
         if (
             getattr(module, "datetime", None) is datetime
