@@ -12,11 +12,11 @@ import io
 import json
 import uuid
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import ROUND_DOWN, Decimal
 from pathlib import PurePosixPath
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, cast
 from urllib.parse import urlsplit
@@ -88,6 +88,7 @@ from pydantic import Field, JsonValue, TypeAdapter, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
+    from daimon.core.fleet import FleetRun, FleetWorker
     from daimon.core.turn.admission import AdmissionGrant
     from daimon.core.turn.persistence import TurnPersistence
 
@@ -854,7 +855,9 @@ WorkerField = Literal[
     "native_budget_usd",
     "declared_drops",
 ]
-WorkerReason = DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale"]
+WorkerReason = (
+    DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale", "exhausted"]
+)
 
 
 class WorkerSpecRefused(ValueError):
@@ -1052,6 +1055,203 @@ class ResolvedWorkerSpec:
         return self.spec.declared_drops
 
 
+def task_worker_spec(
+    parent: WorkerPermissions, *, role: str, task: str, model: str | None = None
+) -> AgentSpec:
+    """A plain-language worker: one granted model, with the task as its instructions.
+
+    The worker carries no tools or skills. A worker on another model declares the
+    loss of the root's model controls (e.g. effort), which that model may not accept;
+    a foreign-provider worker also declares the root capabilities it cannot represent.
+    The resolver still checks every ceiling.
+    """
+    root = parent.spec.model
+    if model is None or model == root.id:
+        choice = ModelRef(provider=root.provider, id=root.id)
+    else:
+        matches = [granted for granted in parent.models if granted.id == model]
+        if len(matches) != 1:
+            raise WorkerSpecRefused("backend", "not_subset")
+        choice = matches[0]
+    if not task.strip():
+        raise WorkerSpecRefused("system", "unbound")
+    drops: set[DeclaredDrop] = {"skills", "tools", *parent.spec.declared_drops}
+    if choice.provider != root.provider:
+        drops |= {"mcp", "memory", "sandbox"}
+    if choice.id != root.id and parent.spec.extensions:
+        drops.add("model_controls")
+    return AgentSpec(name=role, model=choice, system=task, declared_drops=tuple(drops))
+
+
+def worker_runtime_ceiling(
+    parent: WorkerPermissions, provider: Provider, backend: BackendConfig | None = None
+) -> int | None:
+    """The shortest worker runtime a granted profile for this provider allows, if any."""
+    from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_RUNTIME_S
+
+    profiles = (
+        {backend.profile}
+        if backend is not None and backend.profile is not None
+        else {grant.profile for grant in parent.backend_grants if grant.backend == provider}
+    )
+    return WORKER_MAX_RUNTIME_S if INLINE_REUSE.profile_id in profiles else None
+
+
+#: Tokens added to a bounded Gemini worker's input cap for the turn's own wrapping.
+GEMINI_INPUT_HEADROOM_TOKENS = 4096
+#: The smallest output envelope worth dispatching; a budget that buys less refuses.
+GEMINI_MIN_OUTPUT_TOKENS = 1024
+#: The bounded worker path's own output ceiling (worker_token_limits_supported).
+GEMINI_MAX_OUTPUT_TOKENS = 65_536
+
+
+def gemini_worker_cost_usd(model: str, max_input_tokens: int, max_output_tokens: int) -> Decimal:
+    """Worst-case provider cost of one bounded Gemini worker turn at its current tariff."""
+    from daimon.core import pricing
+    from mux.profiles.gemini import INLINE_REUSE
+
+    price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
+    if price is None:
+        raise WorkerSpecRefused("budget", "unsupported")
+    return (max_input_tokens * price.input + max_output_tokens * price.output) / Decimal(10**6)
+
+
+def bounded_gemini_worker_tokens(
+    system: str,
+    budget_usd: Decimal,
+    *,
+    model: str,
+    markup: Decimal = Decimal(1),
+    hold_usd: Decimal | None = None,
+    extra_input: str = "",
+) -> dict[str, int]:
+    """Token limits that keep a plain-language Gemini worker on the bounded path.
+
+    max_input_tokens = UTF-8 bytes of the worker's instructions and of `extra_input`
+    (its trigger message, which embeds a reviewed result for a reviewer) + headroom:
+    a token never covers less than one byte, so the real prompt always fits, and the
+    driver still counts it exactly before sending. With limit = min(budget / markup,
+    hold_usd), max_output_tokens = what the rest of the limit buys at the output
+    tariff, at most GEMINI_MAX_OUTPUT_TOKENS: (limit - max_input * input_rate) /
+    output_rate. So the worst-case provider cost, max_input * input_rate +
+    max_output * output_rate, never exceeds the worker's budget or the deployment's
+    per-turn hold.
+    """
+    from daimon.core import pricing
+    from mux.profiles.gemini import INLINE_REUSE
+
+    price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
+    if price is None or markup <= 0:
+        raise WorkerSpecRefused("budget", "unsupported")
+    max_input = len(system.encode()) + len(extra_input.encode()) + GEMINI_INPUT_HEADROOM_TOKENS
+    if price.max_priced_input_tokens is not None and max_input > price.max_priced_input_tokens:
+        raise WorkerSpecRefused("max_input_tokens", "unsupported")
+    per_token = Decimal(10**6)
+    limit = budget_usd / markup if hold_usd is None else min(budget_usd / markup, hold_usd)
+    room = limit - max_input * price.input / per_token
+    max_output = min(
+        GEMINI_MAX_OUTPUT_TOKENS,
+        int((room * per_token / price.output).to_integral_value(rounding=ROUND_DOWN)),
+    )
+    if max_output < GEMINI_MIN_OUTPUT_TOKENS:
+        raise WorkerSpecRefused("budget", "exhausted")
+    return {"max_input_tokens": max_input, "max_output_tokens": max_output}
+
+
+def planned_providers(parent: WorkerPermissions, models: Sequence[str]) -> list[Provider]:
+    """The provider of each planned worker's model; every model must be granted."""
+    granted: dict[str, Provider] = {
+        model.id: model.provider for model in (*parent.models, parent.spec.model)
+    }
+    try:
+        return [granted[model] for model in models]
+    except KeyError:
+        raise WorkerSpecRefused("backend", "not_subset") from None
+
+
+def default_worker_limits(
+    ceiling: WorkerLimits,
+    run: FleetRun | None,
+    workers: tuple[FleetWorker, ...],
+    *,
+    provider: Provider,
+    budget_usd: Decimal | None = None,
+    deadline: datetime | None = None,
+    max_turns: int | None = None,
+    max_input_tokens: int | None = None,
+    max_output_tokens: int | None = None,
+    planned_workers: int | None = None,
+    now: datetime | None = None,
+    max_runtime_s: int | None = None,
+    planned_on_provider: int | None = None,
+) -> WorkerLimits:
+    """Fill omitted worker limits from the frozen root, so a model need not guess them.
+
+    The deadline defaults to (and is never later than) the root's frozen deadline, and
+    to `now + max_runtime_s` when the selected profile caps a worker's runtime (a
+    Gemini worker gets 120 s); a later supplied deadline is shortened the same way. The
+    budget defaults to an even share, per remaining worker slot, of what the run and
+    the provider line have left. Slots bound how many workers can be admitted, so
+    parallel spawns reading the same snapshot never add up past either cap. A root that
+    says how many workers it plans shares among those not yet admitted instead (still
+    at most the free slots); spawning more at once than planned can only be refused
+    by admission, never exceed a cap. When the root also says how many planned workers
+    use this provider, the provider line is shared among just those. Supplied
+    budgets and every ceiling are still checked by the resolver and financial admission.
+    """
+    latest = ceiling.deadline
+    if max_runtime_s is not None:
+        if now is None:
+            raise WorkerSpecRefused("deadline", "unbound")
+        latest = min(latest, now + timedelta(seconds=max_runtime_s))
+    if budget_usd is None:
+        if run is None:
+            raise WorkerSpecRefused("budget", "unbound")
+        from daimon.core.fleet import holds_slot
+
+        # Spawns refused at admission free their slot and hold no money.
+        workers = tuple(worker for worker in workers if holds_slot(worker))
+        slots = run.max_workers - len(workers)
+        if slots <= 0:
+            raise WorkerSpecRefused("budget", "exhausted")
+        free = slots
+        if planned_workers is not None:
+            slots = min(free, max(planned_workers - len(workers), 1))
+        provider_slots = slots
+        if planned_on_provider is not None:
+            on_provider = sum(1 for w in workers if w.backend == provider)
+            provider_slots = min(free, max(planned_on_provider - on_provider, 1))
+
+        def held(provider_only: bool) -> Decimal:
+            return sum(
+                (
+                    max(w.budget_usd, w.reserved_usd)
+                    for w in workers
+                    if not provider_only or w.backend == provider
+                ),
+                Decimal(0),
+            )
+
+        share = min(
+            (run.total_budget_usd - held(False)) / slots,
+            ceiling.for_provider(provider).budget_usd,
+        )
+        if ceiling.provider_limits_usd is not None:
+            line = ceiling.provider_limits_usd.get(provider, Decimal(0))
+            share = min(share, (line - held(True)) / provider_slots)
+        budget_usd = max(share, Decimal(0)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        if budget_usd <= 0:
+            # Refuse before admission, so an exhausted run never spends a worker slot.
+            raise WorkerSpecRefused("budget", "exhausted")
+    return WorkerLimits(
+        budget_usd=budget_usd,
+        deadline=latest if deadline is None else min(deadline, latest),
+        max_turns=1 if max_turns is None else max_turns,
+        max_input_tokens=max_input_tokens,
+        max_output_tokens=max_output_tokens,
+    )
+
+
 def _worker_subset(
     field: WorkerField, requested: tuple[Contract, ...], granted: tuple[Contract, ...]
 ) -> None:
@@ -1208,6 +1408,44 @@ def _worker_environment(requested: EnvironmentSpec | None, granted: EnvironmentS
         raise WorkerSpecRefused("sandbox", "not_subset")
 
 
+def _with_root_model(
+    grant: AgentFleetGrant,
+    root: ModelRef,
+    *,
+    policy: TenantAccessPolicy,
+    fleet: FleetFacts,
+) -> tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]]:
+    """The root's own model is implicitly granted; every other ceiling still applies.
+
+    A granted backend for the root's provider carries it as is. Otherwise only the
+    provider's default per-caller selection is added, and only when tenant policy
+    already enables it. Provider budget lines, worker counts and deadlines are unchanged.
+    """
+    from daimon.core.channel_backend import check_backend
+    from mux.profiles import backend_selection
+
+    backends, models = grant.backends, grant.models
+    model = ModelRef(provider=root.provider, id=root.id)
+    if model in models:
+        return backends, models
+    if any(
+        backend.backend == model.provider and backend.model in (None, model.id)
+        for backend in backends
+    ):
+        return backends, (*models, model)
+    try:
+        selection = backend_selection(model.provider)
+        if selection.thread_mode != "per_caller" or selection.model not in (None, model.id):
+            return backends, models
+        check_backend(
+            ConfigRevision.create(fleet.root.channel, 1, selection),
+            enabled_backends=policy.enabled_backends,
+        )
+    except (DaimonError, InvalidConfig):
+        return backends, models
+    return (*backends, selection), (*models, model)
+
+
 def fleet_root_permissions(
     source: BackendAgent,
     admission: AdmissionGrant,
@@ -1279,6 +1517,7 @@ def fleet_root_permissions(
     duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
     deadline = min(grant.expires_at, now + timedelta(seconds=duration))
     limits = grant.limits.model_copy(update={"deadline": deadline})
+    backend_grants, models = _with_root_model(grant, spec.model, policy=policy, fleet=fleet)
     return freeze_root_permissions(
         WorkerPermissions(
             fleet=fleet,
@@ -1286,8 +1525,8 @@ def fleet_root_permissions(
             agent=admission.agent,
             spec=spec,
             base_system=spec.system or "",
-            backend_grants=grant.backends,
-            models=grant.models,
+            backend_grants=backend_grants,
+            models=models,
             limits=limits,
             resources=resources,
             environment=environment.spec,
@@ -1358,6 +1597,7 @@ def freeze_root_permissions(
             check_backend(
                 ConfigRevision.create(fleet.root.channel, 1, backend),
                 enabled_backends=policy.enabled_backends,
+                worker=True,
             )
     except (DaimonError, InvalidConfig):
         raise WorkerSpecRefused("backend", "unsupported") from None
@@ -1582,6 +1822,7 @@ def resolve_worker_spec(
         check_backend(
             ConfigRevision.create(fleet.root.channel, 1, selected),
             enabled_backends=policy.enabled_backends,
+            worker=True,
         )
     except DaimonError:
         raise WorkerSpecRefused("backend", "unsupported") from None

@@ -66,6 +66,8 @@ async def test_agent_reads_follow_member_location_and_preserve_admin_visibility(
             configuration_target_ma_agent_id="ag_shared",
             configuration_target_name="shared",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + dt.timedelta(minutes=-1 if origin_kind == "expired" else 10),
         )
@@ -178,6 +180,8 @@ async def test_agent_reads_withhold_setup_details_from_non_admin(
             configuration_target_ma_agent_id="ag_shared",
             configuration_target_name="shared",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + dt.timedelta(minutes=10),
         )
@@ -292,6 +296,8 @@ async def test_routing_explanation_hides_draft_targets_and_other_threads_from_me
             configuration_target_ma_agent_id="ag_draft",
             configuration_target_name="draft",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + dt.timedelta(minutes=10),
         )

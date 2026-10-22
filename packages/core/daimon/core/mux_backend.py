@@ -50,6 +50,10 @@ class TurnRuntime:
     materialize_worker: Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None = (
         field(default=None, kw_only=True)
     )
+    # Publishes a template row's counterpart for the admitted agent version, once.
+    materialize_root: Callable[[ProviderPreparationRequest], Awaitable[AgentRevision]] | None = (
+        field(default=None, kw_only=True)
+    )
 
 
 @dataclass(frozen=True)

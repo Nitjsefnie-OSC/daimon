@@ -54,6 +54,7 @@ from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.prepare import PreparedTurn, bind_session
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import (
     make_account,
     make_ledger_entry,
@@ -634,6 +635,7 @@ async def test_access_policy_and_protection_refuse_before_a_shared_thread_is_con
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="user-1",
             channel_id="chan-1",

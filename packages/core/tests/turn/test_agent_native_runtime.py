@@ -512,6 +512,12 @@ async def test_opaque_caller_resource_is_an_unproved_source_definition(native_re
     assert owned.wire.requests == [] and wire.requests == [] and posts == []
 
 
+ROOT_PROMPT_FILLER = (
+    "You are the team's assistant. Answer plainly, cite what you used, and say when "
+    "you are unsure. Keep private details private and follow the channel's rules. "
+) * 200
+
+
 @pytest.fixture
 async def explicit_worker_request(owned, monkeypatch, request):
     worker_token_caps = getattr(request, "param", False)
@@ -578,29 +584,45 @@ async def explicit_worker_request(owned, monkeypatch, request):
         base_system=owned.retained.agent.spec.system,
         limits=root.limits.model_copy(update={"deadline": request.now() + timedelta(seconds=20)}),
     )
-    worker = resolve_worker_spec(
-        root,
-        root.spec.model_copy(
-            update={
-                "declared_drops": (
-                    "memory",
-                    "sandbox",
-                    "skills",
-                    "mcp",
-                    "tools",
-                    "files",
-                    "repository",
-                )
-            }
-        ),
-        policy=POLICY,
-        now=request.now(),
-        limits=root.limits.model_copy(
+    if worker_token_caps == "derived":
+        # A real-size inherited root prompt, as staging's daimon-fleet root has (~24k chars).
+        large = (owned.retained.agent.spec.system + "\n\n" + ROOT_PROMPT_FILLER)[:24_000]
+        root = replace(root, spec=root.spec.model_copy(update={"system": large}), base_system=large)
+    worker_spec = root.spec.model_copy(
+        update={
+            "declared_drops": (
+                "memory",
+                "sandbox",
+                "skills",
+                "mcp",
+                "tools",
+                "files",
+                "repository",
+            )
+        }
+    )
+    limits = (
+        root.limits.model_copy(
             update={"max_input_tokens": 262144, "max_output_tokens": 65536, "max_turns": 1}
         )
-        if worker_token_caps
-        else None,
+        if worker_token_caps is True
+        else None
     )
+    worker = resolve_worker_spec(root, worker_spec, policy=POLICY, now=request.now(), limits=limits)
+    if worker_token_caps == "derived":
+        from daimon.core.neutral_resources import bounded_gemini_worker_tokens
+
+        # The plain-language spawn path: limits derived from the resolved prompt.
+        derived = bounded_gemini_worker_tokens(
+            worker.spec.system, worker.limits.budget_usd, model=worker.spec.model.id
+        )
+        worker = resolve_worker_spec(
+            root,
+            worker_spec,
+            policy=POLICY,
+            now=request.now(),
+            limits=worker.limits.model_copy(update={**derived, "max_turns": 1}),
+        )
     scope = worker.permissions.fleet.scope
     agent = await owned.resources.backend.agents.create(scope, worker.spec, key="restricted-worker")
     row = await owned.resources.catalog.put_agent(
@@ -1432,8 +1454,10 @@ async def claimed_worker_request(explicit_worker_request, monkeypatch, clone_sou
         root,
         fleet=replace(request.worker.permissions.fleet, depth=0, scope=owned.request.scope),
         agent_id=request.worker.permissions.agent_id,
-        spec=owned.retained.agent.spec,
-        base_system=owned.retained.agent.spec.system,
+        spec=owned.retained.agent.spec.model_copy(
+            update={"system": request.worker.permissions.base_system}
+        ),
+        base_system=request.worker.permissions.base_system,
         limits=request.worker.limits,
     )
     sm = request.deps.sessionmaker
@@ -1569,7 +1593,9 @@ async def claimed_worker_request(explicit_worker_request, monkeypatch, clone_sou
     def native(call):
         if call.url.path.endswith(":countTokens"):
             native_requests.append(call)
-            return httpx.Response(200, json={"totalTokens": 262144})
+            # The real count never exceeds the cap; a derived cap is sized above it.
+            cap = resolved.limits.max_input_tokens or 262144
+            return httpx.Response(200, json={"totalTokens": min(262144, cap)})
         assert (call.method, call.url.path) in {
             ("POST", "/v1beta/interactions"),
             ("GET", "/v1beta/interactions/worker-result"),

@@ -136,6 +136,8 @@ async def _caller(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
         )

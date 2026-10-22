@@ -1,7 +1,8 @@
 """Inline configuration and logical sessions over documented Interactions calls."""
 
 import asyncio
-from collections.abc import AsyncIterator, Callable, Sequence
+import random
+from collections.abc import AsyncIterator, Awaitable, Callable, Sequence
 from datetime import UTC, datetime, timedelta
 from typing import NoReturn
 from uuid import uuid4
@@ -42,11 +43,13 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini.bundles import inline_files, skill_sources, target_path, validate_targets
 from mux.drivers.gemini.mcp_auth import (
+    LEGACY_SERVER_NAME,
     GCSSecretResolver,
     MCPSecretResolver,
     authenticated_template,
     compile_mcp,
     model_request,
+    server_names,
     validate_intent,
 )
 from mux.drivers.gemini.normalize import OUTCOMES, actions, event, saved_events
@@ -74,10 +77,33 @@ from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore
 
 BASE_AGENT = "antigravity-preview-05-2026"
+INTERACTION_READ_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
+"""Bounded (at most ~15.5s, jittered) backoff for transient 5xx/network failures
+on interactions.get.
+
+The interaction was already accepted, so only the read is retried; nothing is
+re-created or resent. Callers bound the whole read with their own deadline.
+The backoff sleeps outside the storage transaction: holding the per-account
+lock for seconds would make sibling sessions on the account fail as busy.
+"""
 
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+def transient_read_failure(error: ProviderError) -> bool:
+    """Capacity, 5xx and network failures; 4xx and malformed replies stay final."""
+    return error.retryable and error.category in ("overloaded", "upstream", "transient_network")
+
+
+class TransientRead(ProviderError):
+    """A transient interactions.get failure, retried by `Base.retrying` after the
+    storage transaction has rolled back and released its lock."""
+
+    def __init__(self, error: ProviderError) -> None:
+        super().__init__(error.category, retryable=error.retryable, native_code=error.native_code)
+        self.error = error
 
 
 def refuse(*features: str) -> NoReturn:
@@ -227,10 +253,31 @@ class Base:
             raise OperationConflict(key)
         return prior[2]
 
+    async def retrying[T](self, attempt: Callable[[], Awaitable[T]]) -> T:
+        """Run `attempt` (which opens its own transaction) again after a transient read."""
+        for delay in INTERACTION_READ_RETRY_DELAYS_S:
+            try:
+                return await attempt()
+            except TransientRead:
+                pass
+            await asyncio.sleep(random.uniform(delay / 2, delay))
+        try:
+            return await attempt()
+        except TransientRead as exc:
+            error = exc.error
+            raise ProviderError(
+                error.category,
+                retryable=error.retryable,
+                native_code=f"{error.native_code or error.category}_read_retries_exhausted",
+            ) from error
+
     async def _get(self, record: SessionRecord, interaction: str) -> Object:
+        """Callers run inside `retrying`, so a transient failure leaves the lock first."""
         try:
             raw = await self._transport.get(interaction)
         except ProviderError as exc:
+            if transient_read_failure(exc):
+                raise TransientRead(exc) from exc
             if exc.category == "not_found":
                 raise ContinuityLost(
                     record.session.binding.id,
@@ -299,7 +346,13 @@ class Base:
                     now=now(),
                 )
                 self._append(record, (usage_event,))
-            normalized = saved_events(raw, record.session.ref, root=root, now=now())
+            normalized = saved_events(
+                raw,
+                record.session.ref,
+                root=root,
+                now=now(),
+                server_names=record.mcp_server_names,
+            )
             # A requires_action interaction and its result continuation share
             # one root. Only a terminal root snapshot completes it.
             self._append(record, normalized)
@@ -640,11 +693,15 @@ class GeminiSessions(Base):
                 agent.spec.model,
                 request,
                 max_input_tokens=self._max_input_tokens,
+                mcp_server_names=server_names(agent.spec.mcp_servers or ()),
             )
             records.creations[(*owner(scope), key)] = scope.principal_id, digest, id_
             return session
 
     async def retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
+        return await self.retrying(lambda: self._retrieve(scope, ref))
+
+    async def _retrieve(self, scope: Scope, ref: ResourceRef) -> Session:
         async with self._storage.transaction() as records:
             record = self._record(records, scope, ref)
             if record.current is not None:
@@ -798,6 +855,21 @@ class GeminiEvents(Base):
         key: str,
         expected_turn: str | None = None,
     ) -> SendReceipt:
+        # Every history read precedes begin_operation, so a retried attempt
+        # starts from a rolled-back transaction and can never dispatch twice.
+        return await self.retrying(
+            lambda: self._send(scope, session, events, key=key, expected_turn=expected_turn)
+        )
+
+    async def _send(
+        self,
+        scope: Scope,
+        session: ResourceRef,
+        events: Sequence[InputEvent],
+        *,
+        key: str,
+        expected_turn: str | None,
+    ) -> SendReceipt:
         self._check(scope, session, "session")
         if not events:
             raise ValueError("empty input")
@@ -813,9 +885,20 @@ class GeminiEvents(Base):
             expected = self._mcp_request(records, scope, record.spec)
             agent = records.agents[record.spec.agent.id]
             connections = agent.spec.mcp_servers or ()
-            validate_intent(
-                record.request, expected, connections, enabled=self._mcp_secrets is not None
-            )
+            try:
+                validate_intent(
+                    record.request, expected, connections, enabled=self._mcp_secrets is not None
+                )
+            except UnsupportedCapability as exc:
+                if exc.missing != (LEGACY_SERVER_NAME,):
+                    raise
+                raise ContinuityLost(
+                    record.session.binding.id,
+                    (
+                        "This Gemini conversation was saved with an MCP server name Gemini "
+                        "no longer accepts (mcp_server_name); start a new thread.",
+                    ),
+                ) from None
             prior = records.sends.get((*owner(scope), key))
             if prior is not None:
                 if prior[0] != scope.principal_id:
@@ -1127,6 +1210,9 @@ class GeminiEvents(Base):
             return page_values(tuple(self._record(records, scope, session).events.values()), page)
 
     async def reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
+        return await self.retrying(lambda: self._reconcile(scope, session))
+
+    async def _reconcile(self, scope: Scope, session: ResourceRef) -> ProjectionSnapshot:
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
             for interaction, root in record.interactions.items():
@@ -1199,17 +1285,20 @@ class GeminiEvents(Base):
             return StopObservation(
                 receipt_operation_id=receipt.operation_id, stopped=False, observed_at=now()
             )
+        try:
+            async with asyncio.timeout(max(0, (deadline - now()).total_seconds())):
+                return await self.retrying(lambda: self._observe_stop(scope, receipt))
+        except TimeoutError:
+            return StopObservation(
+                receipt_operation_id=receipt.operation_id, stopped=False, observed_at=now()
+            )
+
+    async def _observe_stop(self, scope: Scope, receipt: CancelReceipt) -> StopObservation:
         async with self._storage.transaction() as records:
             record = self._record(records, scope, receipt.session)
             if record.root != receipt.turn_id or record.current is None:
                 raise ProviderError("conflict", retryable=False)
-            try:
-                async with asyncio.timeout(max(0, (deadline - now()).total_seconds())):
-                    raw = await self._get(record, record.current)
-            except TimeoutError:
-                return StopObservation(
-                    receipt_operation_id=receipt.operation_id, stopped=False, observed_at=now()
-                )
+            raw = await self._get(record, record.current)
             self._observe(record, raw, receipt.turn_id)
             outcome = OUTCOMES.get(string(raw["status"]))
             return StopObservation(

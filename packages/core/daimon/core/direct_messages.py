@@ -52,6 +52,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -127,6 +128,11 @@ def bounded_turns(turns: Sequence[TranscriptTurn]) -> list[TranscriptTurn]:
 SEALED_SOURCE_MESSAGE = (
     "Only conversations inside this channel can read it, so this one can't move to a DM. "
     "Keep working here."
+)
+
+
+SHARED_SOURCE_MESSAGE = (
+    "This channel is shared with another organisation, so it can't move to a DM. Keep working here."
 )
 
 
@@ -213,10 +219,12 @@ def require_unsealed_source(admission: Admission) -> None:
 
     A DM sits outside the seal: copying the channel's recent messages into it
     would carry sealed content into a conversation that can reach unsealed
-    channels.
+    channels. A channel shared with another organisation is refused the same way.
     """
     if admission.source_sealed:
         raise UserFacingError(SEALED_SOURCE_MESSAGE)
+    if admission.source_shared:
+        raise UserFacingError(SHARED_SOURCE_MESSAGE)
 
 
 async def start_dm(
@@ -379,6 +387,7 @@ async def reply_to_dm(
         admission = await admit(
             deps,
             tenant_id=conversation.tenant_id,
+            requester_org=RequesterOrg.HOST,
             platform=platform,
             external_user_id=external_user_id,
             channel_id=conversation.channel_id,
@@ -455,6 +464,8 @@ async def reply_to_dm(
                 responder_ma_agent_id=admission.agent.id,
                 responder_name=admission.agent.name,
                 role=role,
+                sender_foreign=admission.hold is not None and admission.hold.client,
+                shared_channel=admission.shared_channel,
             ) as origin,
         ):
             user_message = f"{render_turn_origin(origin)}\n{context}\n\n{text}"

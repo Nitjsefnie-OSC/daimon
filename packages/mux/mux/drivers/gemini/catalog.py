@@ -45,6 +45,7 @@ def native_definition(
     """Keep an explicit native model/tools list and every concrete bundle byte."""
     # Persistent native definitions cannot safely store per-session credentials.
     if spec.model.id not in (
+        "gemini-4-argon",
         "gemini-3.8-flash",
         "gemini-3.7-flash",
         "gemini-3.6-flash",

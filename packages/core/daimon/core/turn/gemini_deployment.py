@@ -48,6 +48,7 @@ from daimon.core.turn.runtime_manifest import (
     SourceCapabilities,
     fixed_plan_origin_allowed,
     materialize_counterpart,
+    materialize_root_counterpart,
     read_counterpart,
     represented_source,
     select_runtime_manifest,
@@ -69,7 +70,9 @@ from mux.drivers.gemini import (
     verify_retained_deployments,
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.profiles import selectable_models
 from mux.profiles.gemini import (
+    ARGON_MODEL,
     INLINE_REUSE,
     WORKER_MAX_RUNTIME_S,
     WORKER_MAX_TOTAL_TOKENS,
@@ -139,6 +142,11 @@ class GeminiPlan(BaseModel):
     worker_materialization: bool = Field(
         default=False, strict=True, exclude_if=lambda value: not value
     )
+    # A tenant-wide agent template: each admitted agent version's counterpart is
+    # published on its first turn (`materialize_root_counterpart`).
+    root_materialization: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: not value
+    )
     max_output_tokens: Annotated[int, Field(gt=0, le=65_536, strict=True)] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -169,14 +177,16 @@ class GeminiPlan(BaseModel):
         if self.config_digest is None and self.configuration_grant is None:
             raise ValueError("a deployment requires exact or bounded configuration authorization")
         validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
+        if self.root_materialization and self.source_capabilities is not None:
+            raise ValueError("an agent template carries no operator capability inputs")
         if self.source_capabilities is not None:
             if (
                 self.worker_materialization
                 or self.max_output_tokens is not None
                 or self.mcp_credential_file is None
                 or not self.mcp_credential_file.is_absolute()
-                or self.source_capabilities.model
-                != ModelRef(provider=INLINE_REUSE.provider, id=FLASH_PRIMARY)
+                or self.source_capabilities.model.provider != INLINE_REUSE.provider
+                or self.source_capabilities.model.id not in selectable_models(INLINE_REUSE.provider)
                 or tuple(item.target.id for item in self.source_capabilities.skills)
                 != self.skill_ids
                 or self.gcs_credential_file is None
@@ -321,8 +331,12 @@ class GeminiPlan(BaseModel):
             or self.worker_materialization
             or self.max_output_tokens is not None
             or revision.profile != self.profile
-            or revision.model != FLASH_PRIMARY
-            or target.model != ModelRef(provider=INLINE_REUSE.provider, id=FLASH_PRIMARY)
+            or revision.model not in selectable_models(INLINE_REUSE.provider)
+            or target.model != ModelRef(provider=INLINE_REUSE.provider, id=revision.model)
+            or (
+                self.source_capabilities is not None
+                and self.source_capabilities.model.id != revision.model
+            )
             or "memory" not in target.declared_drops
             or target.name != source.effective_spec.name
             or not source_instructions_preserved(source.effective_spec.system, target.system)
@@ -421,7 +435,16 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
     if (
         revision is None
         or revision.model
-        not in ((FLASH_PRIMARY, WORKER_MODEL) if request.worker is not None else (FLASH_PRIMARY,))
+        not in (
+            (FLASH_PRIMARY, WORKER_MODEL)
+            if request.worker is not None
+            else selectable_models(INLINE_REUSE.provider)
+        )
+        # Argon has no checked-in price after its intro tariff; never run it unpriced.
+        or (
+            revision.model == ARGON_MODEL
+            and (INLINE_REUSE.provider, ARGON_MODEL) not in pricing.provider_prices(PROFILE)
+        )
         or request.deps.state_store is None
         or (
             request.worker is not None
@@ -429,6 +452,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         )
     ):
         raise AdmissionDenied(reason="backend_unsupported")
+    assert revision.model is not None
     plan = load_gemini_deployment(request)
     if plan.storage_backend == "sqlite" and (
         os.environ.get("K_SERVICE") or os.environ.get("CLOUD_RUN_JOB")
@@ -444,7 +468,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         raise AdmissionDenied(reason="backend_unsupported")
     agent = AgentSpec(
         name=plan.agent_name,
-        model=ModelRef(provider="gemini", id=FLASH_PRIMARY),
+        model=ModelRef(provider="gemini", id=revision.model),
         system=plan.system,
         tools=plan.tools,
     )
@@ -619,6 +643,11 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             catalog_adapter=backend.catalog_adapter,
         )
 
+    async def materialize_root(preparation: ProviderPreparationRequest) -> AgentRevision:
+        return await materialize_root_counterpart(
+            plan, preparation, resources=resources(preparation)
+        )
+
     async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
         async def host(_: TurnPersistence, worker: ResolvedWorkerSpec) -> NeutralResourceHost:
             if plan.worker_deployment(worker, revision) != deployment:
@@ -651,6 +680,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         transport_factory=transport,
         read_agent_counterpart=read,
         materialize_worker=materialize if plan.worker_materialization else None,
+        materialize_root=materialize_root if plan.root_materialization else None,
         journal=GeminiJournal(
             records,
             request.deps.state_store,

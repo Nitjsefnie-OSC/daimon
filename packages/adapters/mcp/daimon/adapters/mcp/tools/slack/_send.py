@@ -140,12 +140,18 @@ def _slack_error_code(err: SlackApiError) -> str:
 
 
 async def _validate_channel_access(
-    client: AsyncWebClient, *, channel_id: str, requester_id: str
+    client: AsyncWebClient, *, channel_id: str, requester_id: str, is_client: bool = False
 ) -> None:
     try:
         info = await client.conversations_info(channel=channel_id)  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
         channel = cast(dict[str, Any], info["channel"])
-        await check_channel_access(client, channel=channel, user_id=requester_id, allow_own_im=True)
+        await check_channel_access(
+            client,
+            channel=channel,
+            user_id=requester_id,
+            allow_own_im=True,
+            is_client=is_client,
+        )
     except SlackApiError as err:
         mapped = map_slack_api_error(err)
         if mapped is None:
@@ -395,7 +401,9 @@ async def _slack_send_message_impl(  # pyright: ignore[reportUnusedFunction]  # 
             raise ToolError(f"attachment exceeds {MAX_BYTES_PER_FILE // (1024 * 1024)} MiB")
     client = await slack_web_client(runtime, team_id=team_id)
 
-    await _validate_channel_access(client, channel_id=target_channel_id, requester_id=requester_id)
+    await _validate_channel_access(
+        client, channel_id=target_channel_id, requester_id=requester_id, is_client=auth.client
+    )
     await require_channel_writable(runtime, auth, channel_id=target_channel_id)
     if thread_ts is not None:
         await _validate_thread_target(client, channel_id=target_channel_id, thread_ts=thread_ts)
@@ -495,7 +503,9 @@ async def _slack_create_thread_impl(  # pyright: ignore[reportUnusedFunction]  #
     team_id = _require_team_id(auth)
     client = await slack_web_client(runtime, team_id=team_id)
 
-    await _validate_channel_access(client, channel_id=target_channel_id, requester_id=requester_id)
+    await _validate_channel_access(
+        client, channel_id=target_channel_id, requester_id=requester_id, is_client=auth.client
+    )
     await require_channel_writable(runtime, auth, channel_id=target_channel_id)
 
     resp = await _post_message(
