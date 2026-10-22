@@ -263,25 +263,68 @@ def mcp_request_tokens(request: Mapping[str, JsonValue]) -> set[RedactedCredenti
     return found
 
 
+def _mcp_echo_refused(path: str, reason: str, code: str = "mcp_header_echo") -> ProviderError:
+    """A refusal naming where and why (`native_param`, `native_message`), never the value."""
+    return ProviderError(
+        "permission", retryable=False, native_code=code, native_param=path, native_message=reason
+    )
+
+
+def _secret_path(value: JsonValue, secret: str, path: str = "$") -> str | None:
+    """The first key path whose value contains `secret`; the path only, never the value."""
+    if isinstance(value, str):
+        return path if secret in value else None
+    if isinstance(value, dict):
+        for key, child in value.items():
+            # Only schema keys are named; any other (model-chosen) key renders as "<key>".
+            name = key if key in _SCHEMA_KEYS and secret not in key else "<key>"
+            if secret in key:
+                return f"{path}.<key>"
+            found = _secret_path(child, secret, f"{path}.{name}")
+            if found is not None:
+                return found
+    if isinstance(value, list):
+        for index, child in enumerate(value):
+            found = _secret_path(child, secret, f"{path}[{index}]")
+            if found is not None:
+                return found
+    return None
+
+
 def scrub_mcp_echo(value: Object, tokens: set[RedactedCredential]) -> Object:
     """Remove the echo of our own MCP server credential header, and nothing else.
 
     If an interaction echoes its request tools, our `mcp_server` entry may carry
-    the Authorization header this transport dispatched. Only that exact location
-    is cleaned: `tools[i].headers` of an `mcp_server` tool on the interaction or
-    on a stream event's `interaction`, equal to a header we sent. Any other
-    header refuses.
+    the Authorization header this transport dispatched (operator, pinned and
+    template turns alike). Only that exact location is cleaned:
+    `tools[i].headers` of an `mcp_server` tool on the interaction or on a stream
+    event's `interaction`, equal to a header we sent, either as that object or
+    as a list of exactly one such object (the shape the storage echo took).
+    Any other shape, key, casing or value refuses with its key path.
     """
     result = copy.deepcopy(value)
     ours = [{"Authorization": "Bearer " + token} for token in tokens]
     nested = result.get("interaction")
-    for owner in (result, nested) if isinstance(nested, dict) else (result,):
+    owners = [("$", result)] + ([("$.interaction", nested)] if isinstance(nested, dict) else [])
+    for base, owner in owners:
         tools = owner.get("tools")
-        for tool in tools if isinstance(tools, list) else []:
+        for index, tool in enumerate(tools if isinstance(tools, list) else []):
             if not isinstance(tool, dict) or "headers" not in tool:
                 continue
-            if tool.get("type") != "mcp_server" or tool["headers"] not in ours:
-                raise ProviderError("permission", retryable=False, native_code="mcp_header_echo")
+            path = f"{base}.tools[{index}].headers"
+            headers = tool["headers"]
+            if tool.get("type") != "mcp_server":
+                raise _mcp_echo_refused(path, "headers_on_non_mcp_tool")
+            if isinstance(headers, list):
+                if len(headers) != 1:
+                    raise _mcp_echo_refused(path, "header_list_not_single")
+                headers = headers[0]
+            if not isinstance(headers, dict):
+                raise _mcp_echo_refused(path, "header_shape")
+            if set(headers) != {"Authorization"}:
+                raise _mcp_echo_refused(path, "header_keys")
+            if headers not in ours:
+                raise _mcp_echo_refused(path, "header_value_not_dispatched")
             del tool["headers"]
     return result
 
@@ -312,8 +355,11 @@ def checked_storage_response(
     if any(contains_secret(value, t) or t.encode() in encoded for t in known):
         log.warning("gemini mount token echo refused: reason=token_outside_mount_location")
         raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
-    if any(contains_secret(value, t) or t.encode() in encoded for t in mcp):
-        raise ProviderError("permission", retryable=False, native_code="mcp_token_echo")
+    for token in mcp:
+        if contains_secret(value, token) or token.encode() in encoded:
+            raise _mcp_echo_refused(
+                _secret_path(value, token) or "$", "token_outside_header", code="mcp_token_echo"
+            )
     if network_transform_present(value):
         _refuse_transform(",".join(transform_paths(value)), "outside_mount_location")
     return value

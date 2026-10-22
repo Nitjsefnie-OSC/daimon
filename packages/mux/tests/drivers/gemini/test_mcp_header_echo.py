@@ -148,3 +148,63 @@ async def test_a_dispatched_mcp_credential_protects_create_and_later_reads(
         read = await gemini.get("native")
         assert "headers" not in read["tools"][0]  # pyright: ignore[reportIndexIssue,reportArgumentType]
     assert TOKEN.encode() in sent[0], "the credential is sent to the provider"
+
+
+def test_a_single_element_header_list_is_our_echo_too() -> None:
+    body = completed(tools=[mcp_tool([OURS])])
+    clean = checked_storage_response(body, protected=False, mcp_tokens={TOKEN})
+    assert "headers" not in clean["tools"][0]  # pyright: ignore[reportIndexIssue,reportArgumentType]
+
+
+@pytest.mark.parametrize(
+    ("headers", "reason"),
+    [
+        ([OURS, OURS], "header_list_not_single"),
+        ([], "header_list_not_single"),
+        ({"authorization": "Bearer " + TOKEN}, "header_keys"),
+        ([{"Authorization": "Bearer " + TOKEN, "X": "1"}], "header_keys"),
+        ("Bearer " + TOKEN, "header_shape"),
+        ({"Authorization": "Bearer someone-else"}, "header_value_not_dispatched"),
+    ],
+)
+def test_every_other_shape_refuses_with_its_path_and_never_the_value(headers, reason) -> None:
+    event = {
+        "event_type": "interaction.completed",
+        "interaction": completed(tools=[mcp_tool(headers)]),
+    }
+    with pytest.raises(ProviderError) as refused:
+        checked_storage_response(event, protected=False, mcp_tokens={TOKEN})
+    error = refused.value
+    assert (error.native_code, error.native_message) == ("mcp_header_echo", reason)
+    assert error.native_param == "$.interaction.tools[0].headers"
+    assert all(TOKEN not in str(part) for part in (error, error.native_param, error.native_message))
+
+
+def test_a_token_outside_the_header_names_its_path_only() -> None:
+    with pytest.raises(ProviderError) as refused:
+        checked_storage_response(
+            completed(text="leaked Bearer " + TOKEN), protected=False, mcp_tokens={TOKEN}
+        )
+    assert refused.value.native_code == "mcp_token_echo"
+    assert refused.value.native_param == "$.steps[0].content[0].text"
+    assert refused.value.native_message == "token_outside_header"
+
+
+def test_a_pinned_full_source_echo_scrubs_mount_and_mcp_together() -> None:
+    """Operator/pinned (F2-G) requests carry both credentials through the same transport."""
+    mount = RedactedCredential("offline-mount-token")
+    body = completed(tools=[mcp_tool([OURS])])
+    body["environment"] = {
+        "type": "remote",
+        "network": {
+            "allowlist": [
+                {
+                    "domain": "storage.googleapis.com",
+                    "transform": {"Authorization": "Bearer " + mount},
+                }
+            ]
+        },
+    }
+    clean = checked_storage_response(body, protected=True, tokens={mount}, mcp_tokens={TOKEN})
+    encoded = json.dumps(clean)
+    assert TOKEN not in encoded and mount not in encoded
