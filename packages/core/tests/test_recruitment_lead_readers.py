@@ -90,6 +90,11 @@ async def test_native_lead_panel_refuses_before_configuration_or_rows():
         )
     guild = SimpleNamespace(id=101, fetch_channel=AsyncMock(return_value=origin))
     assert await GatewayNativeLeadPermissions(guild, MagicMock(), policy()).channel("20") is None
+    from daimon.adapters.mcp.tools.lead_intake import McpNativeLeadPermissions
+
+    member = SimpleNamespace(guild=SimpleNamespace(id=101))
+    client = SimpleNamespace(fetch_channel=AsyncMock(return_value=origin))
+    assert await McpNativeLeadPermissions(client, member, policy()).channel("20") is None
     store.configuration.assert_not_awaited()
 
 

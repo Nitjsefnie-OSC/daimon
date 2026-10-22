@@ -101,10 +101,10 @@ class HttpIntakePorts:
             guild_id = str(channel.get("guild_id", ""))
             parent = channel.get("parent_id")
             parent_id = (
-                str(parent)
-                if parent
-                else ""
+                ""
                 if channel.get("type") in {0, 2, 4, 5, 13, 15, 16}
+                else str(parent)
+                if parent and channel.get("type") in {10, 11, 12}
                 else None
             )
             if not guild_id or self.recruitment.is_recruitment_channel(

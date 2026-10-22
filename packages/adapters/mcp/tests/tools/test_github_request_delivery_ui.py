@@ -15,6 +15,7 @@ from daimon.adapters.mcp.tools.github_request_delivery import (
     _discord_view,
     _slack_blocks,
 )
+from daimon.core.config import RecruitmentSettings
 from daimon.core.github_request_cards import RequestCard
 from daimon.core.stores.github_access_requests import request_access
 from daimon.testing.factories import make_account, make_tenant
@@ -115,7 +116,9 @@ async def test_request_card_stays_at_origin_without_dm(
         )
     runtime = SimpleNamespace(
         session_factory=committing_sessionmaker,
-        settings=SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("token"))),
+        settings=SimpleNamespace(
+            recruitment=RecruitmentSettings(), discord=SimpleNamespace(bot_token=SecretStr("token"))
+        ),
     )
     card = RequestCard(
         "Let ResearchBot use private/repo?\nCan: Read and write.",
@@ -216,7 +219,9 @@ async def test_discord_requester_status_only_neutralizes_repo_names(
     monkeypatch.setattr(delivery_module, "rest_client", rest_client)
     runtime = SimpleNamespace(
         session_factory=committing_sessionmaker,
-        settings=SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("token"))),
+        settings=SimpleNamespace(
+            recruitment=RecruitmentSettings(), discord=SimpleNamespace(bot_token=SecretStr("token"))
+        ),
     )
     assert await delivery_module.deliver_private_request_card(
         runtime,
@@ -261,7 +266,9 @@ async def test_shared_admin_card_is_neutral_and_updates_once(
         )
     runtime = SimpleNamespace(
         session_factory=committing_sessionmaker,
-        settings=SimpleNamespace(discord=SimpleNamespace(bot_token=SecretStr("token"))),
+        settings=SimpleNamespace(
+            recruitment=RecruitmentSettings(), discord=SimpleNamespace(bot_token=SecretStr("token"))
+        ),
     )
     if platform == "discord":
 
