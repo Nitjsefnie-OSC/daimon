@@ -261,6 +261,14 @@ class HostFleetToolService:
             agent = task_worker_spec(parent, role=role, task=task, model=model)
         providers: list[Provider] | None = None
         if planned_models is not None:
+            granted = {model.id for model in (*parent.models, parent.spec.model)}
+            unknown = sorted(set(planned_models) - granted)
+            if unknown:
+                raise ToolError(
+                    f"planned_models names a model the fleet grant does not allow: {unknown[0]}."
+                )
+            if planned_workers is not None and planned_workers < len(planned_models):
+                raise ToolError("planned_workers is smaller than the number of planned_models.")
             providers = planned_providers(parent, planned_models)
             planned_workers = len(providers) if planned_workers is None else planned_workers
         provider = (

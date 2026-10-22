@@ -1193,7 +1193,7 @@ async def test_planned_models_give_each_provider_its_own_share() -> None:
                 "planned_models": plan,
             },
         )
-        with pytest.raises(ToolError, match="backend: not_subset"):
+        with pytest.raises(ToolError, match="does not allow: gemini-3.8-pro"):
             await client.call_tool(
                 "fleet_spawn",
                 {
@@ -1201,6 +1201,17 @@ async def test_planned_models_give_each_provider_its_own_share() -> None:
                     "role": "W2",
                     "task": "Go.",
                     "planned_models": [*plan, "gemini-3.8-pro"],
+                },
+            )
+        with pytest.raises(ToolError, match="planned_workers is smaller"):
+            await client.call_tool(
+                "fleet_spawn",
+                {
+                    "operation_key": "W3",
+                    "role": "W3",
+                    "task": "Go.",
+                    "planned_models": plan,
+                    "planned_workers": 1,
                 },
             )
     # Run $1 over the 2 planned workers; the OpenAI line ($0.50) is not split.

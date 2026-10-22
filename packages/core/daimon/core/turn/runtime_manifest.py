@@ -2616,6 +2616,23 @@ def _matching_rows(
     """`profile` and `tenant_id` are always exact. The other scope fields are
     exact-matched first; `allow_wildcard` additionally accepts `_WILDCARD` rows
     on those fields only — the caller tries exact-only before falling back."""
+    return _rows_for(
+        rows,
+        revision,
+        tenant_id=request.scope.tenant_id,
+        account_id=request.scope.account_id,
+        allow_wildcard=allow_wildcard,
+    )
+
+
+def _rows_for(
+    rows: list[dict[str, JsonValue]],
+    revision: ConfigRevision,
+    *,
+    tenant_id: str,
+    account_id: str,
+    allow_wildcard: bool,
+) -> list[dict[str, JsonValue]]:
 
     def field_matches(row: dict[str, JsonValue], field: str, actual: object) -> bool:
         value = row.get(field)
@@ -2627,10 +2644,10 @@ def _matching_rows(
         row
         for row in rows
         if row.get("profile") == revision.profile
-        and row.get("tenant_id") == request.scope.tenant_id
+        and row.get("tenant_id") == tenant_id
         and field_matches(row, "platform", revision.channel.platform)
         and field_matches(row, "channel_id", revision.channel.channel_id)
-        and field_matches(row, "account_id", request.scope.account_id)
+        and field_matches(row, "account_id", account_id)
         and manifest_configuration_matches(row, revision)
     ]
 
@@ -2638,11 +2655,11 @@ def _matching_rows(
 def manifest_hold_usd(
     revision: ConfigRevision, *, tenant_id: str, account_id: str
 ) -> Decimal | None:
-    """The smallest per-turn hold of any installed row that could serve this configuration.
+    """The per-turn hold of the row `select_runtime_manifest` would select, if any.
 
-    Rows match as `select_runtime_manifest` matches them, exact or wildcard; taking
-    the smallest hold is the conservative bound when several could apply. None when no
-    manifest is installed, unreadable, or no row with a hold matches.
+    Exact rows first, then the most specific wildcard row, as selection does: a
+    channel's own row wins over a tenant-wide "*" row. None when no manifest is
+    installed or readable, no single row is selected, or it names no valid hold.
     """
     manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
     if not manifest_path:
@@ -2653,31 +2670,21 @@ def manifest_hold_usd(
         if len(raw) > _MAX_BYTES:
             return None
         rows = _ROWS.validate_json(raw)
-    except (OSError, ValidationError):
+        selected = _rows_for(
+            rows, revision, tenant_id=tenant_id, account_id=account_id, allow_wildcard=False
+        )
+        if not selected:
+            selected = _most_specific(
+                _rows_for(
+                    rows, revision, tenant_id=tenant_id, account_id=account_id, allow_wildcard=True
+                )
+            )
+        if len(selected) != 1:
+            return None
+        hold = Decimal(str(selected[0]["hold_usd"]))
+    except (OSError, ValidationError, KeyError, ArithmeticError, ValueError):
         return None
-
-    def matches(row: dict[str, JsonValue], field: str, actual: str) -> bool:
-        return row.get(field) in (actual, _WILDCARD)
-
-    holds: list[Decimal] = []
-    for row in rows:
-        if not (
-            row.get("profile") == revision.profile
-            and row.get("tenant_id") == tenant_id
-            and matches(row, "platform", revision.channel.platform)
-            and matches(row, "channel_id", revision.channel.channel_id)
-            and matches(row, "account_id", account_id)
-        ):
-            continue
-        try:
-            if not manifest_configuration_matches(row, revision):
-                continue
-            hold = Decimal(str(row["hold_usd"]))
-        except (KeyError, ArithmeticError, ValidationError, ValueError):
-            continue
-        if hold.is_finite() and hold > 0:
-            holds.append(hold)
-    return min(holds) if holds else None
+    return hold if hold.is_finite() and hold > 0 else None
 
 
 def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:

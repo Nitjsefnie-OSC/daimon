@@ -1465,13 +1465,12 @@ def test_bounded_gemini_tokens_count_the_trigger_and_respect_the_hold():
     )
 
 
-def test_manifest_hold_is_the_smallest_matching_rows_hold(tmp_path, monkeypatch):
+def test_manifest_hold_is_the_row_runtime_selection_would_pick(tmp_path, monkeypatch):
+    """Since D3 a tenant-wide "*" Gemini row sits next to #fleet-test's own rows."""
     from daimon.core.turn.runtime_manifest import manifest_hold_usd
     from mux.contracts.config import ConfigRevision
 
-    channel = ChannelRef(tenant_id="tenant", platform="discord", channel_id="chan")
     backend = backend_selection("gemini").model_copy(update={"model": "gemini-3.8-flash"})
-    revision = ConfigRevision.create(channel, 1, backend)
     grant = {
         "profiles": [backend.profile],
         "models": ["gemini-3.8-flash"],
@@ -1479,12 +1478,16 @@ def test_manifest_hold_is_the_smallest_matching_rows_hold(tmp_path, monkeypatch)
         "requires": {},
     }
 
+    def revision(channel_id):
+        channel = ChannelRef(tenant_id="tenant", platform="discord", channel_id=channel_id)
+        return ConfigRevision.create(channel, 1, backend)
+
     def row(**changes):
         base = {
             "profile": backend.profile,
             "tenant_id": "tenant",
             "platform": "discord",
-            "channel_id": "chan",
+            "channel_id": "fleet-test",
             "account_id": "*",
             "configuration_grant": grant,
             "hold_usd": "0.49",
@@ -1492,31 +1495,43 @@ def test_manifest_hold_is_the_smallest_matching_rows_hold(tmp_path, monkeypatch)
         return base | changes
 
     path = tmp_path / "runtime.json"
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+
+    def hold(channel_id, account_id="acct"):
+        return manifest_hold_usd(revision(channel_id), tenant_id="tenant", account_id=account_id)
+
     path.write_text(
         json.dumps(
             [
                 row(),
-                row(channel_id="*", hold_usd="0.30"),
-                row(channel_id="other", hold_usd="0.01"),
-                row(tenant_id="other", hold_usd="0.02"),
+                row(platform="*", channel_id="*", hold_usd="0.25"),
+                row(tenant_id="other", hold_usd="0.01"),
             ]
         )
     )
-    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
-    assert manifest_hold_usd(revision, tenant_id="tenant", account_id="acct") == Decimal("0.30")
+    # The channel's own row wins over the tenant-wide default, as selection does.
+    assert hold("fleet-test") == Decimal("0.49")
+    assert hold("elsewhere") == Decimal("0.25")
+    # Two rows naming different fields are ambiguous: selection refuses, so no hold.
+    path.write_text(json.dumps([row(), row(channel_id="*", account_id="acct", hold_usd="0.10")]))
+    assert hold("fleet-test") is None
+    assert hold("fleet-test", account_id="someone") == Decimal("0.49")
     monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
-    assert manifest_hold_usd(revision, tenant_id="tenant", account_id="acct") is None
+    assert hold("fleet-test") is None
 
 
+@pytest.mark.parametrize("reviewer", [False, True])
 @pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
 async def test_fleet_r9_plain_gemini_spawn_admits_the_derived_envelope_end_to_end(
-    captured, tmp_path, monkeypatch
+    captured, tmp_path, monkeypatch, reviewer
 ):
     """Through FleetOrchestrator.spawn: the admitted worker carries the derived envelope,
     capped by the channel's manifest hold."""
+    from types import SimpleNamespace
     from unittest.mock import create_autospec
+    from uuid import uuid4
 
-    from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
+    from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, worker_trigger
     from daimon.core.neutral_resources import gemini_worker_cost_usd, task_worker_spec
     from mux.contracts.config import BackendConfig
 
@@ -1561,8 +1576,37 @@ async def test_fleet_r9_plain_gemini_spawn_admits_the_derived_envelope_end_to_en
         raise Admitted
 
     ports.admit.side_effect = admit
+    owner = FleetOrchestrator(ports)
+    triggers = []
+    sized = owner._bounded_gemini  # pyright: ignore[reportPrivateUsage]
+
+    def spy(*args, trigger, **kwargs):
+        triggers.append(trigger)
+        return sized(*args, trigger=trigger, **kwargs)
+
+    monkeypatch.setattr(owner, "_bounded_gemini", spy)
+    reviewed_id = None
+    if reviewer:
+        # A large reviewed result rides in the reviewer's trigger.
+        reviewed_id = uuid4()
+        target = SimpleNamespace(
+            id=reviewed_id,
+            reviewer_of=None,
+            backend="openai",
+            result=SimpleNamespace(digest="reviewed-digest"),
+        )
+        reviewed = SimpleNamespace(payload={"content": [{"text": "x" * 40_000}]})
+
+        async def snapshot(*args):
+            return SimpleNamespace(), (target,)
+
+        async def result(*args):
+            return reviewed
+
+        monkeypatch.setattr(owner, "read_snapshot", snapshot)
+        monkeypatch.setattr(owner, "_result", result)
     with pytest.raises(Admitted):
-        await FleetOrchestrator(ports).spawn(
+        await owner.spawn(
             root,
             policy,
             now=NOW,
@@ -1572,9 +1616,16 @@ async def test_fleet_r9_plain_gemini_spawn_admits_the_derived_envelope_end_to_en
             limits=root.limits.model_copy(update={"max_turns": 1}),
             agent=task_worker_spec(root, role="W3", task="Compare X and Y.", model=flash.id),
             fill_token_limits=True,
+            reviewer_of=reviewed_id,
         )
     (resolved,) = admitted
+    (trigger,) = triggers
+    # The trigger the envelope was sized for is exactly what dispatch will send.
+    dispatched = worker_trigger(ports.admit.await_args.kwargs["reviewed_result"])
+    assert trigger == dispatched and (reviewer == ("x" * 40_000 in dispatched))
     limits = resolved.limits
-    assert limits.max_input_tokens >= len(resolved.spec.system.encode())
+    assert limits.max_input_tokens == (
+        len(resolved.spec.system.encode()) + len(dispatched.encode()) + 4096
+    )
     worst = gemini_worker_cost_usd(flash.id, limits.max_input_tokens, limits.max_output_tokens)
     assert worst <= Decimal("0.12") <= limits.budget_usd
