@@ -9,9 +9,30 @@ recorded by the tool that created the agent; only an admin assigns or clears.
 from __future__ import annotations
 
 import uuid
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 
 from daimon.core.stores import agent_owners, security_audit
+from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+
+@asynccontextmanager
+async def agent_name_lock(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant_id: uuid.UUID, name: str
+) -> AsyncIterator[None]:
+    """Serialize creating agents of one name in a tenant, until the block ends.
+
+    The name check and the create are separate provider calls; holding this
+    across both means a second creator of the same name sees the first agent
+    and is refused, rather than both creating or one rewriting the other.
+    """
+    async with sessionmaker() as session, session.begin():
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"agent_name:{tenant_id}:{name}"},
+        )
+        yield
 
 
 async def record_agent_creator(

@@ -209,7 +209,11 @@ or the account an admin named with `daimon agents owner set`; an agent has
 at most one. Agents created before owners existed have none and stay
 admin-only. The owner may change the agent's instructions, model,
 description, tools, skills, MCP server attachments, model provider, its
-thread mode and required capabilities, and its fleet. Ownership is read again
+required capabilities, and its fleet. Making the agent share threads stays
+with admins, because it applies in every channel the agent answers in that
+doesn't pin a backend; the owner may keep an admin's choice or return to one
+thread per person. If two people create agents of the same name at once, one
+is refused; nobody becomes the owner of an agent someone else created. Ownership is read again
 when a change is written and when a confirmation card is clicked, so a
 change of owner applies at once. An agent key or a requester from another
 organisation is never the owner.

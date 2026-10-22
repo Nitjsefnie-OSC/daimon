@@ -647,3 +647,30 @@ async def test_chat_states_the_agents_thread_mode_and_requirements(active_chat):
     revision = await service.current(source)
     assert revision.backend == "anthropic" and revision.thread_mode == "shared"
     assert set(revision.requires or {}) == {"tool_loop"}
+
+
+async def test_an_owner_may_not_ask_to_share_threads(active_chat):
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_owners
+
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    async with runtime.session_factory.begin() as session:
+        await agent_owners.set_owner(
+            session,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id="agent_owned"),
+            owner_account_id=auth.account_id,
+            source="admin_assigned",
+        )
+    owner = replace(auth, role=Role.USER, is_admin=False)
+    gate()
+    agent()
+    with pytest.raises(ToolError, match="Sharing threads applies in every channel"):
+        await _request_agent_backend_switch_impl(
+            runtime,
+            owner,
+            agent_name="Researcher",
+            target_backend="anthropic",
+            origin_context_id=str(origin.id),
+            thread_mode="shared",
+        )

@@ -421,6 +421,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "fleet_provider_limits_exceed_budget",
         "no_previous_revision",
         "owner_or_admin_required",
+        "admin_required_for_shared_threads",
         "profile_not_selectable",
         "channel_pin_lacks_capability",
         "re_confirm",
@@ -709,22 +710,23 @@ class AgentBackendService:
 
     async def _authorize_edit(
         self, session: AsyncSession, agent: BackendAgent, actor: BackendActor
-    ) -> None:
+    ) -> bool:
         """Owner or current server admin, decided inside the write's transaction.
 
         The owner row is read locked, so an owner change cannot interleave with
         a write it no longer allows. An agent key or a client is never an owner.
         Tenant-wide settings (the provider allowlist) stay admin-only: they use
-        `_actor`, never this.
+        `_actor`, never this. Returns whether the actor is a current admin.
         """
         self._check_editor(agent.tenant_id, actor)
         if not await agent_backends.actor_exists(session, agent.tenant_id, actor.account_id):
             raise AgentBackendRefused("actor_not_found")
         policy = await policy_store.load_access_policy(session, tenant_id=agent.tenant_id)
         if authorize(policy, subject=actor.subject, action=Action.SET_AGENT_RULE):
-            return
+            return True
         if not await may_edit_as_owner(session, agent.tenant_id, agent.agent_id, actor):
             raise AgentBackendRefused("owner_or_admin_required")
+        return False
 
     async def may_edit(self, agent: BackendAgent, actor: BackendActor) -> bool:
         """Whether `actor` may change this agent now: a read for previews and cards."""
@@ -903,7 +905,7 @@ class AgentBackendService:
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=agent.tenant_id
         ) as session:
-            await self._authorize_edit(session, agent, actor)
+            admin = await self._authorize_edit(session, agent, actor)
             current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
             kept = AgentSettings.of(current)
             if operation == "settings":
@@ -935,6 +937,11 @@ class AgentBackendService:
                 backend = previous.backend if previous else None
                 model = previous.model if previous else None
                 settings = AgentSettings.of(previous)
+            if settings.thread_mode == "shared" and kept.thread_mode != "shared" and not admin:
+                # Sharing applies in every channel the agent answers in unpinned, so
+                # it stays an admin's call until a destination can consent to it.
+                # TODO: a per-channel setting allowing shared threads, then owners too.
+                raise AgentBackendRefused("admin_required_for_shared_threads")
             grant_operation = operation in ("fleet_grant_set", "fleet_grant_revoke")
             if grant_operation:
                 if now is None:

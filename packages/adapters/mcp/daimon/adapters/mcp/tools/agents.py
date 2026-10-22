@@ -53,7 +53,7 @@ from daimon.core.agent_guidance import apply_credential_guidance
 from daimon.core.agent_identity import queue_agent_face
 from daimon.core.agent_lifecycle import forget_archived_agent
 from daimon.core.agent_mcp_credentials import agent_mcp_write_lock
-from daimon.core.agent_ownership import record_agent_creator
+from daimon.core.agent_ownership import agent_name_lock, record_agent_creator
 from daimon.core.constants import AGENT_MCP_CAP, AGENT_SKILL_CAP, ALLOWED_MODEL_IDS
 from daimon.core.continuity.messages import ConfigurationChange, render_change_confirmation
 from daimon.core.defaults.ma_index import (
@@ -69,7 +69,8 @@ from daimon.core.defaults.metadata import (
     MA_METADATA_KEY_MANAGED,
 )
 from daimon.core.defaults.provisioning import derive_guild_account_uuid
-from daimon.core.defaults.reconcile_agents import reconcile_agent
+from daimon.core.defaults.reconcile_agents import AgentNameTaken, reconcile_agent
+from daimon.core.defaults.report import Action as ReconcileAction
 from daimon.core.defaults.skills import resolve_custom_skill_titles, resolve_skill_names
 from daimon.core.defaults.spec_merge import merge_mcp_servers_with_ma, merge_skills_with_ma
 from daimon.core.errors import DaimonError, DefaultsError
@@ -502,36 +503,54 @@ async def _create_agent_impl(
     await require_agent_creatable(
         runtime, auth, origin=turn_origin_place(origin) if origin is not None else None
     )
-    await _reject_guild_name_collision(runtime, auth, spec.name)
-    public_url = (
-        str(runtime.settings.mcp.public_url)
-        if runtime.settings.mcp.public_url is not None
-        else None
-    )
-    outcome = await reconcile_agent(
-        runtime.client,
-        spec,
-        tenant_id=auth.tenant_id,
-        dry_run=False,
-        account_id=derive_guild_account_uuid(auth.tenant_id),
-        public_url=public_url,
-        # New agents created from chat are user-owned, NOT seeded resources —
-        # managed=True would stamp daimon_managed=true and make them
-        # sweep-eligible, so the next defaults apply (every boot/deploy)
-        # archives them because they aren't in the seeded spec list.
-        managed=False,
-        references=runtime.session_factory,
-    )
-    if outcome.anthropic_id is None:
-        raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
-    if may_own(auth):
-        # The person who created it owns it: they may edit it without an admin.
-        await record_agent_creator(
-            runtime.session_factory,
-            tenant_id=auth.tenant_id,
-            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=outcome.anthropic_id),
-            account_id=auth.account_id,
+    owner = may_own(auth)
+    async with contextlib.AsyncExitStack() as stack:
+        if owner:
+            # Check and create under one lock, so a concurrent creator of the same
+            # name is refused instead of owning (or rewriting) this agent.
+            await stack.enter_async_context(
+                agent_name_lock(runtime.session_factory, tenant_id=auth.tenant_id, name=spec.name)
+            )
+        await _reject_guild_name_collision(runtime, auth, spec.name)
+        public_url = (
+            str(runtime.settings.mcp.public_url)
+            if runtime.settings.mcp.public_url is not None
+            else None
         )
+        try:
+            outcome = await reconcile_agent(
+                runtime.client,
+                spec,
+                tenant_id=auth.tenant_id,
+                dry_run=False,
+                account_id=derive_guild_account_uuid(auth.tenant_id),
+                public_url=public_url,
+                # New agents created from chat are user-owned, NOT seeded resources —
+                # managed=True would stamp daimon_managed=true and make them
+                # sweep-eligible, so the next defaults apply (every boot/deploy)
+                # archives them because they aren't in the seeded spec list.
+                managed=False,
+                references=runtime.session_factory,
+                # Never update an agent that took the name since the check above.
+                create_only=True,
+            )
+        except AgentNameTaken as exc:
+            raise ToolError(
+                f"agent '{spec.name}' already exists in this {space_noun(auth.platform)} "
+                "— pick another name"
+            ) from exc
+        if outcome.anthropic_id is None:
+            raise ToolError("create_agent: reconcile returned no agent id — report this as a bug")
+        if owner and outcome.action == ReconcileAction.CREATED:
+            # The person who created it owns it: they may edit it without an admin.
+            await record_agent_creator(
+                runtime.session_factory,
+                tenant_id=auth.tenant_id,
+                agent_id=derive_agent_uuid(
+                    tenant_id=auth.tenant_id, ma_agent_id=outcome.anthropic_id
+                ),
+                account_id=auth.account_id,
+            )
     queue_agent_face(
         runtime.session_factory,
         tenant_id=auth.tenant_id,
@@ -1230,6 +1249,12 @@ async def _request_agent_backend_switch_impl(
             ),
             auth,
         )
+        if thread_mode == "shared" and not (auth.is_admin and auth.agent_id is None):
+            # The service refuses it too; say so before a card is posted.
+            raise ToolError(
+                f"Sharing threads applies in every channel, so it needs "
+                f"{admin_noun(auth.platform)}. Nothing changed."
+            )
         settings = stated_settings(thread_mode, required_capabilities)
         preview = await service.preview(agent, target_backend, model, settings)
         if not preview.allowed:
@@ -1575,7 +1600,7 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             on the card before anything is changed. A stale preview or expired card
             changes nothing; preview again. Pass this active turn's origin_context_id.
             The same tool states the agent's own settings: ``thread_mode`` ("shared"
-            to share threads where the channel allows it, or "per_caller") and
+            to share threads where the channel allows it, admins only; or "per_caller") and
             ``required_capabilities`` (a channel that can't give one refuses the turn).
             Pass both together; an omitted one returns to the default. To change only
             settings, pass the agent's current target_backend and model.

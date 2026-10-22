@@ -2284,7 +2284,7 @@ than run without it. A provider switch keeps the settings that still apply
 refuses a switch of an agent that shares them. In chat,
 `request_agent_backend_switch` takes `thread_mode` and
 `required_capabilities` (stated together; an omitted one returns to the
-default) and the card shows them; on the CLI, `daimon agents backend settings
+default) and the card shows them. Only an admin may turn sharing on; on the CLI, `daimon agents backend settings
 NAME [--thread-mode MODE] [--profile PROFILE] [--require CAPABILITY ...]`.
 
 The agent's owner may make every change in this section that an admin may,

@@ -109,8 +109,14 @@ async def test_the_owner_edits_settings_backend_and_fleet_and_a_member_cannot(pe
             agent, settings, 0, actors["member"], expected_preview_digest=preview.digest
         )
     assert await service.current(agent) is None
+    # Sharing threads stays an admin's call: the owner is refused, an admin is not.
+    with pytest.raises(AgentBackendRefused, match="admin required for shared threads"):
+        await service.set_settings(
+            agent, settings, 0, actors["owner"], expected_preview_digest=preview.digest
+        )
+    assert await service.current(agent) is None
     revision = await service.set_settings(
-        agent, settings, 0, actors["owner"], expected_preview_digest=preview.digest
+        agent, settings, 0, actors["admin"], expected_preview_digest=preview.digest
     )
     assert revision.thread_mode == "shared" and revision.backend is None
     assert revision_selection(revision) == agent_selection("anthropic", None, settings)
@@ -137,8 +143,28 @@ async def test_the_owner_edits_settings_backend_and_fleet_and_a_member_cannot(pe
     rows = await service.audit(agent.tenant_id, agent_id=agent.agent_id)
     assert {row.operation for row in rows} >= {"settings", "set", "revert", "fleet_grant_revoke"}
     assert {row.account_id for row in rows if row.operation == "settings"} == {
-        actors["owner"].account_id
+        actors["admin"].account_id,
+        actors["owner"].account_id,
     }
+
+
+async def test_an_owner_can_not_make_or_restore_shared_threads(people) -> None:
+    service, agent, actors, _ = people
+    await service.set_settings(agent, AgentSettings(thread_mode="shared"), 0, actors["admin"])
+    # The owner may keep an admin's sharing while changing other settings...
+    kept = await service.set_settings(
+        agent, AgentSettings(requires=REQUIRES_TOOLS, thread_mode="shared"), 1, actors["owner"]
+    )
+    assert kept.thread_mode == "shared"
+    # ...and may turn it off, but not back on, by setting or by revert.
+    await service.set_settings(agent, AgentSettings(thread_mode="per_caller"), 2, actors["owner"])
+    with pytest.raises(AgentBackendRefused, match="admin required for shared threads"):
+        await service.revert(agent, actors["owner"], expected_revision=3)
+    with pytest.raises(AgentBackendRefused, match="admin required for shared threads"):
+        await service.set_settings(agent, AgentSettings(thread_mode="shared"), 3, actors["owner"])
+    assert (await service.current(agent)).thread_mode == "per_caller"
+    restored = await service.revert(agent, actors["admin"], expected_revision=3)
+    assert restored.thread_mode == "shared"
 
 
 async def test_the_owner_can_not_change_tenant_settings(people) -> None:
@@ -210,7 +236,7 @@ async def test_record_creator_never_replaces_an_owner(people) -> None:
 
 async def test_the_agents_shared_intent_admits_without_a_channel_pin(people) -> None:
     service, agent, actors, sessions = people
-    await service.set_settings(agent, AgentSettings(thread_mode="shared"), 0, actors["owner"])
+    await service.set_settings(agent, AgentSettings(thread_mode="shared"), 0, actors["admin"])
     channel = channel_of(agent)
     async with sessions.begin() as session:
         revision, _, source = await resolve_turn_backend(session, channel, agent, enabled=True)
@@ -230,7 +256,7 @@ async def test_a_channel_pin_tightens_but_never_drops_a_required_capability(peop
         agent,
         AgentSettings(requires=REQUIRES_MULTIAGENT, thread_mode="shared"),
         0,
-        actors["owner"],
+        actors["admin"],
     )
     per_caller = channel_of(agent, "per-caller")
     lacking = channel_of(agent, "lacking")

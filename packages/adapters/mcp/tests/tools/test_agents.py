@@ -52,6 +52,7 @@ from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import upsert_user_skill
 from daimon.testing.asgi import call_mcp_tool
+from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma_models import ma_agent
 from fastmcp import FastMCP
@@ -5806,3 +5807,125 @@ async def test_create_agent_records_the_person_who_created_it_as_owner(
             session, tenant_id=tenant.id, agent_id=agent_id, tool_name="agent_owner"
         )
     assert [(row.operation, row.account_id) for row in rows] == [("create", creator.id)]
+
+
+async def test_two_people_creating_one_name_get_one_agent_and_one_owner(
+    db_preflight, db_nullpool_engine, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """The name check and the create run under one lock: the second creator is refused,
+    never made owner of (nor allowed to rewrite) the first one's agent."""
+    import asyncio
+
+    from daimon.core.agent_ownership import agent_owner
+    from daimon.core.defaults import reconcile_agents
+
+    real_create = reconcile_agents.create_agent
+
+    async def slow_create(*args: Any, **kwargs: Any) -> Any:
+        # Widen the gap between finding no agent and creating one, as a slow
+        # provider call does: without the lock both creators would get through.
+        await asyncio.sleep(0.2)
+        return await real_create(*args, **kwargs)
+
+    monkeypatch.setattr(reconcile_agents, "create_agent", slow_create)
+    from daimon.testing.db import require_owned_sessionmaker
+    from daimon.testing.factories import make_account
+
+    sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
+    require_owned_sessionmaker(sessions)
+    async with sessions.begin() as session:
+        tenant = await make_tenant(session, platform="discord")
+        first = await make_account(session, tenant=tenant)
+        second = await make_account(session, tenant=tenant)
+    stored: list[dict[str, Any]] = []
+    posts: list[str] = []
+
+    def on_create(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        body = json_body(req)
+        created = ma_agent(id=f"ag_{len(stored)}", name="demo")
+        payload = {**created.model_dump(mode="json"), "metadata": body["metadata"]}
+        stored.append(payload)
+        posts.append(req.url.path)
+        return httpx.Response(200, json=payload)
+
+    def on_get(_req: httpx.Request, m: re.Match[str]) -> httpx.Response:
+        return httpx.Response(200, json=next(a for a in stored if a["id"] == m.group(1)))
+
+    def on_update(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        posts.append(req.url.path)
+        return httpx.Response(500)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response(list(stored)))
+    router.add("POST", r"/v1/agents", on_create)
+    router.add("GET", r"/v1/agents/([^/]+)", on_get)
+    router.add("POST", r"/v1/agents/([^/]+)", on_update)
+    runtime = _runtime(build_fake_anthropic(router.dispatch), session_factory=sessions)
+
+    def person(account: uuid.UUID, user: str) -> AuthIdentity:
+        return AuthIdentity(
+            account_id=account,
+            tenant_id=tenant.id,
+            role=Role.USER,
+            is_admin=False,
+            platform="discord",
+            platform_user_id=user,
+        )
+
+    results = await asyncio.gather(
+        _create_agent_impl(
+            runtime, person(first.id, "first"), AgentSpec(name="demo", model="claude-opus-4-5")
+        ),
+        _create_agent_impl(
+            runtime, person(second.id, "second"), AgentSpec(name="demo", model="claude-opus-4-5")
+        ),
+        return_exceptions=True,
+    )
+    refused = [r for r in results if isinstance(r, ToolError)]
+    assert len(refused) == 1 and "already exists" in str(refused[0])
+    assert posts == ["/v1/agents"], "one create, and no update of the created agent"
+    winner = first.id if not isinstance(results[0], ToolError) else second.id
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_0")
+    assert await agent_owner(sessions, tenant_id=tenant.id, agent_id=agent_id) == winner
+
+
+async def test_an_agent_named_after_the_check_is_refused_not_rewritten(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Even outside the lock (a creator on another path), create never updates."""
+    from daimon.core.agent_ownership import agent_owner
+    from daimon.testing.factories import make_account
+
+    async with db_session_factory() as session, session.begin():
+        tenant = await make_tenant(session, platform="discord")
+        creator = await make_account(session, tenant=tenant)
+    existing = ma_agent(id="ag_theirs", name="demo").model_dump(mode="json")
+    existing["metadata"] = {"daimon_tenant": str(tenant.id), "daimon_name": "demo"}
+    lists = iter([[], [existing]])
+    posts: list[str] = []
+
+    def on_post(req: httpx.Request, _m: re.Match[str]) -> httpx.Response:
+        posts.append(req.url.path)
+        return httpx.Response(500)
+
+    router = MARouter()
+    router.add("GET", r"/v1/agents", lambda _req, _m: list_response(next(lists)))
+    router.add("POST", r"/v1/agents", on_post)
+    router.add("POST", r"/v1/agents/([^/]+)", on_post)
+    auth = AuthIdentity(
+        account_id=creator.id,
+        tenant_id=tenant.id,
+        role=Role.USER,
+        is_admin=False,
+        platform="discord",
+        platform_user_id="creator",
+    )
+    with pytest.raises(ToolError, match="already exists"):
+        await _create_agent_impl(
+            _runtime(build_fake_anthropic(router.dispatch), session_factory=db_session_factory),
+            auth,
+            AgentSpec(name="demo", model="claude-opus-4-5"),
+        )
+    assert posts == []
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id="ag_theirs")
+    assert await agent_owner(db_session_factory, tenant_id=tenant.id, agent_id=agent_id) is None
