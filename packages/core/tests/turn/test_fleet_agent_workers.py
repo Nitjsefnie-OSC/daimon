@@ -187,7 +187,7 @@ async def test_a_worker_agent_runs_on_its_own_configured_model_not_the_grants_li
     assert flash[1] == ModelRef(provider="gemini", id="gemini-3.8-flash")
     gemini_off = policy.model_copy(update={"enabled_backends": ("anthropic",)})
     gemini_on = policy.model_copy(update={"enabled_backends": ("anthropic", "gemini")})
-    with pytest.raises(WorkerSpecRefused, match="backend"):
+    with pytest.raises(WorkerSpecRefused, match="backend: unbound"):
         agent_worker_permissions(
             root, pricey, as_pricey, any_agent(grant), policy=gemini_off, now=NOW, backend=flash
         )
@@ -198,10 +198,13 @@ async def test_a_worker_agent_runs_on_its_own_configured_model_not_the_grants_li
     patch = agent_worker_patch(pricey.effective_spec, "Summarize.", configured.models[0])
     assert patch is not None and patch.model == flash[1]
     assert {"mcp", "memory", "sandbox"} <= set(patch.declared_drops or ())
-    # A model the profile keeps for channel turns only still can't be a worker.
+    # An Argon-configured agent, with a grant that lists neither model: the grant's
+    # list is never the reason. Only the worker profile refuses (Argon is channel-only
+    # until B2 lands); Astra follows the same path once it is selectable.
     argon = agent_worker_backend(pricey.effective_spec, "gemini", "gemini-4-argon")
     assert argon[0].model == "gemini-4-argon"
-    with pytest.raises(WorkerSpecRefused, match="backend"):
+    assert argon[1] not in grant.models and flash[1] not in grant.models
+    with pytest.raises(WorkerSpecRefused, match="backend: unsupported"):
         agent_worker_permissions(
             root, pricey, as_pricey, any_agent(grant), policy=gemini_on, now=NOW, backend=argon
         )
@@ -585,3 +588,14 @@ async def test_prepare_worker_agent_decides_admission_again_for_that_agent(
     assert worker.admission.origin_seal_ids == frozenset({"root-seal"})
     assert worker.scope == root.scope and worker.source is researcher
     assert root.admission.agent is root_agent  # the root's own request is untouched
+    # Memory the root may only read stays read-only for its worker, even when the
+    # seals that made it so are not in origin_seal_ids (inherited earlier).
+    for root_read_only in (True, False):
+        unsealed = replace(
+            root,
+            admission=replace(
+                root.admission, memory_read_only=root_read_only, origin_seal_ids=frozenset()
+            ),
+        )
+        worker = await prepare_worker_agent(root.deps, unsealed, researcher)
+        assert worker.admission.memory_read_only is root_read_only

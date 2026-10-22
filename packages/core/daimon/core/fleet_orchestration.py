@@ -1095,6 +1095,9 @@ class HostFleetPorts:
         self._clone_reader, self._wait = clone_reader, wait
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
         # Preparation requests of workers that run as another agent, per (run, agent).
+        # In-process only: after a restart, or on another replica, an agent worker's
+        # preparation falls back to the root's request, which no longer matches that
+        # agent and refuses (origin unbound). That fails safe; persisting it is a follow-up.
         self._agent_requests: dict[tuple[uuid.UUID, uuid.UUID], ProviderPreparationRequest] = {}
         self._watches: dict[
             uuid.UUID, tuple[dict[uuid.UUID, asyncio.Event], asyncio.Event, asyncio.Task[None]]
@@ -1475,7 +1478,9 @@ class HostFleetPorts:
                     "worker_agent_not_in_grant"
                     if error.field == "scope"
                     else "worker_agent_backend_not_enabled"
-                    if error.field == "backend"
+                    if (error.field, error.reason) == ("backend", "unbound")
+                    else "worker_agent_model_cannot_run_workers"
+                    if (error.field, error.reason) == ("backend", "unsupported")
                     else f"worker_agent_{error.field}_{error.reason}"
                 ) from None
             self._agent_requests[(parent.fleet.run_id, source.agent_id)] = request

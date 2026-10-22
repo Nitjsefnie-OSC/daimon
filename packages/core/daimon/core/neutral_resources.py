@@ -1686,21 +1686,41 @@ def agent_worker_permissions(
         policy=policy,
         now=now,
         seal_ids=root.seal_ids,
-        own_backends=_agent_worker_backends(source, backend),
+        own_backends=_agent_worker_backends(source, backend, policy=policy, fleet=root.fleet),
     )
     # The run's own finite limits (deadline, budget, provider lines) bind every worker.
     return replace(worker_root, limits=root.limits)
 
 
 def _agent_worker_backends(
-    source: BackendAgent, backend: tuple[ResolvedBackend, ModelRef] | None
+    source: BackendAgent,
+    backend: tuple[ResolvedBackend, ModelRef] | None,
+    *,
+    policy: TenantAccessPolicy,
+    fleet: FleetFacts,
 ) -> tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]]:
+    """The agent's own backend and model, refused only by tenant policy or its profile.
+
+    `unbound`: the tenant hasn't enabled that backend. `unsupported`: the profile
+    won't run that model as a fleet worker (e.g. a channel-only model).
+    """
+    from daimon.core.channel_backend import backend_is_enabled, check_backend
     from mux.profiles import MANAGED_AGENTS, backend_selection
 
     spec = source.effective_spec
     if spec is None:
         raise WorkerSpecRefused("origin", "unbound")
     selection, model = backend if backend is not None else agent_worker_backend(spec, None, None)
+    if not backend_is_enabled(model.provider, policy.enabled_backends):
+        raise WorkerSpecRefused("backend", "unbound")
+    try:
+        check_backend(
+            ConfigRevision.create(fleet.root.channel, 1, selection),
+            enabled_backends=policy.enabled_backends,
+            worker=True,
+        )
+    except (DaimonError, InvalidConfig):
+        raise WorkerSpecRefused("backend", "unsupported") from None
     native = ModelRef(provider=spec.model.provider, id=spec.model.id)
     if model == native:
         return (selection,), (model,)

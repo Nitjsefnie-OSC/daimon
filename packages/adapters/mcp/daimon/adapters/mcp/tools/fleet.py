@@ -13,7 +13,7 @@ from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Annotated, Protocol
+from typing import TYPE_CHECKING, Annotated, Protocol, cast
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -23,7 +23,7 @@ from daimon.core.fleet_orchestration import FleetOrchestrator
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import BackendConfig
-from mux.contracts.ids import Provider, ResourceRef, Revision
+from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision
 from mux.contracts.resources import AgentPatch, AgentSpec, SessionSpec
 from pydantic import Field, JsonValue
 
@@ -273,15 +273,27 @@ class HostFleetToolService:
             spec = task_worker_spec(parent, role=role, task=task, model=model)
         providers: list[Provider] | None = None
         if planned_models is not None:
-            granted = {model.id for model in (*parent.models, parent.spec.model)}
+            plan_parent = parent
+            if worker_parent is not None:
+                # Agent workers run on their own agents' models, not the grant's list.
+                models = [*parent.models, worker_parent.models[0]]
+                for row in await self._orchestrator.worker_agents(parent, policy):
+                    backend_id, model_id = row.get("backend"), row.get("model")
+                    if isinstance(backend_id, str) and isinstance(model_id, str):
+                        models.append(ModelRef(provider=cast(Provider, backend_id), id=model_id))
+                plan_parent = replace(parent, models=tuple(models))
+            granted = {model.id for model in (*plan_parent.models, plan_parent.spec.model)}
             unknown = sorted(set(planned_models) - granted)
             if unknown:
                 raise ToolError(
                     f"planned_models names a model the fleet grant does not allow: {unknown[0]}."
+                    if worker_parent is None
+                    else "planned_models names a model this fleet's agents can't use: "
+                    f"{unknown[0]}."
                 )
             if planned_workers is not None and planned_workers < len(planned_models):
                 raise ToolError("planned_workers is smaller than the number of planned_models.")
-            providers = planned_providers(parent, planned_models)
+            providers = planned_providers(plan_parent, planned_models)
             planned_workers = len(providers) if planned_workers is None else planned_workers
         provider = (
             backend.backend

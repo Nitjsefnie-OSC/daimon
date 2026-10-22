@@ -1717,7 +1717,11 @@ async def prepare_worker_agent(
             }
         ),
         grant=worker_grant,
-        memory_read_only=_memory_read_only(policy, worker_grant, bool(seals)),
+        # The root's read-only memory carries over (e.g. seals it inherited earlier
+        # that are not in origin_seal_ids), so a worker never writes sealed context
+        # into that agent's shared memory; the agent's own rule can only add to it.
+        memory_read_only=root.admission.memory_read_only
+        or _memory_read_only(policy, worker_grant, bool(seals)),
         asks_before_publishing=_asks_before_publishing(policy, worker_grant),
         daimon_rule_tools=rule_set.tools,
         daimon_rules_need_driver=rule_set.needs_driver,

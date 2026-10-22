@@ -1254,6 +1254,47 @@ async def test_a_named_agent_worker_spawns_as_that_agent_with_its_own_defaults()
     assert listed.structured_content["agents"] == [{"name": "researcher", "model": "gpt-6-luna"}]
 
 
+async def test_a_fleet_plan_may_name_agent_workers_models_the_grant_does_not_list() -> None:
+    root = plain_root()
+    luna = ModelRef(provider="openai", id="gpt-6-luna")
+    researcher = replace(
+        root,
+        spec=root.spec.model_copy(update={"name": "researcher", "model": luna}),
+        models=(luna,),
+        agent_id=uuid.UUID(int=4242),
+    )
+    assert "gemini-3.8-flash" not in {model.id for model in root.models}
+    bridge, orchestrator = plain_bridge(root)
+    orchestrator.agent_worker.return_value = researcher
+    orchestrator.worker_agents.return_value = [
+        {"name": "researcher", "backend": "openai", "model": "gpt-6-luna"},
+        {"name": "flash", "backend": "gemini", "model": "gemini-3.8-flash"},
+    ]
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {
+                "operation_key": "P1",
+                "role": "research",
+                "agent": "researcher",
+                "task": "Dig in.",
+                "planned_models": ["gpt-6-luna", "gemini-3.8-flash"],
+            },
+        )
+        with pytest.raises(ToolError, match="can't use: gpt-6-nova"):
+            await client.call_tool(
+                "fleet_spawn",
+                {
+                    "operation_key": "P2",
+                    "role": "research",
+                    "agent": "researcher",
+                    "task": "Dig in.",
+                    "planned_models": ["gpt-6-nova"],
+                },
+            )
+    orchestrator.spawn.assert_awaited_once()
+
+
 async def test_a_worker_running_as_another_agent_cannot_start_a_fleet() -> None:
     """Its token names that agent, never the root's, so fleet tools refuse it."""
     root = replace(host_parent(), agent_id=uuid.UUID(int=4242))
