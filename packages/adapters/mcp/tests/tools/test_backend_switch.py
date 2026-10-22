@@ -602,3 +602,48 @@ async def test_the_agents_owner_may_request_a_switch_and_a_member_may_not(active
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview" and preview.expected_revision == 0
+
+
+async def test_chat_states_the_agents_thread_mode_and_requirements(active_chat):
+    from daimon.core.channel_backend import load_backend_agent
+
+    runtime, auth, origin, service, trace, payload, _, gate, agent, _ = active_chat
+    options = {
+        "agent_name": "Researcher",
+        "target_backend": "anthropic",
+        "origin_context_id": str(origin.id),
+        "thread_mode": "shared",
+        "required_capabilities": ("tool_loop",),
+    }
+    gate()
+    agent()
+    quote = await _request_agent_backend_switch_impl(runtime, auth, **options)
+    assert quote.agent_settings == (
+        "shares threads where the channel allows it; requires tool_loop"
+    )
+    # The confirmed call must state the same settings as the preview.
+    gate()
+    agent()
+    agent()
+    with pytest.raises(ToolError, match="Preview again"):
+        await _request_agent_backend_switch_impl(
+            runtime,
+            auth,
+            **{**options, "thread_mode": None},
+            expected_revision=0,
+            preview_digest=quote.preview_digest,
+        )
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime, auth, **options, expected_revision=0, preview_digest=quote.preview_digest
+    )
+    assert changed.status == "changed"
+    agent()
+    source = await load_backend_agent(
+        runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
+    )
+    revision = await service.current(source)
+    assert revision.backend == "anthropic" and revision.thread_mode == "shared"
+    assert set(revision.requires or {}) == {"tool_loop"}

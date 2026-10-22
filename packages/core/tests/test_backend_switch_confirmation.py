@@ -943,3 +943,28 @@ async def test_the_agents_owner_may_confirm_without_being_an_admin(owned_preview
     trace.queue(reply())
     assert await check(prompt, "requester") is not None
     assert await service.current(agent) is None
+
+
+def test_switch_prompt_binds_the_stated_agent_settings() -> None:
+    from daimon.core.confirmation import reference_settings, settings_line
+
+    prompt = prompt_for_tool_call(
+        _call(thread_mode="shared", required_capabilities=["tool_loop"]),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    assert prompt.backend_switch is not None
+    settings = reference_settings(prompt.backend_switch)
+    assert settings is not None and settings.facts() == {
+        "requires": {"tool_loop": {"level": "required", "fallback": None}},
+        "thread_mode": "shared",
+    }
+    assert settings_line(settings.facts()) == (
+        "shares threads where the channel allows it; requires tool_loop"
+    )
+    plain = prompt_for_tool_call(_call(), requester_platform_user_id="r", now=datetime.now(UTC))
+    assert plain.backend_switch is not None and reference_settings(plain.backend_switch) is None
+    with pytest.raises(ValidationError):
+        prompt_for_tool_call(
+            _call(thread_mode="everyone"), requester_platform_user_id="r", now=datetime.now(UTC)
+        )

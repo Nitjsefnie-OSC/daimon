@@ -25,7 +25,7 @@ import re
 import secrets
 import unicodedata
 import uuid
-from collections.abc import Awaitable, Callable
+from collections.abc import Awaitable, Callable, Mapping
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
@@ -39,13 +39,15 @@ from daimon.core.tool_safety import (
     microsoft_send_tools,
 )
 from daimon.core.tool_safety import backend_switch_tools as backend_switch_tools
+from mux.contracts.config import ThreadMode
 from mux.contracts.ids import Provider
+from mux.contracts.profile import Capability
 from mux.contracts.resources import AgentSpec
 from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator, model_validator
 
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
-    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.channel_backend import AgentBackendService, AgentSettings
     from daimon.core.neutral_resources import NeutralResourceHost
     from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
     from daimon.core.turn.deps import TurnDeps
@@ -105,6 +107,12 @@ class BackendSwitchReference(BaseModel):
     expected_revision: int = Field(ge=0, strict=True)
     preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     accepted_drops: tuple[str, ...] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    # The agent's own settings, when the request states them: both together,
+    # an unset one returning to the backend's default.
+    thread_mode: ThreadMode | None = Field(default=None, exclude_if=lambda value: value is None)
+    required_capabilities: tuple[Capability, ...] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
 
@@ -361,6 +369,8 @@ def prompt_for_tool_call(
                 "expected_revision": data.get("expected_revision"),
                 "preview_digest": data.get("preview_digest"),
                 "accepted_drops": data.get("accepted_drops"),
+                "thread_mode": data.get("thread_mode"),
+                "required_capabilities": data.get("required_capabilities"),
             }
         )
         # No model-supplied compatibility text is accepted. The host hook must
@@ -499,6 +509,42 @@ def confirmed_tools_for_turn(deps: TurnDeps) -> frozenset[str]:
     )
 
 
+def stated_settings(
+    thread_mode: ThreadMode | None, required_capabilities: tuple[Capability, ...] | None
+) -> AgentSettings | None:
+    """The settings a request states, or None to keep the agent's own."""
+    from daimon.core.channel_backend import AgentSettings
+    from mux.contracts.config import CapabilityRequirement
+
+    if thread_mode is None and required_capabilities is None:
+        return None
+    required = CapabilityRequirement(level="required")
+    return AgentSettings(
+        requires={cap: required for cap in required_capabilities or ()} or None,
+        thread_mode=thread_mode,
+    )
+
+
+def reference_settings(reference: BackendSwitchReference) -> AgentSettings | None:
+    return stated_settings(reference.thread_mode, reference.required_capabilities)
+
+
+def settings_line(settings: Mapping[str, object]) -> str:
+    """Plain words for the agent's stated settings on a card."""
+    parts: list[str] = []
+    if settings.get("thread_mode") == "shared":
+        parts.append("shares threads where the channel allows it")
+    elif settings.get("thread_mode") == "per_caller":
+        parts.append("one thread per person")
+    requires = settings.get("requires")
+    if isinstance(requires, Mapping) and requires:
+        names = cast(Mapping[str, object], requires)
+        parts.append("requires " + ", ".join(sorted(names)))
+    if settings.get("profile"):
+        parts.append(f"profile {settings['profile']}")
+    return "; ".join(parts) or "backend defaults"
+
+
 def backend_switch_callbacks(
     service: AgentBackendService,
     *,
@@ -545,7 +591,9 @@ def backend_switch_callbacks(
             agent_name=reference.agent,
             resource_host=resource_host,
         )
-        preview = await service.preview(agent, reference.target_backend, reference.model)
+        preview = await service.preview(
+            agent, reference.target_backend, reference.model, reference_settings(reference)
+        )
         if (
             preview.tenant_id != tenant_id
             or preview.agent_id != agent.agent_id
@@ -571,6 +619,11 @@ def backend_switch_callbacks(
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
         agent, preview = await verified(prompt, prompt.requester_platform_user_id)
         details = (
+            *(
+                ("Agent settings: " + settings_line(preview.target_settings),)
+                if preview.target_settings
+                else ()
+            ),
             "Unsupported skills: " + (", ".join(preview.unsupported_skills) or "None"),
             "Unsupported connections: " + (", ".join(preview.unsupported_mcps) or "None"),
             "Unsupported capabilities: " + (", ".join(preview.unsupported_capabilities) or "None"),

@@ -96,7 +96,9 @@ from daimon.core.stores.domain import BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
+from mux.contracts.config import ThreadMode
 from mux.contracts.ids import Provider
+from mux.contracts.profile import Capability
 from mux.profiles import selectable_models
 from pydantic import BaseModel, Field, JsonValue, TypeAdapter, ValidationError
 
@@ -1159,6 +1161,7 @@ class AgentBackendSwitchInfo(BaseModel):
     cost_line: str
     summary: str
     declared_drops: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
+    agent_settings: str | None = Field(default=None, exclude_if=lambda value: value is None)
 
 
 async def _request_agent_backend_switch_impl(
@@ -1172,6 +1175,8 @@ async def _request_agent_backend_switch_impl(
     origin_context_id: str | None = None,
     accepted_drops: tuple[str, ...] | None = None,
     model: str | None = None,
+    thread_mode: ThreadMode | None = None,
+    required_capabilities: tuple[Capability, ...] | None = None,
 ) -> AgentBackendSwitchInfo:
     _require_selectable_model(target_backend, model)
     if auth.agent_id is not None or auth.platform_user_id is None:
@@ -1186,7 +1191,12 @@ async def _request_agent_backend_switch_impl(
         load_backend_agent,
         make_backend_service,
     )
-    from daimon.core.confirmation import BackendSwitchReference
+    from daimon.core.confirmation import (
+        BackendSwitchReference,
+        reference_settings,
+        settings_line,
+        stated_settings,
+    )
     from pydantic import ValidationError
 
     try:
@@ -1220,7 +1230,8 @@ async def _request_agent_backend_switch_impl(
             ),
             auth,
         )
-        preview = await service.preview(agent, target_backend, model)
+        settings = stated_settings(thread_mode, required_capabilities)
+        preview = await service.preview(agent, target_backend, model, settings)
         if not preview.allowed:
             raise ToolError("That model provider isn't turned on here. Nothing changed.")
         status: Literal["preview", "changed"] = "preview"
@@ -1238,6 +1249,8 @@ async def _request_agent_backend_switch_impl(
                     "expected_revision": expected_revision,
                     "preview_digest": preview_digest,
                     "accepted_drops": accepted_drops,
+                    "thread_mode": thread_mode,
+                    "required_capabilities": required_capabilities,
                 }
             )
             # The card check awaited provider I/O; reread configuration at the write edge.
@@ -1259,6 +1272,7 @@ async def _request_agent_backend_switch_impl(
                 actor,
                 expected_preview_digest=reference.preview_digest,
                 model=reference.model,
+                settings=reference_settings(reference),
                 **(
                     {"accepted_drops": reference.accepted_drops}
                     if reference.accepted_drops is not None
@@ -1285,6 +1299,9 @@ async def _request_agent_backend_switch_impl(
             cost_line=preview.cost_line,
             summary=summary,
             declared_drops=preview.declared_drops,
+            agent_settings=settings_line(preview.target_settings)
+            if preview.target_settings
+            else None,
         )
     except (DaimonError, ValidationError) as exc:
         raise ToolError(
@@ -1536,6 +1553,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             origin_context_id: str | None = None,
             accepted_drops: tuple[str, ...] | None = None,
             model: str | None = None,
+            thread_mode: ThreadMode | None = None,
+            required_capabilities: tuple[Capability, ...] | None = None,
         ) -> AgentBackendSwitchInfo:
             """Preview a requested agent backend switch, then Confirm in this chat.
 
@@ -1555,6 +1574,11 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             exact declared_drops as accepted_drops: the requester must Confirm
             on the card before anything is changed. A stale preview or expired card
             changes nothing; preview again. Pass this active turn's origin_context_id.
+            The same tool states the agent's own settings: ``thread_mode`` ("shared"
+            to share threads where the channel allows it, or "per_caller") and
+            ``required_capabilities`` (a channel that can't give one refuses the turn).
+            Pass both together; an omitted one returns to the default. To change only
+            settings, pass the agent's current target_backend and model.
             """
             return await _request_agent_backend_switch_impl(
                 runtime,
@@ -1566,4 +1590,6 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 origin_context_id=origin_context_id,
                 accepted_drops=accepted_drops,
                 model=model,
+                thread_mode=thread_mode,
+                required_capabilities=required_capabilities,
             )

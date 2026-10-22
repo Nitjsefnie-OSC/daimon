@@ -947,3 +947,104 @@ async def test_model_is_refused_where_it_does_not_apply(operator, options):
             **options,
         )
     assert await revisions(operator) is None
+
+
+async def test_agent_settings_are_previewed_written_and_reverted(operator):
+    from daimon.core.channel_backend import AgentSettings
+    from mux.contracts.config import CapabilityRequirement
+
+    rt, *_ = operator
+    output = StringIO()
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=output, width=240),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        settings=AgentSettings(thread_mode="shared"),
+    )
+    assert 'Agent settings: {"thread_mode": "shared"}' in output.getvalue()
+    shared = await revisions(operator)
+    assert shared.backend is None and shared.thread_mode == "shared"
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        settings=AgentSettings(),
+    )
+    await run(operator, accept_drops="memory,sandbox")
+    # On OpenAI a settings change names the provider's drops again.
+    needs = AgentSettings(requires={"tool_loop": CapabilityRequirement(level="required")})
+    with pytest.raises(typer.BadParameter, match="memory,sandbox"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            backend=None,
+            yes=True,
+            as_json=False,
+            settings=needs,
+        )
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        settings=needs,
+        accept_drops="memory,sandbox",
+    )
+    required = await revisions(operator)
+    assert required.backend == "openai" and required.requires == needs.requires
+    await agents_backend_change(
+        rt=rt,
+        console=Console(file=StringIO()),
+        name="Research",
+        backend=None,
+        yes=True,
+        as_json=False,
+        revert=True,
+    )
+    reverted = await revisions(operator)
+    assert reverted.backend == "openai" and reverted.requires is None
+
+
+async def test_the_operator_assigns_shows_and_clears_an_owner(operator):
+    from daimon.adapters.cli.commands.agents import agents_owner
+    from daimon.core.agent_ownership import agent_owner
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.testing.factories import make_account, make_platform_principal
+
+    rt, tenant, agent, *_ = operator
+    async with rt.sessionmaker.begin() as db:
+        person = await make_account(db, tenant=tenant)
+        await make_platform_principal(
+            db, tenant=tenant, account=person, platform="discord", external_id="42"
+        )
+    agent_id = derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=agent.id)
+    output = StringIO()
+    console = Console(file=output, width=240)
+    await agents_owner(rt=rt, console=console, name="Research")
+    assert "no owner (admins only)" in output.getvalue()
+    with pytest.raises(typer.BadParameter):
+        await agents_owner(rt=rt, console=console, name="Research", change="set", user="42")
+    await agents_owner(
+        rt=rt,
+        console=console,
+        name="Research",
+        change="set",
+        platform="discord",
+        user="42",
+        yes=True,
+    )
+    assert await agent_owner(rt.sessionmaker, tenant_id=tenant.id, agent_id=agent_id) == person.id
+    await agents_owner(rt=rt, console=console, name="Research", change="clear", yes=True)
+    assert await agent_owner(rt.sessionmaker, tenant_id=tenant.id, agent_id=agent_id) is None
+    async with rt.sessionmaker() as db:
+        rows = await security_audit.list_events(db, tenant_id=tenant.id, tool_name="agent_owner")
+    assert sorted(row.operation for row in rows) == ["assign", "clear"]

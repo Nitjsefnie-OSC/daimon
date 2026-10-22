@@ -912,7 +912,8 @@ class AgentBackendService:
                 model = current.model if current else None
                 settings = settings or AgentSettings()
             elif operation in ("set", "clear"):
-                settings = kept.for_backend(backend)
+                # Stated settings replace the agent's; otherwise those that still apply stay.
+                settings = settings if settings is not None else kept.for_backend(backend)
             else:
                 settings = kept
             local = current.local if current else 0
@@ -1174,7 +1175,9 @@ class AgentBackendService:
         expected_preview_digest: str | None = None,
         accepted_drops: tuple[str, ...] | None = None,
         model: str | None = None,
+        settings: AgentSettings | None = None,
     ) -> AgentBackendRevision:
+        """Switch the provider. `settings` None keeps the agent's settings that still apply."""
         model = picked_model(target_backend, model)
         return await self._change(
             agent,
@@ -1185,6 +1188,7 @@ class AgentBackendService:
             expected_preview_digest,
             accepted_drops=accepted_drops,
             model=model,
+            settings=settings,
         )
 
     async def clear_backend(
@@ -1207,8 +1211,13 @@ class AgentBackendService:
         actor: BackendActor,
         *,
         expected_preview_digest: str | None = None,
+        accepted_drops: tuple[str, ...] | None = None,
     ) -> AgentBackendRevision:
-        """State the agent's profile, requirements and thread mode; provider and model stay."""
+        """State the agent's profile, requirements and thread mode; provider and model stay.
+
+        On a provider that drops source features, `accepted_drops` must name them
+        again, as for a provider switch.
+        """
         return await self._change(
             agent,
             None,
@@ -1217,6 +1226,7 @@ class AgentBackendService:
             "settings",
             expected_preview_digest,
             settings=settings,
+            accepted_drops=accepted_drops,
         )
 
     async def revert(
