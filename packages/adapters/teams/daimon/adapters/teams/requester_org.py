@@ -31,6 +31,7 @@ from microsoft_teams.apps import App
 __all__ = [
     "FOUND_TTL_S",
     "MISSED_TTL_S",
+    "PLACE_TTL_S",
     "MemberFacts",
     "ChannelTypeRead",
     "MemberRead",
@@ -46,6 +47,8 @@ FOUND_TTL_S = 300.0
 """How long a settled answer (host or other) is reused."""
 MISSED_TTL_S = 15.0
 """How long a failed lookup is reused: long enough to absorb a burst, short enough to retry."""
+PLACE_TTL_S = 3600.0
+"""How long a channel's explicit type, learned from a turn, is trusted before it is read again."""
 _CACHE_CAP = 2048
 # The Bot Framework role of someone who joined without signing in.
 _ANONYMOUS = "anonymous"
@@ -135,6 +138,11 @@ class RequesterOrgResolver:
         self._read = member_read
         self._channel_type_read = channel_type_read
         self._shared: OrderedDict[tuple[str, str], tuple[float, bool | None]] = OrderedDict()
+        # What turns have verified about each channel, kept in this process only: lost
+        # on a restart, which just means the next turn learns it again. A shared
+        # channel is also recorded for good by core's registry when admitted.
+        self._places: OrderedDict[str, tuple[float, bool]] = OrderedDict()
+        self._teams: OrderedDict[str, str] = OrderedDict()
         self._ours = ours
         self._clock = clock
         self._cache: OrderedDict[tuple[str, str], tuple[float, Verdict]] = OrderedDict()
@@ -150,6 +158,25 @@ class RequesterOrgResolver:
         settled = verdict[0] is not RequesterOrg.UNKNOWN
         self._remember(key, verdict, now + (FOUND_TTL_S if settled else MISSED_TTL_S))
         return verdict
+
+    def observe_place(self, channel_id: str, *, shared: bool, team_id: str | None) -> None:
+        """Remember a channel's verified type (and its team) for later turns and continuations."""
+        self._places[channel_id] = (self._clock() + PLACE_TTL_S, shared)
+        self._places.move_to_end(channel_id)
+        if team_id:
+            self._teams[channel_id] = team_id
+            self._teams.move_to_end(channel_id)
+        for cache in (self._places, self._teams):
+            while len(cache) > _CACHE_CAP:
+                cache.popitem(last=False)
+
+    def known_place(self, channel_id: str) -> bool | None:
+        """Whether a turn verified the channel as shared (True) or not (False), if still fresh."""
+        cached = self._places.get(channel_id)
+        return cached[1] if cached is not None and cached[0] > self._clock() else None
+
+    def team_of(self, channel_id: str) -> str | None:
+        return self._teams.get(channel_id)
 
     async def resolve_shared(self, team_id: str, channel_id: str) -> bool | None:
         """Whether the channel is shared, from its explicit type; None when that is not known.

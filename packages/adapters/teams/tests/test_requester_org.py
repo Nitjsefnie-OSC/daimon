@@ -12,6 +12,7 @@ import asyncio
 import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
+from datetime import UTC, datetime
 from decimal import Decimal
 from types import SimpleNamespace
 from typing import Any
@@ -37,6 +38,7 @@ from daimon.adapters.teams.identity import (
 from daimon.adapters.teams.requester_org import (
     FOUND_TTL_S,
     MISSED_TTL_S,
+    PLACE_TTL_S,
     MemberFacts,
     RequesterOrgResolver,
     SdkMemberRead,
@@ -878,3 +880,116 @@ def test_a_pending_payload_reads_as_foreign_to_the_build_a_rollback_returns_to(
     old = _old_decoder().validate_python(stored_payload(inbound))
     assert old.is_foreign is old_reads, "an unplaced or outside sender is never unrestricted"
     assert _INBOUND.validate_python(stored_payload(inbound)).requester_org is org
+
+
+# --- a place verified once is reused --------------------------------------------------------
+
+
+def _listing_requests(fake: TeamsApiFake) -> list[str]:
+    return [
+        r.url for r in fake.requests if "/v3/teams/" in r.url and r.url.endswith("conversations")
+    ]
+
+
+async def _turn_then_continuation(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    payload: dict[str, object],
+    fake: TeamsApiFake,
+) -> tuple[dict[str, Any], dict[str, Any]]:
+    """A normal channel turn, then a queued continuation in the same channel; admission is
+    recorded and refuses both, so only what the adapter passed is under test."""
+    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    refused = AsyncMock(side_effect=AdmissionDenied(reason="writers_none"))
+    async with running_service(build_teams_runtime(db_session_factory), fake) as service:
+        with patch("daimon.adapters.teams.app.admit", refused):
+            await post_activity(service, payload)
+            await finish_turns(service.turns)
+            with pytest.raises(AdmissionDenied):
+                await service.turns._run_continuation(  # pyright: ignore[reportPrivateUsage]
+                    _row(thread=THREAD_ID, parent=CHANNEL_ID), "seed", tenant, None
+                )
+    first, second = refused.await_args_list
+    return dict(first.kwargs), dict(second.kwargs)
+
+
+@pytest.mark.parametrize(
+    ("activity", "fake"),
+    [
+        (make_channel_activity(channel_type="standard"), TeamsApiFake()),
+        (make_channel_activity(channel_type="private"), TeamsApiFake()),
+        # No type on the message: the team's channel list settles it once.
+        (make_channel_activity(), TeamsApiFake(channels={CHANNEL_ID: "Ops"})),
+    ],
+    ids=["standard", "private", "listed"],
+)
+async def test_a_continuation_after_a_normal_turn_in_a_channel_runs_unheld(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    activity: dict[str, object],
+    fake: TeamsApiFake,
+) -> None:
+    turn, continuation = await _turn_then_continuation(db_session_factory, activity, fake)
+    assert (turn["channel_shared"], turn["hold_unknown_place"]) == (False, False)
+    assert (continuation["channel_shared"], continuation["hold_unknown_place"]) == (False, False)
+    assert len(_listing_requests(fake)) <= 1, "the continuation reused what the turn learned"
+
+
+async def test_a_private_channel_is_never_looked_up_and_never_shared(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = TeamsApiFake()
+    [(kwargs, admission)] = (
+        await _turn(db_session_factory, make_channel_activity(channel_type="private"), fake)
+    ).calls
+    assert kwargs["channel_shared"] is False and admission.hold is None
+    assert _listing_requests(fake) == []
+
+
+async def test_a_private_channel_continuation_is_unheld_from_its_subscription(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.teams_channel_subscriptions import insert_teams_channel_subscription
+
+    await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
+    tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+    async with db_session_factory.begin() as session:
+        await insert_teams_channel_subscription(
+            session,
+            tenant_id=tenant,
+            channel_id=CHANNEL_ID,
+            team_id="19:team@thread.tacv2",
+            group_id=str(uuid.UUID(int=7)),
+            channel_type="private",
+            channel_name="Secret",
+            team_name=None,
+            bot_name=None,
+            service_url=None,
+            subscription_id="sub-1",
+            client_state_sha256=b"h" * 32,
+            expires_at=datetime(2030, 1, 1, tzinfo=UTC),
+        )
+    fake = TeamsApiFake()
+    admitted = await _continuation(
+        db_session_factory, _row(thread=THREAD_ID, parent=CHANNEL_ID), fake
+    )
+    assert (admitted["channel_shared"], admitted["hold_unknown_place"]) == (False, False)
+    assert _listing_requests(fake) == []
+
+
+async def test_a_continuation_in_a_place_nothing_verified_is_still_held(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    admitted = await _continuation(
+        db_session_factory, _row(thread=THREAD_ID, parent=CHANNEL_ID), TeamsApiFake()
+    )
+    assert admitted["channel_shared"] is None and admitted["hold_unknown_place"] is True
+
+
+def test_a_verified_place_is_trusted_for_an_hour_and_then_read_again() -> None:
+    clock = _Clock()
+    resolver = RequesterOrgResolver(None, ours=ENTRA_TENANT_ID, clock=clock)
+    assert resolver.known_place(CHANNEL_ID) is None, "nothing verified, nothing assumed"
+    resolver.observe_place(CHANNEL_ID, shared=False, team_id="19:team")
+    assert resolver.known_place(CHANNEL_ID) is False and resolver.team_of(CHANNEL_ID) == "19:team"
+    clock.now += PLACE_TTL_S + 1
+    assert resolver.known_place(CHANNEL_ID) is None, "expired: held again until re-learned"

@@ -66,6 +66,7 @@ from daimon.adapters.teams.identity import (
     Refusal,
     TeamsInbound,
     canonical_uuid,
+    channel_shared_of,
     kind_of,
     live_tenant_id,
     parse_graph_message,
@@ -125,6 +126,7 @@ from daimon.core.stores.domain import (
     TeamsChannelSubscriptionRow,
     TurnCardIntentRow,
 )
+from daimon.core.stores.teams_channel_subscriptions import get_teams_channel_subscription
 from daimon.core.stores.teams_installations import list_teams_installations
 from daimon.core.stores.tenants import get_plain_text_mentions, get_tenant, get_turn_cap
 from daimon.core.stores.thread_sessions import (
@@ -839,8 +841,8 @@ class TeamsApp:
         org, home_id, shared = inbound.requester_org, inbound.home_tenant_id, inbound.channel_shared
         if org is RequesterOrg.UNKNOWN:
             org, home_id = await self._orgs.resolve(inbound.channel_id, inbound.user_id)
-        if shared is None and inbound.kind == "channel" and inbound.team_id:
-            shared = await self._orgs.resolve_shared(inbound.team_id, inbound.channel_id)
+        if inbound.kind == "channel":
+            shared = await self._place_shared(inbound, shared)
         if (org, home_id, shared) == (
             inbound.requester_org,
             inbound.home_tenant_id,
@@ -850,6 +852,33 @@ class TeamsApp:
         return dataclasses.replace(
             inbound, requester_org=org, home_tenant_id=home_id, channel_shared=shared
         )
+
+    async def _place_shared(self, inbound: TeamsInbound, shared: bool | None) -> bool | None:
+        """Whether the channel is shared: from the message, else what a turn already
+        verified, else the channel's subscription (a private channel is never shared),
+        else a lookup of its type. None when nothing says, which holds the turn.
+
+        Whatever is learned is remembered, so a continuation and the next turn need not ask.
+        """
+        channel_id, team_id = (
+            inbound.channel_id,
+            inbound.team_id or self._orgs.team_of(inbound.channel_id),
+        )
+        if shared is None:
+            shared = self._orgs.known_place(channel_id)
+        if shared is None:
+            async with self.runtime.sessionmaker() as session:
+                row = await get_teams_channel_subscription(
+                    session, tenant_id=self._tenant_id, channel_id=channel_id
+                )
+            if row is not None:
+                shared = channel_shared_of(row.channel_type)
+                team_id = team_id or row.team_id
+        if shared is None and team_id:
+            shared = await self._orgs.resolve_shared(team_id, channel_id)
+        if shared is not None:
+            self._orgs.observe_place(channel_id, shared=shared, team_id=team_id)
+        return shared
 
     def _first_delivery(self, conversation_id: str, activity_id: str) -> bool:
         key = (conversation_id, activity_id)
