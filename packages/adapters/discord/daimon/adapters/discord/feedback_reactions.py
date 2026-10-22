@@ -142,7 +142,7 @@ class FeedbackReactionCog(commands.Cog):
             channel = self._bot.get_channel(payload.channel_id)
             parent = (
                 str(channel.parent_id)
-                if isinstance(channel, discord.Thread)
+                if isinstance(channel, discord.Thread) and channel.parent_id
                 else ""
                 if isinstance(channel, discord.abc.GuildChannel)
                 else None

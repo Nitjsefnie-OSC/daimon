@@ -84,9 +84,9 @@ class ThreadParticipant:
         than read off the end of `candidates`, which the caller filters by
         author and could hand over empty.
         """
-        if self._recruitment.is_recruitment_channel(
-            str(thread.guild.id), str(thread.id), str(thread.parent_id)
-        ):
+        from daimon.adapters.discord.recruitment_guard import protected
+
+        if protected(self._recruitment, thread, str(thread.guild.id)):
             return False
         exclude_ids = {m.id for m in candidates}
 

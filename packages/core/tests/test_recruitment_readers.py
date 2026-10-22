@@ -49,7 +49,7 @@ def policy():
 
 
 @pytest.mark.parametrize("reader", READERS)
-@pytest.mark.parametrize("in_thread", [False, True])
+@pytest.mark.parametrize("in_thread", [False, True, "unknown_parent"])
 async def test_enumerated_readers_refuse_parent_and_thread_before_content(
     reader, in_thread, monkeypatch
 ):
@@ -63,7 +63,7 @@ async def test_enumerated_readers_refuse_parent_and_thread_before_content(
     settings = policy()
     channel = MagicMock(spec=discord.Thread if in_thread else discord.TextChannel)
     channel.id, channel.name = (20 if in_thread else 2), "!labs-staffing: private-name"
-    channel.parent_id = 2
+    channel.parent_id = None if in_thread == "unknown_parent" else 2
     channel.guild.id = 101
     channel.history = MagicMock(side_effect=AssertionError("protected history"))
     channel.fetch_message = AsyncMock(side_effect=AssertionError("protected attachment/message"))

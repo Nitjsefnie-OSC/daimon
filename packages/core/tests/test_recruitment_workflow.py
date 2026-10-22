@@ -819,3 +819,55 @@ async def test_every_non_control_gateway_event_advances_watermark_even_if_reorde
     assert (await store.message_manifest("20"))[0][2] is True
     await invalidate_source(store.sessions, store.tenant_id, "20", "30")
     assert (await store.get("20")).seen_watermark == before + 3
+
+
+@pytest.mark.parametrize("known_card", [True, False])
+async def test_control_echo_needs_no_reapproval_for_current_or_pending_confirmation(
+    store, known_card
+):
+    from daimon.core.stores.recruitment import invalidate_source
+
+    async def authorize(actor, thread):
+        pass
+
+    fake = SyntheticRecruitmentTransport()
+    async with httpx.AsyncClient(transport=fake) as http:
+        service = RecruitmentService(
+            store,
+            RecruitmentAPI(http, "https://synthetic.invalid", SecretStr("fake")),
+            extract,
+            authorize,
+            backend="synthetic",
+        )
+        await service.enroll("20", "2", "!labs-staffing: Synthetic")
+        await service.ingest("20", [message()])
+        review = await store.get("20")
+        review.scan_complete, review.card_id = True, "30"
+        await store.save(review, await service.config())
+        if not known_card:
+            await service.confirm(
+                "20",
+                review.revision,
+                "create",
+                "7",
+                "original",
+                covered_watermark=review.covered_watermark,
+            )
+        await invalidate_source(store.sessions, store.tenant_id, "20", "30" if known_card else "31")
+        if known_card:
+            # An own-card echo cannot invalidate a concurrently clicked review.
+            await service.confirm(
+                "20",
+                review.revision,
+                "create",
+                "7",
+                "original",
+                covered_watermark=review.covered_watermark,
+            )
+        else:
+            await service.deliver("20", force=True)
+            assert not fake.effects
+            await store.ignore_bot_source("20", "31")
+        await service.deliver("20", force=True)
+        assert len(fake.effects) == 1
+        assert (await store.get("20")).candidate_id

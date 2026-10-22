@@ -1775,7 +1775,7 @@ class RecruitmentTenantSettings(BaseModel):
     )
     recruiter_user_ids: tuple[str, ...] = ()
     recruiter_role_ids: tuple[str, ...] = ()
-    enabled: bool = True
+    enabled: bool = False
     raw_retention_days: int = Field(default=7, ge=1, le=365)
     retention_days: int = Field(default=30, ge=1, le=3650)
 
@@ -1793,7 +1793,8 @@ class RecruitmentSettings(BaseModel):
             "Guild ID to recruitment settings (required nonempty channel_ids and "
             "recruiter_user_ids or recruiter_role_ids). Immutable for the process lifetime; "
             "restart Discord, MCP and scheduler together when changing. Privacy applies "
-            "even when recruitment processing is disabled."
+            "even when recruitment processing is disabled. Set enabled=true in each tenant "
+            "to opt into processing."
         ),
     )
 

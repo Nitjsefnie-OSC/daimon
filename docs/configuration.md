@@ -1393,7 +1393,7 @@ Read from `daimon.core.config.RecruitmentSettings`. Prefix `DAIMON_RECRUITMENT__
 Guild ID to recruitment settings (required nonempty channel_ids and recruiter_user_ids
 or recruiter_role_ids). Immutable for the process lifetime; restart Discord, MCP and
 scheduler together when changing. Privacy applies even when recruitment processing is
-disabled.
+disabled. Set enabled=true in each tenant to opt into processing.
 
 ### `DAIMON_RECRUITMENT__ENABLED`
 

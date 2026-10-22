@@ -113,3 +113,13 @@ def test_settings_require_explicit_parent_channels_and_recruiters():
         RecruitmentSettings(tenants={"101": {"channel_ids": ["2"]}})
     config = RecruitmentConfig(guild_id="101", channel_ids=("2",))
     assert not enrollment_source("!labs-staffing: Synthetic", "3", config)
+
+
+def test_settings_backed_tenants_are_disabled_until_explicitly_enabled():
+    from daimon.core.config import RecruitmentSettings
+
+    settings = RecruitmentSettings(
+        tenants={"101": {"channel_ids": ["2"], "recruiter_user_ids": ["7"]}}
+    )
+    assert not settings.enabled and not settings.tenants["101"].enabled
+    assert settings.is_recruitment_channel("101", "20", "2")

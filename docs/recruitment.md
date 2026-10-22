@@ -14,7 +14,8 @@ worker and scheduler. Keep recruitment backend secrets out of public MCP,
 sidecar and agent environments. These are service credentials, not user OAuth.
 
 Set `DAIMON_RECRUITMENT__TENANTS` to a JSON object keyed by guild ID. Each entry
-requires a nonempty recruitment parent-channel set and at least one recruiter:
+requires a nonempty recruitment parent-channel set and at least one recruiter.
+Tenant processing defaults to disabled; set `enabled` explicitly:
 
 ```json
 {"101":{"channel_ids":["2"],"recruiter_user_ids":["7"],"recruiter_role_ids":["42"],"enabled":true,"raw_retention_days":7,"retention_days":30}}

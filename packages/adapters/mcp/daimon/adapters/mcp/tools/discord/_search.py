@@ -359,6 +359,8 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
                         parent = (
                             str(live.parent_id)
                             if isinstance(live, discord.Thread) and live.parent_id
+                            else None
+                            if isinstance(live, discord.Thread)
                             else ""
                         )
                     except (ToolError, discord.HTTPException):
