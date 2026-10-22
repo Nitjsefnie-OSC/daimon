@@ -47,7 +47,12 @@ async def captured(owned, request):
         principal_id="admitted-caller",
         authorization_id="admitted-root",
     )
-    live = getattr(request, "param", None) in ("haiku55", "haiku55_credentials", "haiku55_effort")
+    live = getattr(request, "param", None) in (
+        "haiku55",
+        "haiku55_credentials",
+        "haiku55_effort",
+        "sonnet55_effort",
+    )
     capture = json.loads(
         (Path(__file__).resolve().parents[1] / "fixtures/anthropic_live_root.json").read_text()
     )
@@ -77,15 +82,17 @@ async def captured(owned, request):
     )
     if live:
         native = native.model_copy(update={"execution_identity": capture["execution_identity"]})
-    if getattr(request, "param", None) == "haiku55_effort":
+    if getattr(request, "param", None) in ("haiku55_effort", "sonnet55_effort"):
         from anthropic.types.beta import BetaManagedAgentsModelConfig
 
+        # sonnet55_effort is the staging #fleet-test root: Sonnet 5.5 at effort high.
+        model = (
+            {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
+            if request.param == "haiku55_effort"
+            else {"id": "claude-sonnet-5-5", "speed": "standard", "effort": {"type": "high"}}
+        )
         native = native.model_copy(
-            update={
-                "model": BetaManagedAgentsModelConfig.model_validate(
-                    {"id": "claude-haiku-5-5", "speed": "standard", "effort": {"type": "medium"}}
-                )
-            }
+            update={"model": BetaManagedAgentsModelConfig.model_validate(model)}
         )
     environment = ma_environment(tenant_id=identity.tenant_id)
     if live:
@@ -138,7 +145,7 @@ async def captured(owned, request):
                 public_url="https://mcp.invalid/mcp", jwt_secret=SecretStr("offline-placeholder")
             )
             if getattr(request, "param", None)
-            in ("caller_credentials", "haiku55_credentials", "haiku55_effort")
+            in ("caller_credentials", "haiku55_credentials", "haiku55_effort", "sonnet55_effort")
             else None,
         )
     trace.assert_consumed()
@@ -977,45 +984,56 @@ async def test_fleet_r1_root_model_is_not_added_for_a_disabled_provider(captured
     )
 
 
-@pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
-async def test_fleet_r2_same_provider_worker_inherits_root_effort_on_its_own_model(captured, owned):
-    """r2: a same-provider worker on another model was refused 'extensions: unsupported'."""
+@pytest.mark.parametrize("captured", ["sonnet55_effort"], indirect=True)
+async def test_fleet_r2_sonnet_effort_root_spawns_a_haiku_worker_without_its_effort(
+    captured, owned
+):
+    """r2: a Haiku worker under the Sonnet effort=high root was refused outright.
+
+    Haiku may not accept the root's effort level, so the worker declares the loss
+    and runs at its model's defaults; an undeclared mismatch refuses before admission.
+    """
     from daimon.core.neutral_resources import task_worker_spec
     from mux.drivers.anthropic.resources.agents import agent_payload
 
     source, _, grant, _, policy, _ = captured
-    sonnet = ModelRef(provider="anthropic", id="claude-sonnet-5-5")
-    widened = grant.model_copy(
-        update={"choices": ((backend_selection("anthropic"), sonnet), *grant.choices)}
-    )
-    root = compose(captured[:2] + (widened,) + captured[3:])
-    child = resolve_worker_spec(
-        root,
-        task_worker_spec(root, role="W1", task="Compare X and Y.", model=sonnet.id),
+    haiku = ModelRef(provider="anthropic", id="claude-haiku-5-5")
+    root = compose(captured)
+    # r1 too: the grant lists Haiku, not the Sonnet root, which is now implicit.
+    assert root.models[-1] == ModelRef(provider="anthropic", id="claude-sonnet-5-5")
+    kwargs = dict(
         policy=policy,
         now=NOW,
         captured_source=source,
         resources=root.resources,
         environment=root.environment,
     )
-    assert agent_payload(child.spec)["model"] == {
+    spec = task_worker_spec(root, role="W1", task="Compare X and Y.", model=haiku.id)
+    assert "model_controls" in spec.declared_drops
+    child = resolve_worker_spec(root, spec, **kwargs)
+    assert child.spec.extensions is None
+    assert agent_payload(child.spec)["model"] == "claude-haiku-5-5"
+    assert child.permissions.models == (haiku,)
+    for undeclared in (
+        spec.model_copy(update={"declared_drops": ("skills", "tools")}),
+        spec.model_copy(
+            update={"declared_drops": ("skills", "tools"), "extensions": root.spec.extensions}
+        ),
+    ):
+        with pytest.raises(WorkerSpecRefused, match="extensions: unsupported"):
+            resolve_worker_spec(root, undeclared, **kwargs)
+    # The root's own model keeps its effort exactly.
+    own = resolve_worker_spec(
+        root, task_worker_spec(root, role="W2", task="Compare X and Y."), **kwargs
+    )
+    assert agent_payload(own.spec)["model"] == {
         "id": "claude-sonnet-5-5",
         "speed": "standard",
-        "effort": {"type": "medium"},
+        "effort": {"type": "high"},
     }
-    assert child.permissions.models == (sonnet,)
-    # Replaying the resolved worker keeps the inherited controls.
-    again = resolve_worker_spec(
-        root,
-        child.spec.model_copy(update={"system": "Compare X and Y."}),
-        policy=policy,
-        now=NOW,
-        captured_source=source,
-        resources=root.resources,
-        environment=root.environment,
-    )
-    assert again.spec.extensions == child.spec.extensions
+    assert "model_controls" not in own.declared_drops
     await _prepare_worker(captured, owned, child)
+    await _prepare_worker(captured, owned, own)
 
 
 async def _prepare_worker(captured, owned, worker):
@@ -1066,7 +1084,9 @@ async def _prepare_worker(captured, owned, worker):
     assert not trace.requests
 
 
-@pytest.mark.parametrize("captured", ["haiku55", "haiku55_effort"], indirect=True)
+@pytest.mark.parametrize(
+    "captured", ["haiku55", "haiku55_effort", "sonnet55_effort"], indirect=True
+)
 async def test_fleet_r3_r4_plain_task_workers_resolve_with_default_limits(captured):
     """r3/r4: a plain ask needs no run_id, backend, budget or deadline arithmetic."""
     from daimon.core.neutral_resources import default_worker_limits, task_worker_spec
@@ -1090,9 +1110,9 @@ async def test_fleet_r3_r4_plain_task_workers_resolve_with_default_limits(captur
             environment=root.environment if spec.model.provider == "anthropic" else None,
             limits=limits,
         )
-        assert child.spec.model.id == (model or "claude-haiku-5-5")
+        assert child.spec.model.id == (model or root.spec.model.id)
         assert ("model_controls" in child.declared_drops) == (
-            spec.model.provider != "anthropic" and bool(root.spec.extensions)
+            spec.model.id != root.spec.model.id and bool(root.spec.extensions)
         )
     with pytest.raises(WorkerSpecRefused, match="backend: not_subset"):
         task_worker_spec(root, role="W", task="Compare.", model="gemini-3.8-pro")
@@ -1100,36 +1120,43 @@ async def test_fleet_r3_r4_plain_task_workers_resolve_with_default_limits(captur
         task_worker_spec(root, role="W", task="  ")
 
 
-def test_default_worker_limits_split_the_run_and_provider_lines_and_clamp_deadline():
+def _worker(backend: str, budget: str):
     from types import SimpleNamespace
 
+    return SimpleNamespace(backend=backend, budget_usd=Decimal(budget), reserved_usd=Decimal(0))
+
+
+CEILING = WorkerLimits(
+    budget_usd=Decimal("2.00"),
+    deadline=NOW + timedelta(minutes=10),
+    max_turns=2,
+    provider_limits_usd={
+        "anthropic": Decimal("0.60"),
+        "openai": Decimal("0.60"),
+        "gemini": Decimal("0.80"),
+    },
+)
+
+
+def test_default_worker_limits_split_per_slot_and_clamp_the_deadline():
     from daimon.core.neutral_resources import default_worker_limits
 
-    ceiling = WorkerLimits(
-        budget_usd=Decimal("2.00"),
-        deadline=NOW + timedelta(minutes=10),
-        max_turns=2,
-        provider_limits_usd={
-            "anthropic": Decimal("0.60"),
-            "openai": Decimal("0.60"),
-            "gemini": Decimal("0.80"),
-        },
-    )
     run = _run()
-    assert default_worker_limits(ceiling, run, (), provider="openai").budget_usd == Decimal("0.50")
-    spent = (SimpleNamespace(backend="anthropic", reserved_usd=Decimal("0.30")),)
-    assert default_worker_limits(ceiling, run, spent, provider="anthropic").budget_usd == Decimal(
-        "0.30"
+    assert default_worker_limits(CEILING, run, (), provider="openai").budget_usd == Decimal("0.15")
+    assert default_worker_limits(CEILING, run, (), provider="gemini").budget_usd == Decimal("0.20")
+    spent = (_worker("anthropic", "0.30"),)
+    assert default_worker_limits(CEILING, run, spent, provider="anthropic").budget_usd == Decimal(
+        "0.10"
     )
-    assert default_worker_limits(ceiling, run, spent, provider="gemini").budget_usd == Decimal(
-        "0.56"
+    assert default_worker_limits(CEILING, run, spent, provider="gemini").budget_usd == Decimal(
+        "0.26"
     )
     later = default_worker_limits(
-        ceiling, run, (), provider="openai", deadline=NOW + timedelta(hours=1)
+        CEILING, run, (), provider="openai", deadline=NOW + timedelta(hours=1)
     )
-    assert later.deadline == ceiling.deadline
+    assert later.deadline == CEILING.deadline
     explicit = default_worker_limits(
-        ceiling,
+        CEILING,
         None,
         (),
         provider="openai",
@@ -1143,4 +1170,33 @@ def test_default_worker_limits_split_the_run_and_provider_lines_and_clamp_deadli
         2,
     )
     with pytest.raises(WorkerSpecRefused, match="budget: unbound"):
-        default_worker_limits(ceiling, None, (), provider="openai")
+        default_worker_limits(CEILING, None, (), provider="openai")
+
+
+@pytest.mark.parametrize("provider", ["anthropic", "openai", "gemini"])
+def test_parallel_default_spawns_never_exceed_the_run_or_provider_caps(provider):
+    """Every worker that can still be admitted read the same stale snapshot."""
+    from daimon.core.neutral_resources import default_worker_limits
+
+    run = _run()
+    for admitted in range(run.max_workers):
+        workers = tuple(_worker(provider, "0.01") for _ in range(admitted))
+        racing = run.max_workers - admitted
+        share = default_worker_limits(CEILING, run, workers, provider=provider).budget_usd
+        line = CEILING.provider_limits_usd[provider] - Decimal("0.01") * admitted
+        assert share * racing <= line
+        assert share * racing <= run.total_budget_usd - Decimal("0.01") * admitted
+
+
+def test_exhausted_budget_or_slots_refuse_before_admission():
+    from daimon.core.neutral_resources import default_worker_limits
+
+    run = _run()
+    with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
+        default_worker_limits(CEILING, run, (_worker("openai", "0.60"),), provider="openai")
+    with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
+        default_worker_limits(
+            CEILING, _run(max_workers=1), (_worker("gemini", "0.10"),), provider="openai"
+        )
+    with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
+        default_worker_limits(CEILING, _run(total="0.03"), (), provider="openai")

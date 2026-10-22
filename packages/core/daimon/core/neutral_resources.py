@@ -855,7 +855,9 @@ WorkerField = Literal[
     "native_budget_usd",
     "declared_drops",
 ]
-WorkerReason = DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale"]
+WorkerReason = (
+    DenyReason | Literal["not_subset", "unbound", "unsupported", "ambiguous", "stale", "exhausted"]
+)
 
 
 class WorkerSpecRefused(ValueError):
@@ -1058,8 +1060,10 @@ def task_worker_spec(
 ) -> AgentSpec:
     """A plain-language worker: one granted model, with the task as its instructions.
 
-    The worker carries no tools or skills. A foreign-provider worker also declares
-    the root capabilities it cannot represent. The resolver still checks every ceiling.
+    The worker carries no tools or skills. A worker on another model declares the
+    loss of the root's model controls (e.g. effort), which that model may not accept;
+    a foreign-provider worker also declares the root capabilities it cannot represent.
+    The resolver still checks every ceiling.
     """
     root = parent.spec.model
     if model is None or model == root.id:
@@ -1074,8 +1078,8 @@ def task_worker_spec(
     drops: set[DeclaredDrop] = {"skills", "tools", *parent.spec.declared_drops}
     if choice.provider != root.provider:
         drops |= {"mcp", "memory", "sandbox"}
-        if parent.spec.extensions:
-            drops.add("model_controls")
+    if choice.id != root.id and parent.spec.extensions:
+        drops.add("model_controls")
     return AgentSpec(name=role, model=choice, system=task, declared_drops=tuple(drops))
 
 
@@ -1093,23 +1097,41 @@ def default_worker_limits(
 ) -> WorkerLimits:
     """Fill omitted worker limits from the frozen root, so a model need not guess them.
 
-    The deadline defaults to (and is never later than) the root's; the budget defaults
-    to an even share of what the run and the provider line have left. Supplied budgets
-    and every ceiling are still checked by the resolver and financial admission.
+    The deadline defaults to (and is never later than) the root's frozen deadline. The
+    budget defaults to an even share, per remaining worker slot, of what the run and
+    the provider line have left. Slots bound how many workers can be admitted, so
+    parallel spawns reading the same snapshot never add up past either cap. Supplied
+    budgets and every ceiling are still checked by the resolver and financial admission.
     """
     latest = ceiling.deadline
     if budget_usd is None:
         if run is None:
             raise WorkerSpecRefused("budget", "unbound")
-        slots = max(run.max_workers - len(workers), 1)
+        slots = run.max_workers - len(workers)
+        if slots <= 0:
+            raise WorkerSpecRefused("budget", "exhausted")
+
+        def held(provider_only: bool) -> Decimal:
+            return sum(
+                (
+                    max(w.budget_usd, w.reserved_usd)
+                    for w in workers
+                    if not provider_only or w.backend == provider
+                ),
+                Decimal(0),
+            )
+
         share = min(
-            (run.total_budget_usd - sum((w.reserved_usd for w in workers), Decimal(0))) / slots,
+            (run.total_budget_usd - held(False)) / slots,
             ceiling.for_provider(provider).budget_usd,
         )
         if ceiling.provider_limits_usd is not None:
-            used = sum((w.reserved_usd for w in workers if w.backend == provider), Decimal(0))
-            share = min(share, ceiling.provider_limits_usd.get(provider, Decimal(0)) - used)
+            line = ceiling.provider_limits_usd.get(provider, Decimal(0))
+            share = min(share, (line - held(True)) / slots)
         budget_usd = max(share, Decimal(0)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
+        if budget_usd <= 0:
+            # Refuse before admission, so an exhausted run never spends a worker slot.
+            raise WorkerSpecRefused("budget", "exhausted")
     return WorkerLimits(
         budget_usd=budget_usd,
         deadline=latest if deadline is None else min(deadline, latest),

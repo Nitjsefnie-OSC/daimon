@@ -482,9 +482,10 @@ def register_fleet_tools(
         fleet grant, e.g. "gpt-6-luna"; omit it for your own model), plus
         origin_context_id from your turn controls. Leave everything else out:
         the host binds this turn's run (never invent a run_id), picks the
-        granted backend, splits the run budget evenly and uses the run's
-        deadline (a later deadline is shortened to it). Budgets above the
-        grant are refused. After spawning, end your turn; you are woken to
+        granted backend, gives each worker an even share of the budget left
+        and uses the run's deadline (a later deadline is shortened to it). A
+        worker on another model than yours runs at that model's default
+        effort. Budgets above the grant are refused. After spawning, end your turn; you are woken to
         fleet_collect. Advanced: an agent spec or an authorized clone with
         sparse overrides instead of task. Retries reuse operation_key.
         """

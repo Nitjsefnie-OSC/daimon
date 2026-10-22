@@ -1064,3 +1064,15 @@ async def test_status_and_collect_default_to_this_turns_run(tool) -> None:
         result = await client.call_tool(tool, {})
     assert result.data["run_id"] == str(RUN)
     assert getattr(orchestrator, tool.removeprefix("fleet_")).await_args.kwargs["run_id"] == RUN
+
+
+async def test_plain_spawn_with_no_budget_left_refuses_before_admission() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    run, _ = orchestrator.read_snapshot.return_value
+    orchestrator.read_snapshot.return_value = (replace(run, total_budget_usd=Decimal("0.02")), ())
+    async with Client(registered(bridge)) as client:
+        with pytest.raises(ToolError, match="budget: exhausted"):
+            await client.call_tool(
+                "fleet_spawn", {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+            )
+    orchestrator.spawn.assert_not_awaited()

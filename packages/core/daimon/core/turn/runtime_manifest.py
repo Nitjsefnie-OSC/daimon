@@ -1921,18 +1921,6 @@ def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
     return spec.model_copy(update=updates) if updates else spec, frozenset(excluded)
 
 
-def _retarget_model_controls(extension: ExtensionConfig, model_id: str) -> ExtensionConfig:
-    """Name another model of the same provider; every other native control is kept."""
-    model = extension.value.get("model")
-    if isinstance(model, str):
-        return extension.model_copy(update={"value": {**extension.value, "model": model_id}})
-    if isinstance(model, dict):
-        return extension.model_copy(
-            update={"value": {**extension.value, "model": {**model, "id": model_id}}}
-        )
-    return extension
-
-
 def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
     """Carry granted native controls exactly, or require their declared loss."""
     normalized, _ = worker_spec_ceiling(ceiling)
@@ -1942,20 +1930,18 @@ def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
         for extension in controls
     ):
         raise ValueError("unsupported native worker ceiling")
-    if controls and target.model.provider == ceiling.model.provider:
-        # A same-provider worker inherits the root's controls (e.g. effort) on its
-        # own granted model; the backend and model checks stay with the resolver.
-        inherited = (_retarget_model_controls(controls[0], target.model.id),)
-        if target.extensions and target.extensions not in (controls, inherited):
-            raise ValueError("worker native controls differ from the ceiling")
-        retained = target.model_copy(update={"extensions": inherited})
-        if _source_extension_obligation(inherited[0], native_target=retained) is not None:
-            raise ValueError("native worker model does not represent the granted controls")
-        return retained
     if target.extensions and target.extensions != controls:
         raise ValueError("worker native controls differ from the ceiling")
     if not controls:
         return target
+    extension = controls[0]
+    if (target.model.provider, target.model.id) == (ceiling.model.provider, ceiling.model.id):
+        retained = target.model_copy(update={"extensions": controls})
+        if _source_extension_obligation(extension, native_target=retained) is not None:
+            raise ValueError("native worker model does not represent the granted controls")
+        return retained
+    # Another model, even of the same provider, may not accept the root's controls
+    # (e.g. its effort level); the worker runs at its model's defaults, declared.
     if "model_controls" not in target.declared_drops:
         raise ValueError("native model controls require an explicit declared loss")
     return target.model_copy(update={"extensions": None})
@@ -2033,9 +2019,11 @@ def classify_source_obligations(
                         missing.add("tools")
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider
-            if worker_ceiling and target is not None and not foreign_target:
-                # Fleet workers carry the root's controls on their own granted model.
-                extension = _retarget_model_controls(extension, target.model.id)
+            # A fleet worker on another model may declare the loss of the root's
+            # controls exactly as a foreign-provider worker does.
+            foreign_target = foreign_target or (
+                worker_ceiling and target is not None and target.model.id != spec.model.id
+            )
             obligation = _source_extension_obligation(
                 extension,
                 native_target=target if not foreign_target else None,
