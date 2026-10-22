@@ -853,12 +853,12 @@ async def run_prepared_turn(
     message and confirmation batch. Runtimes without a session read refuse
     unattended confirmations with a plain reason, including with safety off.
     """
-    privacy = TurnPrivacy(
-        platform,
+    privacy = TurnPrivacy.from_admission(
         deps.recruitment,
-        tenant_id,
-        prepared.admission.origin_thread_id or prepared.admission.origin_channel_id or thread_id,
-        prepared.admission.origin_channel_id,
+        prepared.admission,
+        platform=platform,
+        tenant_id=tenant_id,
+        fallback_channel_id=thread_id,
     )
     privacy.check()
     observation = (
@@ -995,12 +995,12 @@ async def run_prepared_turn_impl(
     signal (`_is_dead_session` gates on `kind == "upstream"`), so a ceiling
     breach can never loop into a second wall-clock-priced attempt.
     """
-    privacy = TurnPrivacy(
-        platform,
+    privacy = TurnPrivacy.from_admission(
         deps.recruitment,
-        tenant_id,
-        prepared.admission.origin_thread_id or prepared.admission.origin_channel_id or thread_id,
-        prepared.admission.origin_channel_id,
+        prepared.admission,
+        platform=platform,
+        tenant_id=tenant_id,
+        fallback_channel_id=thread_id,
     )
     privacy.check()
 

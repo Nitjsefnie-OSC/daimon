@@ -1613,12 +1613,11 @@ async def bind_session_impl(
         # Chat callers get the checkpoint-and-bundle transfer by default; a
         # caller that must never spend a checkpoint turn passes its own hook.
         effective_transfer = transfer or WorkspaceTransferRunner(
-            privacy=TurnPrivacy(
-                platform,
+            privacy=TurnPrivacy.from_admission(
                 deps.recruitment,
-                tenant_id,
-                admission.origin_thread_id or admission.origin_channel_id or "",
-                admission.origin_channel_id,
+                admission,
+                platform=platform,
+                tenant_id=tenant_id,
             ),
             anthropic=deps.anthropic,
             sessionmaker=deps.sessionmaker,

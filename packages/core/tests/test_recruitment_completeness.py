@@ -152,3 +152,19 @@ def test_driver_source_policy_keeps_default_off_and_tenant_isolation():
         TurnPrivacy("discord", policy(), None, "20", None).check()
     with pytest.raises(AdmissionDenied):
         TurnPrivacy("discord").check()
+
+
+def test_prepared_privacy_prefers_admitted_tenant_to_repeated_caller_id():
+    admitted_tenant = derive_tenant_uuid(platform="discord", workspace_id="101")
+    admission = SimpleNamespace(
+        grant=SimpleNamespace(tenant_id=admitted_tenant),
+        origin_thread_id="20",
+        origin_channel_id="2",
+    )
+    privacy = TurnPrivacy.from_admission(
+        policy(), admission, platform="discord", tenant_id=uuid4(), fallback_channel_id="3"
+    )
+    assert privacy.tenant_id == admitted_tenant
+    assert privacy.channel_id == "20" and privacy.parent_id == "2"
+    with pytest.raises(AdmissionDenied):
+        privacy.check()
