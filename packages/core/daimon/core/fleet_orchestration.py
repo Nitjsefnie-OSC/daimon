@@ -122,6 +122,10 @@ class FleetPorts(Protocol):
         self, parent: WorkerPermissions, agent_name: str
     ) -> WorkerPermissions: ...
 
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]: ...
+
     async def admit(
         self,
         parent: WorkerPermissions,
@@ -470,6 +474,16 @@ class FleetOrchestrator:
         if (len(system) + len(trigger)) // 4 >= WORKER_MAX_TOTAL_TOKENS:
             raise FleetRefused("prompt_exceeds_worker_token_cap")
         return resolved
+
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]:
+        """The on-server agents this root's workers may run as, for a plain-language ask.
+
+        Advice only: every spawn decides again with fresh authority.
+        """
+        _authorize(parent, policy)
+        return await self._owner().worker_agents(parent, policy)
 
     async def agent_worker(
         self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, agent_name: str
@@ -1452,6 +1466,61 @@ class HostFleetPorts:
                 ) from None
             self._agent_requests[(parent.fleet.run_id, source.agent_id)] = request
             return worker_parent
+
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]:
+        from daimon.core.authz import Action, Surface, authorize, build_agent_ref
+        from daimon.core.defaults.ma_index import list_agents_by_tenant
+        from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.neutral_resources import worker_agent_allowed
+        from daimon.core.stores import agent_backends
+        from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+
+        deps = self._deps
+        if deps is None or self._preparation is None:
+            raise FleetRefused("prerequisites_unavailable")
+        tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
+        async with self._load_preparation(parent) as root:
+            grant = await read_agent_fleet_grant(deps, root.admission, now=datetime.now(UTC))
+        if grant is None:
+            raise FleetRefused("fleet_grant_unavailable")
+        granted = {model.id for model in grant.models}
+        listed: list[dict[str, JsonValue]] = []
+        for native in await list_agents_by_tenant(deps.anthropic, tenant_id=tenant_id):
+            name = (native.metadata or {}).get(MA_METADATA_KEY_NAME) or native.name
+            agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=native.id)
+            async with self.sessions() as db:
+                setting = await agent_backends.current(db, tenant_id, agent_id)
+            backend = (setting.backend if setting is not None else None) or "anthropic"
+            model = (setting.model if setting is not None else None) or (
+                native.model if isinstance(native.model, str) else native.model.id
+            )
+            allowed = (
+                worker_agent_allowed(grant, parent.agent_id, agent_id)
+                and (agent_id == parent.agent_id or model in granted)
+                and authorize(
+                    policy,
+                    subject=parent.subject,
+                    action=Action.SPAWN_WORKER,
+                    surface=Surface.FLEET,
+                    agent=build_agent_ref(native.name, native.metadata or {}, name),
+                    place=parent.fleet.place,
+                    fleet=parent.fleet,
+                ).allowed
+            )
+            if allowed:
+                listed.append(
+                    {
+                        "name": name,
+                        "description": native.description or "",
+                        "backend": backend,
+                        "model": model,
+                        "root": agent_id == parent.agent_id,
+                    }
+                )
+        return sorted(listed, key=lambda row: (not row["root"], str(row["name"])))
 
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision

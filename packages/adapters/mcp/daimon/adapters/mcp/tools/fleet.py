@@ -53,7 +53,7 @@ class FleetToolService(Protocol):
         operation_key: str,
         role: str,
         backend: BackendConfig | None,
-        agent: AgentSpec | None,
+        agent: AgentSpec | str | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
@@ -108,6 +108,10 @@ class FleetToolService(Protocol):
         *,
         run_id: uuid.UUID | None,
         origin_context_id: uuid.UUID | None = None,
+    ) -> Mapping[str, JsonValue]: ...
+
+    async def agents(
+        self, caller: AuthIdentity, *, origin_context_id: uuid.UUID | None = None
     ) -> Mapping[str, JsonValue]: ...
 
 
@@ -230,7 +234,7 @@ class HostFleetToolService:
         operation_key: str,
         role: str,
         backend: BackendConfig | None,
-        agent: AgentSpec | None,
+        agent: AgentSpec | str | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
@@ -257,8 +261,16 @@ class HostFleetToolService:
             worker_runtime_ceiling,
         )
 
-        if agent is None and clone is None and task is not None:
-            agent = task_worker_spec(parent, role=role, task=task, model=model)
+        as_agent = agent if isinstance(agent, str) else None
+        spec = agent if not isinstance(agent, str) else None
+        worker_parent: WorkerPermissions | None = None
+        if as_agent is not None:
+            # The worker runs AS that on-server agent; its own model sets the defaults.
+            worker_parent = await self._orchestrator.agent_worker(
+                parent, policy, agent_name=as_agent
+            )
+        elif spec is None and clone is None and task is not None:
+            spec = task_worker_spec(parent, role=role, task=task, model=model)
         providers: list[Provider] | None = None
         if planned_models is not None:
             granted = {model.id for model in (*parent.models, parent.spec.model)}
@@ -274,10 +286,12 @@ class HostFleetToolService:
         provider = (
             backend.backend
             if backend is not None and backend.backend is not None
-            else agent.model.provider
-            if agent is not None
+            else spec.model.provider
+            if spec is not None
             else overrides.model.provider
             if overrides is not None and overrides.model is not None
+            else worker_parent.spec.model.provider
+            if worker_parent is not None
             else parent.spec.model.provider
         )
         planned_on_provider = providers.count(provider) if providers is not None else None
@@ -307,7 +321,9 @@ class HostFleetToolService:
             backend=backend,
             limits=limits,
             fill_token_limits=max_input_tokens is None and max_output_tokens is None,
-            agent=agent,
+            as_agent=as_agent,
+            task=task if as_agent is not None else None,
+            agent=spec,
             clone=clone,
             clone_revision=clone_revision,
             overrides=overrides,
@@ -392,6 +408,12 @@ class HostFleetToolService:
             parent, policy, run_id=parent.fleet.run_id if run_id is None else run_id
         )
 
+    async def agents(
+        self, caller: AuthIdentity, *, origin_context_id: uuid.UUID | None = None
+    ) -> Mapping[str, JsonValue]:
+        parent, policy = await self._parent(caller, origin_context_id=origin_context_id)
+        return {"agents": list(await self._orchestrator.worker_agents(parent, policy))}
+
 
 def register_fleet_tools(
     mcp: FastMCP,
@@ -424,7 +446,7 @@ def register_fleet_tools(
         operation_key: str,
         role: str,
         backend: BackendConfig | None,
-        agent: AgentSpec | None,
+        agent: AgentSpec | str | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
@@ -442,7 +464,12 @@ def register_fleet_tools(
         planned_workers: int | None = None,
         planned_models: list[str] | None = None,
     ) -> dict[str, JsonValue]:
-        if sum(item is not None for item in (task, agent, clone)) != 1:
+        if isinstance(agent, str):
+            if not agent.strip() or clone is not None or model is not None:
+                raise ToolError(
+                    "A worker agent is named on its own: give its task, not a model or a clone."
+                )
+        elif sum(item is not None for item in (task, agent, clone)) != 1:
             raise ToolError("Give the worker a task, an agent spec or a pinned clone, exactly one.")
         if model is not None and task is None:
             raise ToolError("A model choice goes with a task.")
@@ -497,7 +524,7 @@ def register_fleet_tools(
         max_input_tokens: PositiveCount | None = None,
         max_output_tokens: PositiveCount | None = None,
         run_id: uuid.UUID | None = None,
-        agent: AgentSpec | None = None,
+        agent: AgentSpec | str | None = None,
         clone: ResourceRef | None = None,
         clone_revision: Revision | None = None,
         overrides: AgentPatch | None = None,
@@ -521,6 +548,9 @@ def register_fleet_tools(
         worker on another model than yours runs at that model's default
         effort. Budgets above the grant are refused. After spawning, end your
         turn; you are woken to fleet_collect.
+        To run a worker AS one of this server's agents (its own model, tools
+        and skills, under your permissions), pass agent=<its name> and its task;
+        fleet_agents lists the agents you can use.
         Advanced: an agent spec or an authorized clone with sparse overrides
         instead of task. Retries reuse operation_key.
         """
@@ -653,6 +683,18 @@ def register_fleet_tools(
             result_contract=result_contract,
             reviewer_of=reviewed_worker_id,
         )
+
+    @mcp.tool(tags={"fleet"})
+    async def fleet_agents(  # pyright: ignore[reportUnusedFunction]
+        ctx: Context,
+        origin_context_id: uuid.UUID | None = None,
+    ) -> dict[str, JsonValue]:
+        """List the on-server agents your workers can run as in this fleet run.
+
+        Each has a name, a short description, and its backend and model. Pass the
+        name as fleet_spawn's agent. Every spawn checks again, so the list is advice.
+        """
+        return dict(await owner().agents(await _auth(ctx), origin_context_id=origin_context_id))
 
     @mcp.tool(tags={"fleet"})
     async def fleet_collect(  # pyright: ignore[reportUnusedFunction]

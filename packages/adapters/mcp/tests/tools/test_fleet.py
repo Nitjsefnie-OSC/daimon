@@ -77,6 +77,7 @@ NAMES = {
     "fleet_resume",
     "fleet_cross_review",
     "fleet_collect",
+    "fleet_agents",
 }
 
 
@@ -115,10 +116,13 @@ def service() -> Mock:
     stub.kill.return_value = {"run_id": str(RUN), "status": "cancel_requested"}
     stub.resume.return_value = {"run_id": str(RUN), "status": "pending"}
     stub.collect.return_value = {"run_id": str(RUN), "status": "waiting"}
+    stub.agents.return_value = {"run_id": str(RUN), "agents": []}
     return stub
 
 
 def arguments(tool: str) -> dict[str, Any]:
+    if tool == "fleet_agents":
+        return {}
     if tool in ("fleet_status", "fleet_collect"):
         return {"run_id": str(RUN)}
     if tool in ("fleet_kill", "fleet_resume"):
