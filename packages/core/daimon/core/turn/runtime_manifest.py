@@ -2635,20 +2635,22 @@ def _matching_rows(
 
 
 def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
-    """The matching rows naming the most scope fields exactly (fewest `_WILDCARD`s).
+    """The one matching row strictly narrower than every other, else all of them.
 
-    A row pinned to one channel for every account is narrower than a
-    deployment-wide default, so it serves that channel; equally specific
-    overlapping rows all remain and refuse as ambiguous.
+    A row is narrower when the scope fields it names exactly are a strict
+    superset of another's: a channel's own row with `"*"` accounts beats a
+    deployment-wide default. Rows naming different fields (a channel's row
+    and an account's row) are incomparable and all remain, so they refuse
+    as ambiguous instead of one silently shadowing the other's credentials.
     """
 
-    def exact_fields(row: dict[str, JsonValue]) -> int:
-        return sum(row.get(field) != _WILDCARD for field in _WILDCARDABLE_FIELDS)
+    def exact(row: dict[str, JsonValue]) -> frozenset[str]:
+        return frozenset(field for field in _WILDCARDABLE_FIELDS if row.get(field) != _WILDCARD)
 
-    if not rows:
-        return rows
-    best = max(exact_fields(row) for row in rows)
-    return [row for row in rows if exact_fields(row) == best]
+    for candidate in rows:
+        if all(exact(other) < exact(candidate) for other in rows if other is not candidate):
+            return [candidate]
+    return rows
 
 
 def select_runtime_manifest[Plan: CounterpartPlan](
@@ -2660,9 +2662,10 @@ def select_runtime_manifest[Plan: CounterpartPlan](
     `channel_id` and/or `account_id` — never on `tenant_id` or `profile`. An
     exact match always wins over a wildcard row (computed first, tried first);
     wildcard rows are only consulted when no exact row matches. Among those,
-    the rows naming the most scope fields exactly win (a channel's own row,
-    even with `"*"` accounts, beats a deployment-wide default), and the
-    existing "exactly one candidate or refuse" rule applies to what remains.
+    a row whose exactly named scope fields strictly include every other
+    candidate's wins (a channel's own row, even with `"*"` accounts, beats a
+    deployment-wide default); otherwise the existing "exactly one candidate
+    or refuse" rule refuses them as ambiguous.
     The resolved plan always carries the request's real platform/channel_id/
     account_id — a wildcard row is a template, never a literal "*" identity.
     """
