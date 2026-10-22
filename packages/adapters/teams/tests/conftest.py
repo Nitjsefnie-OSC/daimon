@@ -342,6 +342,8 @@ class TeamsApiFake:
     """Entra object ids whose member lookup names no tenant."""
     roles: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
     """`userRole` a member lookup answers with, by Entra object id (default `user`)."""
+    channel_types: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
+    """The type a team's channel listing gives a channel, by id (default `standard`)."""
     failing_members: set[str] = dataclasses.field(default_factory=set[str])
     """Entra object ids whose member lookup fails with a 500."""
 
@@ -366,7 +368,10 @@ class TeamsApiFake:
         )
         team = re.search(r"/v3/teams/([^/]+)$", httpx.URL(context.url).path)
         if context.method == "GET" and httpx.URL(context.url).path.endswith("/conversations"):
-            listed = [{"id": c, "name": n, "type": "standard"} for c, n in self.channels.items()]
+            listed = [
+                {"id": c, "name": n, "type": self.channel_types.get(c, "standard")}
+                for c, n in self.channels.items()
+            ]
             if "/v3/teams/" in context.url:
                 return httpx.Response(200, json={"conversations": listed}, request=request)
         if context.method == "GET" and team:

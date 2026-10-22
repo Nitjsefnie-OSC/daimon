@@ -31,12 +31,14 @@ from daimon.adapters.teams.commands import (
     parse_command,
 )
 from daimon.adapters.teams.direct_chats import DirectChats
+from daimon.adapters.teams.external_clicks import EXTERNAL_REFUSAL
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TeamsSender, send_error_details
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
 from daimon.core.memory_view import parse_memory_args
 from daimon.core.turn.errors import AdmissionDenialReason
+from daimon.core.turn_hold import RequesterOrg
 from microsoft_teams.api import Account, MessageActivity, MessageActivityInput, SentActivity
 from microsoft_teams.apps import ActivityContext
 from microsoft_teams.common import ExperimentalWarning
@@ -50,6 +52,9 @@ warnings.filterwarnings(
 
 # Commands answered privately in the thread; the rest keep the 1:1 chat.
 IN_THREAD = frozenset({"help", "here", "memory", "routines", "billing", "privacy"})
+# Commands anyone may run: they read nothing of the host's. Every other command reads
+# host data (memory, routines, billing, setup, the channel's status) or changes it.
+OPEN_TO_ANYONE = frozenset({"help"})
 NOT_YET_PRIVATE = (
     "Private questions aren't supported yet. Mention {bot} here to ask openly, "
     "or ask me in our 1:1 chat."
@@ -197,6 +202,10 @@ class PrivateReplies:
             await self.tell_sender(inbound, notice.format(bot=bot))
             return
         name, args = command
+        if inbound.requester_org is not RequesterOrg.HOST and name not in OPEN_TO_ANYONE:
+            # From another organisation, or not placed as one of ours: host people only.
+            await self.tell_sender(inbound, EXTERNAL_REFUSAL)
+            return
         if inbound.kind == "dm":
             routed = await route_to_setup(self._runtime.sessionmaker, inbound, tenant_id)
             await self._invoke(name, args, routed, tenant_id, send=self._public(routed))
@@ -220,8 +229,10 @@ class PrivateReplies:
                     await self.tell_sender(inbound, UNSHOWN.format(name=f"{name} {args}"))
                     return
                 # Otherwise nothing shown yet: answered in full in the 1:1 chat.
-        if inbound.is_foreign:
-            await self.tell_sender(inbound, NO_CHAT_ACROSS_ORGS.format(name=name))
+        if inbound.requester_org is not RequesterOrg.HOST:
+            # No 1:1 chat is opened for anyone not placed as one of ours.
+            text = NO_CHAT_ACROSS_ORGS.format(name=name) if inbound.is_foreign else EXTERNAL_REFUSAL
+            await self.tell_sender(inbound, text)
             return
         chat = await self._direct_chat(inbound)
         pointer = ANSWERED_IN_CHAT if chat else CHANNEL_POINTER

@@ -19,6 +19,7 @@ import uuid
 from collections.abc import Awaitable, Callable
 from typing import Any
 
+from daimon.adapters.teams.card_actions import submitted_fields
 from daimon.adapters.teams.identity import canonical_uuid, classify_sender, live_tenant_id
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.platform_words import words_for
@@ -28,7 +29,13 @@ from daimon.core.turn_hold import RequesterOrg
 from microsoft_teams.api import InvokeActivity
 from microsoft_teams.apps import ActivityContext
 
-__all__ = ["EXTERNAL_REFUSAL", "clicker_org", "host_only", "own_thread_only"]
+__all__ = [
+    "EXTERNAL_REFUSAL",
+    "clicker_org",
+    "host_only",
+    "own_thread_only",
+    "unbound_confirmation",
+]
 
 EXTERNAL_REFUSAL = f"That's only for people in the {words_for('teams').space} that added Daimon."
 
@@ -63,17 +70,39 @@ def _outside_a_chat(org: RequesterOrg, activity: InvokeActivity) -> bool:
 
 
 def host_only[C: ActivityContext[Any], R](
-    runtime: TeamsRuntime, handler: Callable[[C], Awaitable[R]], refuse: Refuse[R]
+    runtime: TeamsRuntime,
+    handler: Callable[[C], Awaitable[R]],
+    refuse: Refuse[R],
+    *,
+    applies: Callable[[C], bool] = lambda _ctx: True,
 ) -> Callable[[C], Awaitable[R]]:
-    """`handler`, but a clicker outside the organisation (or unplaced) gets `refuse`'s answer."""
+    """`handler`, but a clicker outside the organisation (or unplaced) gets `refuse`'s answer.
+
+    `applies` narrows the guard to the clicks that need it; the rest reach `handler` as is.
+    """
 
     @functools.wraps(handler)
     async def guarded(ctx: C) -> R:
+        if not applies(ctx):
+            return await handler(ctx)
         if _outside_a_chat(await clicker_org(runtime, ctx.activity), ctx.activity):
             return refuse(EXTERNAL_REFUSAL)
         return await handler(ctx)
 
     return guarded
+
+
+_REQUESTER_BOUND_OPS = frozenset({"approve", "deny", "details"})
+
+
+def unbound_confirmation(ctx: ActivityContext[Any]) -> bool:
+    """A confirmation click that is not requester-bound: `always` and anything unrecognised.
+
+    Approve and Deny check the turn's requester themselves. `always` saves an agent-wide
+    rule, so it needs a clicker placed as one of ours, as does any op not listed.
+    """
+    op = submitted_fields(ctx.activity.value.action.data).get("op")
+    return op not in _REQUESTER_BOUND_OPS
 
 
 def own_thread_only[C: ActivityContext[Any], R](

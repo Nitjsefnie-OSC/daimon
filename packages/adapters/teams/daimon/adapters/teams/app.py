@@ -828,17 +828,28 @@ class TeamsApp:
         return await inbound_role(self.runtime, self._teams, inbound)
 
     async def _placed(self, inbound: TeamsInbound) -> TeamsInbound:
-        """`inbound` with the sender's organisation settled where the activity could not.
+        """`inbound` with the sender's organisation and the channel's sharing settled
+        where the activity could not.
 
-        An UNKNOWN sender is looked up in the channel's roster. A lookup that cannot say
-        leaves them UNKNOWN, which core holds to the one channel for this turn only.
+        An UNKNOWN sender is looked up in the channel's roster. Sharing is settled on its
+        own, from the channel's explicit type: a roster that confirms a member says nothing
+        about outsiders also being there. Anything still unsettled stays unknown, which
+        holds the turn (`_admit_args`) without recording anything.
         """
-        if inbound.requester_org is not RequesterOrg.UNKNOWN:
-            return inbound
-        org, home_id = await self._orgs.resolve(inbound.channel_id, inbound.user_id)
+        org, home_id, shared = inbound.requester_org, inbound.home_tenant_id, inbound.channel_shared
         if org is RequesterOrg.UNKNOWN:
+            org, home_id = await self._orgs.resolve(inbound.channel_id, inbound.user_id)
+        if shared is None and inbound.kind == "channel" and inbound.team_id:
+            shared = await self._orgs.resolve_shared(inbound.team_id, inbound.channel_id)
+        if (org, home_id, shared) == (
+            inbound.requester_org,
+            inbound.home_tenant_id,
+            inbound.channel_shared,
+        ):
             return inbound
-        return dataclasses.replace(inbound, requester_org=org, home_tenant_id=home_id)
+        return dataclasses.replace(
+            inbound, requester_org=org, home_tenant_id=home_id, channel_shared=shared
+        )
 
     def _first_delivery(self, conversation_id: str, activity_id: str) -> bool:
         key = (conversation_id, activity_id)
@@ -1209,7 +1220,8 @@ class TeamsApp:
         if command is None and not inbound.is_targeted:
             await self._orchestrate(inbound, tenant_id)
         elif await self._finish([inbound]):
-            await self._private.run(inbound, tenant_id, command)
+            # Commands read host data and may open 1:1 chats: placed before any runs.
+            await self._private.run(await self._placed(inbound), tenant_id, command)
 
     async def _find_card(self, intent: TurnCardIntentRow) -> str | None:
         """A channel card whose post returned no id, found by its Cancel key."""
@@ -1433,6 +1445,8 @@ class TeamsApp:
                 requester_org=inbound.requester_org,
                 requester_home_id=inbound.home_tenant_id,
                 channel_shared=inbound.channel_shared,
+                # A channel whose sharing is unknown is held for this turn, never assumed own.
+                hold_unknown_place=inbound.kind == "channel" and inbound.channel_shared is None,
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
             refusal = _admission_refusal(

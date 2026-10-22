@@ -30,6 +30,7 @@ from daimon.core.stores.teams_message_admissions import (
     prune_teams_messages,
     reclaim_teams_messages,
 )
+from daimon.core.turn_hold import RequesterOrg
 from pydantic import JsonValue, TypeAdapter, ValidationError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -45,6 +46,19 @@ HOLDING = "I'm restarting for an update. I'll pick this up as soon as I'm back."
 NOT_HELD = "I restarted for an update and couldn't get to this in time. Please send it again."
 
 _INBOUND = TypeAdapter(TeamsInbound)
+
+
+def stored_payload(inbound: TeamsInbound) -> dict[str, JsonValue]:
+    """`inbound` as kept for a replay.
+
+    Carries `is_foreign`, which this build derives, because the build a rollback returns
+    to reads it as a stored field and treats a missing one as False. Anyone not placed as
+    one of ours is True there, so a queued message from another organisation or an
+    unplaced sender is never admitted unrestricted by the older build.
+    """
+    payload: dict[str, JsonValue] = _INBOUND.dump_python(inbound, mode="json")
+    payload["is_foreign"] = inbound.requester_org is not RequesterOrg.HOST
+    return payload
 
 
 def admission_channel(conversation_id: str) -> str:
@@ -90,9 +104,7 @@ class TeamsAdmissions:
         A typed "@<bot name>" thread reply may too: its replay reads the switch again.
         """
         asks = not inbound.unprompted or inbound.by_name
-        message: dict[str, JsonValue] | None = (
-            _INBOUND.dump_python(inbound, mode="json") if asks else None
-        )
+        message = stored_payload(inbound) if asks else None
         async with self.sessionmaker.begin() as session:
             return await claim_teams_message(
                 session,

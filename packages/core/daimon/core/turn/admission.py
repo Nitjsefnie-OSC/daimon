@@ -320,6 +320,7 @@ async def admit(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    hold_unknown_place: bool = False,
 ) -> Admission:
     """Admit a turn, or raise the typed reason it is refused.
 
@@ -329,6 +330,8 @@ async def admit(
     signal that the channel is shared with another organisation (None: no signal).
     A client (another organisation, unknown, or one already recorded as foreign) is
     held to the channel it asked in, as is anyone in a shared channel.
+    `hold_unknown_place` holds this one turn when the platform could not say whether
+    the channel is shared; it records nothing, so no shared marker is written.
     """
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
@@ -353,6 +356,7 @@ async def admit(
                 requester_org=requester_org,
                 requester_home_id=requester_home_id,
                 channel_shared=channel_shared,
+                hold_unknown_place=hold_unknown_place,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -416,6 +420,7 @@ async def admit_impl(
     requester_org: RequesterOrg,
     requester_home_id: str | None = None,
     channel_shared: bool | None = None,
+    hold_unknown_place: bool = False,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool."""
     started = last_stage = perf_counter()
@@ -459,7 +464,8 @@ async def admit_impl(
         if is_dm and client:
             # A client has no private conversation with Daimon.
             raise AdmissionDenied(reason="client_requester")
-        hold = TurnHold(platform, channel_id, client) if (client or shared) and not is_dm else None
+        held = client or shared or hold_unknown_place
+        hold = TurnHold(platform, channel_id, client) if held and not is_dm else None
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
         mark("policy_and_admins")

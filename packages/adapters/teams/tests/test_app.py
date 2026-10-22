@@ -21,10 +21,10 @@ from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.commands import (
     ANSWERED_IN_CHAT,
     CHANNEL_POINTER,
-    NO_CHAT_ACROSS_ORGS,
     fresh_start,
 )
 from daimon.adapters.teams.context import HistoryBlock
+from daimon.adapters.teams.external_clicks import EXTERNAL_REFUSAL
 from daimon.adapters.teams.identity import INPUT_TOO_LONG, MAX_INBOUND_MESSAGE_BYTES, TeamsInbound
 from daimon.adapters.teams.lifecycle import TeamsTurnLifecycle
 from daimon.core.access_policy import TenantAccessPolicy
@@ -585,7 +585,7 @@ async def test_a_channel_command_from_another_organisation_is_not_sent_to_a_1_1_
     )
     await teams._handle(inbound)
     [(_, reply, _)] = sender.sent
-    assert reply.text == NO_CHAT_ACROSS_ORGS.format(name="support"), "no pointer they can't use"
+    assert reply.text == EXTERNAL_REFUSAL, "no pointer they can't use"
     assert direct.looked_up == [] and run.await_count == 0, "no 1:1 chat is attempted"
 
 

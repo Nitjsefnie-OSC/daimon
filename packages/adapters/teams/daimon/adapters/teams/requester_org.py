@@ -16,13 +16,13 @@ from __future__ import annotations
 import asyncio
 import time
 from collections import OrderedDict
-from collections.abc import Callable
+from collections.abc import Awaitable, Callable
 from dataclasses import dataclass
 from typing import Protocol
 
 import httpx
 import structlog
-from daimon.adapters.teams.identity import canonical_uuid
+from daimon.adapters.teams.identity import canonical_uuid, channel_shared_of
 from daimon.adapters.teams.lifecycle import SEND_TIMEOUT_S
 from daimon.core.teams_bot_framework import SERVICE_URL
 from daimon.core.turn_hold import RequesterOrg
@@ -32,6 +32,7 @@ __all__ = [
     "FOUND_TTL_S",
     "MISSED_TTL_S",
     "MemberFacts",
+    "ChannelTypeRead",
     "MemberRead",
     "RequesterOrgResolver",
     "SdkMemberRead",
@@ -60,6 +61,10 @@ class MemberFacts:
     aad_object_id: str | None
     tenant_id: str | None
     role: str | None
+
+
+type ChannelTypeRead = Callable[[str, str], Awaitable[str | None]]
+"""A channel's Bot Framework type (`standard`, `private`, `shared`) given its team and id."""
 
 
 class MemberRead(Protocol):
@@ -124,9 +129,12 @@ class RequesterOrgResolver:
         member_read: MemberRead | None,
         *,
         ours: str,
+        channel_type_read: ChannelTypeRead | None = None,
         clock: Callable[[], float] = time.monotonic,
     ) -> None:
         self._read = member_read
+        self._channel_type_read = channel_type_read
+        self._shared: OrderedDict[tuple[str, str], tuple[float, bool | None]] = OrderedDict()
         self._ours = ours
         self._clock = clock
         self._cache: OrderedDict[tuple[str, str], tuple[float, Verdict]] = OrderedDict()
@@ -142,6 +150,36 @@ class RequesterOrgResolver:
         settled = verdict[0] is not RequesterOrg.UNKNOWN
         self._remember(key, verdict, now + (FOUND_TTL_S if settled else MISSED_TTL_S))
         return verdict
+
+    async def resolve_shared(self, team_id: str, channel_id: str) -> bool | None:
+        """Whether the channel is shared, from its explicit type; None when that is not known.
+
+        Independent of who is asking: a roster that confirms a member says nothing about
+        whether outsiders are in the channel too. Only an explicit type counts.
+        """
+        key = (team_id, channel_id)
+        now = self._clock()
+        cached = self._shared.get(key)
+        if cached is not None and cached[0] > now:
+            return cached[1]
+        shared = await self._channel_shared(team_id, channel_id)
+        ttl = FOUND_TTL_S if shared is not None else MISSED_TTL_S
+        self._shared[key] = (now + ttl, shared)
+        self._shared.move_to_end(key)
+        while len(self._shared) > _CACHE_CAP:
+            self._shared.popitem(last=False)
+        return shared
+
+    async def _channel_shared(self, team_id: str, channel_id: str) -> bool | None:
+        if self._channel_type_read is None:
+            return None
+        try:
+            async with asyncio.timeout(SEND_TIMEOUT_S):
+                kind = await self._channel_type_read(team_id, channel_id)
+        except (httpx.HTTPError, TimeoutError, ValueError) as err:
+            log.warning("teams.channel_type_lookup.failed", error=type(err).__name__)
+            return None
+        return channel_shared_of(kind)
 
     async def _lookup(self, conversation_id: str, aad_object_id: str) -> Verdict:
         if self._read is None:

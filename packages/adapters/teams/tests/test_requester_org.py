@@ -9,6 +9,7 @@ the adapter reads whichever of them it is given fail-closed.
 from __future__ import annotations
 
 import asyncio
+import dataclasses
 import uuid
 from collections.abc import Awaitable, Callable
 from decimal import Decimal
@@ -19,7 +20,11 @@ from unittest.mock import AsyncMock, patch
 import httpx
 import pytest
 from daimon.adapters.teams import billing_panel, card, requester_org
-from daimon.adapters.teams.admissions import _INBOUND  # pyright: ignore[reportPrivateUsage]
+from daimon.adapters.teams.admissions import (
+    _INBOUND,  # pyright: ignore[reportPrivateUsage]
+    stored_payload,
+)
+from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.external_clicks import EXTERNAL_REFUSAL
 from daimon.adapters.teams.identity import (
     GraphSource,
@@ -49,6 +54,8 @@ from daimon.testing import build_fake_anthropic, ma_session
 from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
 from daimon.testing.turn_router import AGENT_ID, ENV_ID, build_turn_router
 from microsoft_teams.api import MessageActivity
+from pydantic import TypeAdapter
+from pydantic.dataclasses import dataclass as pydantic_dataclass
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
@@ -57,12 +64,15 @@ from .conftest import (
     ENTRA_TENANT_ID,
     OTHER_AAD_OBJECT_ID,
     THREAD_ID,
+    FakeSender,
     TeamsApiFake,
+    bot_token,
     build_teams_runtime,
     finish_turns,
     make_card_action,
     make_channel_activity,
     make_group_activity,
+    make_inbound,
     make_invoke,
     make_message_activity,
     post_activity,
@@ -516,8 +526,8 @@ def _row(*, thread: str, parent: str) -> Any:
 
 async def _continuation(
     db_session_factory: async_sessionmaker[AsyncSession], row: Any, fake: TeamsApiFake
-) -> tuple[RequesterOrg, str | None]:
-    """What admission is told about a queued turn's requester (admission itself refuses)."""
+) -> dict[str, Any]:
+    """What admission is told about a queued turn (admission itself refuses)."""
     await provision_tenant(db_session_factory, platform="teams", workspace_id=ENTRA_TENANT_ID)
     runtime = build_teams_runtime(db_session_factory)
     refused = AsyncMock(side_effect=AdmissionDenied(reason="writers_none"))
@@ -530,16 +540,17 @@ async def _continuation(
                 None,
             )
     [call] = refused.await_args_list
-    return call.kwargs["requester_org"], call.kwargs["requester_home_id"]
+    return dict(call.kwargs)
 
 
 async def test_a_channel_continuation_is_classified_by_the_roster_read_of_its_channel(
     db_session_factory: async_sessionmaker[AsyncSession],
 ) -> None:
     row = _row(thread=THREAD_ID, parent=CHANNEL_ID)
-    assert await _continuation(db_session_factory, row, TeamsApiFake()) == (HOST, None)
+    assert (await _continuation(db_session_factory, row, TeamsApiFake()))["requester_org"] is HOST
     elsewhere = TeamsApiFake(foreign_members={AAD_OBJECT_ID: OTHER_TENANT})
-    assert await _continuation(db_session_factory, row, elsewhere) == (OTHER, OTHER_TENANT)
+    theirs = await _continuation(db_session_factory, row, elsewhere)
+    assert (theirs["requester_org"], theirs["requester_home_id"]) == (OTHER, OTHER_TENANT)
 
 
 async def test_a_continuation_the_roster_cannot_place_stays_unknown_never_host(
@@ -547,7 +558,7 @@ async def test_a_continuation_the_roster_cannot_place_stays_unknown_never_host(
 ) -> None:
     row = _row(thread=THREAD_ID, parent=CHANNEL_ID)
     failing = TeamsApiFake(failing_members={AAD_OBJECT_ID})
-    assert await _continuation(db_session_factory, row, failing) == (UNKNOWN, None)
+    assert (await _continuation(db_session_factory, row, failing))["requester_org"] is UNKNOWN
 
 
 async def test_a_one_to_one_continuation_is_host_without_a_lookup(
@@ -555,7 +566,8 @@ async def test_a_one_to_one_continuation_is_host_without_a_lookup(
 ) -> None:
     fake = TeamsApiFake(failing_members={AAD_OBJECT_ID})
     row = _row(thread="a:conversation-1", parent="a:conversation-1")
-    assert await _continuation(db_session_factory, row, fake) == (HOST, None)
+    admitted = await _continuation(db_session_factory, row, fake)
+    assert admitted["requester_org"] is HOST and admitted["hold_unknown_place"] is False
 
 
 # --- clicks from outside the organisation -------------------------------------------------
@@ -650,3 +662,219 @@ async def test_an_outside_clicker_cannot_vote_on_an_answer_in_a_thread_they_did_
     )
     answer = await _clicked(db_session_factory, payload)
     assert EXTERNAL_REFUSAL in str(answer)
+
+
+async def test_a_channel_continuation_whose_sharing_is_unknown_is_held_for_that_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    row = _row(thread=THREAD_ID, parent=CHANNEL_ID)
+    admitted = await _continuation(db_session_factory, row, TeamsApiFake())
+    assert admitted["requester_org"] is HOST, "the roster confirms the member"
+    assert admitted["channel_shared"] is None and admitted["hold_unknown_place"] is True
+
+
+# --- sharing is settled apart from who is asking ----------------------------------------
+
+
+async def test_a_roster_confirmed_member_in_a_channel_of_unknown_type_is_still_held(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.stores.shared_channels import is_channel_shared
+
+    [(kwargs, admission)] = (await _turn(db_session_factory, make_channel_activity())).calls
+    assert kwargs["requester_org"] is HOST and kwargs["channel_shared"] is None
+    assert kwargs["hold_unknown_place"] is True
+    assert admission.hold is not None and not admission.hold.client
+    assert admission.shared_channel is False, "held, but never claimed to be shared"
+    async with db_session_factory() as session:
+        tenant = derive_tenant_uuid(platform="teams", workspace_id=ENTRA_TENANT_ID)
+        assert not await is_channel_shared(
+            session, tenant_id=tenant, platform="teams", channel_id=CHANNEL_ID
+        ), "nothing was recorded"
+
+
+async def test_a_channel_the_team_listing_types_standard_is_not_held(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = TeamsApiFake(channels={CHANNEL_ID: "Ops"})
+    [(kwargs, admission)] = (await _turn(db_session_factory, make_channel_activity(), fake)).calls
+    assert (kwargs["channel_shared"], kwargs["hold_unknown_place"]) == (False, False)
+    assert admission.hold is None
+
+
+async def test_a_channel_the_team_listing_types_shared_is_held_and_recorded(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    fake = TeamsApiFake(channels={CHANNEL_ID: "Ops"}, channel_types={CHANNEL_ID: "shared"})
+    [(kwargs, admission)] = (await _turn(db_session_factory, make_channel_activity(), fake)).calls
+    assert kwargs["channel_shared"] is True
+    assert admission.hold is not None and admission.shared_channel is True
+
+
+# --- commands are placed before they run -------------------------------------------------
+
+
+class _Direct:
+    def __init__(self) -> None:
+        self.looked_up: list[tuple[str, str]] = []
+
+    async def member(self, conversation_id: str, aad_object_id: str) -> str | None:
+        self.looked_up.append((conversation_id, aad_object_id))
+        return "29:member"
+
+    async def open_chat(self, member_id: str) -> str:
+        return "a:direct"
+
+    async def post(self, conversation_id: str, text: str) -> str:
+        raise AssertionError("commands answer through the sender")
+
+
+def _command_app(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    commands: dict[str, Any],
+    direct: _Direct,
+    sender: FakeSender,
+    verdict: tuple[RequesterOrg, str | None] | None = None,
+) -> TeamsApp:
+    runtime = build_teams_runtime(db_session_factory)
+    if verdict is not None:
+        read = AsyncMock(
+            return_value=MemberFacts(AAD_OBJECT_ID, verdict[1] or ENTRA_TENANT_ID, "user")
+        )
+        runtime = dataclasses.replace(
+            runtime, requester_orgs=RequesterOrgResolver(read, ours=ENTRA_TENANT_ID)
+        )
+    return TeamsApp(
+        runtime=runtime,
+        sender=sender,
+        commands=commands,
+        bot_token=bot_token,
+        direct=direct,  # pyright: ignore[reportArgumentType]
+    )
+
+
+def _typed(command: str, org: RequesterOrg) -> TeamsInbound:
+    return dataclasses.replace(
+        make_inbound(command, conversation=THREAD_ID, kind="channel"),
+        channel_id=CHANNEL_ID,
+        requester_org=org,
+    )
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+@pytest.mark.parametrize("org", [OTHER, UNKNOWN])
+@pytest.mark.parametrize("command", ["memory", "setup", "billing", "routines", "privacy", "here"])
+async def test_a_command_from_outside_or_unplaced_runs_nothing_and_opens_no_chat(
+    db_session_factory: async_sessionmaker[AsyncSession], org: RequesterOrg, command: str
+) -> None:
+    sender, direct, run = FakeSender(), _Direct(), AsyncMock()
+    teams = _command_app(db_session_factory, {command: run}, direct, sender)
+    await teams._handle(_typed(command, org))  # pyright: ignore[reportPrivateUsage]
+    assert run.await_count == 0, "no host data is read"
+    assert direct.looked_up == [], "no 1:1 chat is attempted"
+    [(_, reply, _)] = sender.sent
+    assert reply.text == EXTERNAL_REFUSAL
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_memory_path_in_a_targeted_reply_from_an_unplaced_sender_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender, direct, run = FakeSender(), _Direct(), AsyncMock()
+    teams = _command_app(db_session_factory, {"memory": run}, direct, sender)
+    inbound = dataclasses.replace(_typed("memory /notes.md", UNKNOWN), is_targeted=True)
+    await teams._handle(inbound)  # pyright: ignore[reportPrivateUsage]
+    assert run.await_count == 0 and direct.looked_up == []
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_a_command_is_placed_by_the_roster_before_it_runs(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    for verdict, runs in (((HOST, None), True), ((OTHER, OTHER_TENANT), False)):
+        sender, direct, run = FakeSender(), _Direct(), AsyncMock()
+        teams = _command_app(db_session_factory, {"memory": run}, direct, sender, verdict)
+        await teams._handle(_typed("memory", UNKNOWN))  # pyright: ignore[reportPrivateUsage]
+        [(_, reply, _)] = sender.sent
+        assert (reply.text != EXTERNAL_REFUSAL) is runs, (verdict, reply.text)
+        assert (direct.looked_up != []) is runs
+
+
+@pytest.mark.usefixtures("provisioned_tenant")
+async def test_help_stays_open_to_everyone(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    sender, direct, run = FakeSender(), _Direct(), AsyncMock()
+    teams = _command_app(db_session_factory, {"help": run}, direct, sender)
+    inbound = dataclasses.replace(_typed("help", UNKNOWN), sender_id="29:asker")
+    await teams._handle(inbound)  # pyright: ignore[reportPrivateUsage]
+    assert run.await_count == 1, "answered privately in the thread"
+    assert direct.looked_up == [], "and with no 1:1 chat opened for them"
+
+
+# --- tool confirmation: only the requester-bound clicks are open ------------------------
+
+
+@pytest.mark.parametrize(
+    "invoke",
+    [
+        {"from_tenant_id": OTHER_TENANT, "channel_type": "shared"},
+        {"channel_type": "shared"},
+    ],
+    ids=["outside", "unplaced"],
+)
+async def test_always_allow_needs_a_clicker_placed_as_ours(
+    db_session_factory: async_sessionmaker[AsyncSession], invoke: dict[str, Any]
+) -> None:
+    fake = TeamsApiFake(failing_members={AAD_OBJECT_ID})
+    answer = await _clicked(
+        db_session_factory, _click(TOOL_CONFIRM_VERB, "always", {"token": "t"}, **invoke), fake
+    )
+    assert answer["value"] == EXTERNAL_REFUSAL
+
+
+async def test_always_allow_from_a_placed_member_reaches_the_handler(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    answer = await _clicked(
+        db_session_factory,
+        _click(TOOL_CONFIRM_VERB, "always", {"token": "t"}, channel_type="shared"),
+    )
+    assert EXTERNAL_REFUSAL not in str(answer)
+
+
+async def test_an_unrecognised_confirmation_op_from_outside_is_refused(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    outside: dict[str, Any] = {"from_tenant_id": OTHER_TENANT, "channel_type": "shared"}
+    answer = await _clicked(
+        db_session_factory, _click(TOOL_CONFIRM_VERB, "remember", {"token": "t"}, **outside)
+    )
+    assert answer["value"] == EXTERNAL_REFUSAL
+
+
+# --- rollback: the previous build reads a stored `is_foreign` ----------------------------
+
+
+def _old_decoder() -> TypeAdapter[Any]:
+    """The previous build's `TeamsInbound`: the same fields, `is_foreign` stored, no org."""
+    new = {f.name for f in dataclasses.fields(TeamsInbound)} - {"requester_org", "channel_shared"}
+    fields: list[tuple[str, Any, Any]] = [
+        (name, Any, dataclasses.field(default=None)) for name in sorted(new)
+    ]
+    fields.append(("is_foreign", bool, dataclasses.field(default=False)))
+    return TypeAdapter(pydantic_dataclass(dataclasses.make_dataclass("OldInbound", fields)))
+
+
+@pytest.mark.parametrize(("org", "old_reads"), [(HOST, False), (OTHER, True), (UNKNOWN, True)])
+def test_a_pending_payload_reads_as_foreign_to_the_build_a_rollback_returns_to(
+    org: RequesterOrg, old_reads: bool
+) -> None:
+    inbound = dataclasses.replace(
+        _parse(make_channel_activity(channel_type="shared", from_tenant_id=OTHER_TENANT)),
+        requester_org=org,
+        home_tenant_id=OTHER_TENANT if org is OTHER else None,
+    )
+    old = _old_decoder().validate_python(stored_payload(inbound))
+    assert old.is_foreign is old_reads, "an unplaced or outside sender is never unrestricted"
+    assert _INBOUND.validate_python(stored_payload(inbound)).requester_org is org

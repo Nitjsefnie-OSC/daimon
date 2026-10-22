@@ -40,6 +40,7 @@ async def _admit(
     role: Role | None = Role.USER,
     home_id: str | None = None,
     channel_shared: bool | None = None,
+    hold_unknown_place: bool = False,
     is_dm: bool = False,
     channel_id: str = CHANNEL,
     user: str = USER,
@@ -57,6 +58,7 @@ async def _admit(
         requester_org=org,
         requester_home_id=home_id,
         channel_shared=channel_shared,
+        hold_unknown_place=hold_unknown_place,
     )
 
 
@@ -321,3 +323,25 @@ async def test_a_default_agent_still_runs_in_a_shared_channel_under_agent_rules(
         db_session_factory, tmp_path, tenant, org=RequesterOrg.OTHER, home_id=HOME
     )
     assert admission.hold is not None
+
+
+async def test_a_place_the_platform_could_not_classify_holds_that_turn_and_marks_nothing(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    unheld = await _admit(db_session_factory, tmp_path, tenant)
+    assert unheld.hold is None
+
+    held = await _admit(db_session_factory, tmp_path, tenant, hold_unknown_place=True)
+    assert held.hold == TurnHold(PLATFORM, CHANNEL, client=False)
+    assert held.shared_channel is False, "held, but not claimed to be shared"
+    assert not await is_channel_shared(
+        db_session, tenant_id=tenant.id, platform=PLATFORM, channel_id=CHANNEL
+    )
+    after = await _admit(db_session_factory, tmp_path, tenant)
+    assert after.hold is None, "nothing persisted: the next turn is judged afresh"
+
+    dm = await _admit(
+        db_session_factory, tmp_path, tenant, is_dm=True, channel_id="D1", hold_unknown_place=True
+    )
+    assert dm.hold is None, "a direct message is not a place that can be shared"

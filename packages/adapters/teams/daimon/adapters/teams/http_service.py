@@ -41,7 +41,7 @@ from daimon.adapters.teams.channel_subscriptions import (
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.deployment_admins import demoting_owner_reads
 from daimon.adapters.teams.direct_chats import SdkDirectChats
-from daimon.adapters.teams.external_clicks import host_only, own_thread_only
+from daimon.adapters.teams.external_clicks import host_only, own_thread_only, unbound_confirmation
 from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, VOTE_TITLE, TeamsFeedback
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.here import show_here
@@ -275,19 +275,22 @@ def create_teams_http_service(
         # `spawn` is bound below, before any read: the drain waits for a demotion.
         in_background=lambda coro: spawn(coro, name="teams.admin_demotion"),
     )
-    runtime = dataclasses.replace(
-        runtime,
-        team_owners=owner_reads,
-        requester_orgs=runtime.requester_orgs
-        or RequesterOrgResolver(
-            SdkMemberRead(teams_app), ours=canonical_uuid(settings.tenant_id) or settings.tenant_id
-        ),
-    )
 
     async def channel_type(team_id: str, channel_id: str) -> str | None:
         api = teams_app.api.from_service_url(SERVICE_URL)
         channels = await api.teams.get_conversations(team_id)
         return next((channel.type for channel in channels if channel.id == channel_id), None)
+
+    runtime = dataclasses.replace(
+        runtime,
+        team_owners=owner_reads,
+        requester_orgs=runtime.requester_orgs
+        or RequesterOrgResolver(
+            SdkMemberRead(teams_app),
+            ours=canonical_uuid(settings.tenant_id) or settings.tenant_id,
+            channel_type_read=channel_type,
+        ),
+    )
 
     teams_tenant = derive_tenant_uuid(platform="teams", workspace_id=settings.tenant_id)
 
@@ -442,7 +445,10 @@ def create_teams_http_service(
     teams_app.on_card_action_execute(routines_card.VERB, action(routines.on_action))
     teams_app.on_card_action_execute(privacy_card.VERB, action(privacy.on_action))
     teams_app.on_card_action_execute(billing_panel.VERB, action(billing.on_action))
-    teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
+    teams_app.on_card_action_execute(
+        tool_confirmation.VERB,
+        action(turns.confirmations.on_action, applies=unbound_confirmation),
+    )
     teams_app.on_card_action_execute(
         provider_actions.VERB, action(turns.provider_actions.on_action)
     )

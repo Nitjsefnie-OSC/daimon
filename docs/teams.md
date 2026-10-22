@@ -132,8 +132,15 @@ organisation or from someone Daimon cannot place answers "That's only for people
 the organisation that added Daimon." Only Stop and Approve or Deny on the turn's own
 card, and feedback in a thread the person asked in, still work.
 
+Text commands follow the same rule: `help` answers anyone, and every other command
+(including `memory` with a path) is for people placed as ours, so it refuses everyone
+else and never opens a 1:1 chat for them. "Always allow" on a tool confirmation is
+likewise only for people placed as ours.
+
 A channel is shared when Teams types it `shared`; a channel type that is missing or
-unrecognised is never assumed to be standard. A shared channel another organisation
+unrecognised is never assumed to be standard. When Daimon cannot learn the type (from
+the message or the team's channel list), that turn is held to the channel as a
+precaution and nothing is recorded about the channel. A shared channel another organisation
 hosts keeps its files on that organisation's site.
 
 These rules are built from the documented Bot Framework and Graph fields and tested
