@@ -74,10 +74,21 @@ from mux.state.operations import SendClaimed, request_digest
 from mux.state.store import StateStore
 
 BASE_AGENT = "antigravity-preview-05-2026"
+INTERACTION_READ_RETRY_DELAYS_S = (0.5, 1.0, 2.0, 4.0, 8.0)
+"""Bounded ~15.5s backoff for transient 5xx/network failures on interactions.get.
+
+The interaction was already accepted, so only the read is retried; nothing is
+re-created or resent. Callers bound the whole read with their own deadline.
+"""
 
 
 def now() -> datetime:
     return datetime.now(UTC)
+
+
+def transient_read_failure(error: ProviderError) -> bool:
+    """Capacity, 5xx and network failures; 4xx and malformed replies stay final."""
+    return error.retryable and error.category in ("overloaded", "upstream", "transient_network")
 
 
 def refuse(*features: str) -> NoReturn:
@@ -227,9 +238,28 @@ class Base:
             raise OperationConflict(key)
         return prior[2]
 
+    async def _read(self, interaction: str) -> Object:
+        for delay in INTERACTION_READ_RETRY_DELAYS_S:
+            try:
+                return await self._transport.get(interaction)
+            except ProviderError as exc:
+                if not transient_read_failure(exc):
+                    raise
+            await asyncio.sleep(delay)
+        try:
+            return await self._transport.get(interaction)
+        except ProviderError as exc:
+            if not transient_read_failure(exc):
+                raise
+            raise ProviderError(
+                exc.category,
+                retryable=exc.retryable,
+                native_code=f"{exc.native_code or exc.category}_read_retries_exhausted",
+            ) from exc
+
     async def _get(self, record: SessionRecord, interaction: str) -> Object:
         try:
-            raw = await self._transport.get(interaction)
+            raw = await self._read(interaction)
         except ProviderError as exc:
             if exc.category == "not_found":
                 raise ContinuityLost(

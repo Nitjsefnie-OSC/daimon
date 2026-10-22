@@ -88,6 +88,21 @@ def checked_storage_response(
     return value
 
 
+def high_demand(error: Exception) -> bool:
+    """Gemini reports capacity blips as HTTP 500 api_error ("high demand")."""
+    message: object = getattr(error, "message", None)
+    if isinstance(message, str) and "high demand" in message.lower():
+        return True
+    # Interactions errors carry `body`; the google-genai APIError carries `details`.
+    body: object = getattr(error, "body", None) or getattr(error, "details", None)
+    if isinstance(body, dict):
+        payload = cast(dict[str, object], body)
+        nested = payload.get("error", payload)
+        if isinstance(nested, dict):
+            return cast(dict[str, object], nested).get("code") == "api_error"
+    return False
+
+
 def normalize_error(error: Exception) -> ProviderError:
     status = (
         error.status_code
@@ -106,6 +121,9 @@ def normalize_error(error: Exception) -> ProviderError:
     }
     if isinstance(error, APIConnectionError | httpx.HTTPError):
         return ProviderError("transient_network", retryable=True)
+    if status is not None and status >= 500 and status != 503 and high_demand(error):
+        # Distinct from 503: the Flash fallback chain moves models only on a 503.
+        return ProviderError("overloaded", retryable=True, native_code="high_demand")
     category = categories.get(status or 0, "upstream")
     return ProviderError(
         category,
