@@ -21,6 +21,7 @@ from daimon.core.config import (
     DatabaseSettings,
     GithubAppSettings,
     McpSettings,
+    RecruitmentSettings,
     Settings,
 )
 from daimon.core.github_connect_cards import build_connect_card
@@ -64,7 +65,9 @@ async def test_discord_mention_card_has_no_url_and_slack_mention_is_ephemeral(
         public_base_url="https://mcp.test",
     )
     monkeypatch.setattr(connect_tool, "resolve_connect_card", AsyncMock(return_value=card))
-    runtime = SimpleNamespace(session_factory=object(), settings=object())
+    runtime = SimpleNamespace(
+        session_factory=object(), settings=SimpleNamespace(recruitment=RecruitmentSettings())
+    )
     discord_auth = SimpleNamespace(external_id="123", tenant_id=uuid.uuid4())
     await connect_tool._post_discord_connect_card(  # pyright: ignore[reportPrivateUsage]
         runtime,  # type: ignore[arg-type]
