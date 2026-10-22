@@ -8,7 +8,13 @@ from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ChannelRef, ModelRef, PageRequest, ResourceRef, Scope, ThreadRef
-from mux.contracts.resources import AgentSpec, EnvironmentSpec, MCPConnection, SessionSpec
+from mux.contracts.resources import (
+    AgentSpec,
+    EnvironmentSpec,
+    MCPConnection,
+    Session,
+    SessionSpec,
+)
 from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.core import compile_agent
 from mux.drivers.gemini.mcp_auth import (
@@ -18,10 +24,12 @@ from mux.drivers.gemini.mcp_auth import (
     validate_tools,
 )
 from mux.drivers.gemini.normalize import saved_events
-from mux.errors import UnsupportedCapability
+from mux.errors import ContinuityLost, UnsupportedCapability
+from mux.state.memory import MemoryStateStore
 
 URL = "https://daimon.invalid/mcp"
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")
+MESSAGE = UserMessage(content=(TextPart(text="hi"),))
 THREAD = ThreadRef(
     channel=ChannelRef(tenant_id="t", platform="discord", channel_id="c"), thread_id="th"
 )
@@ -103,11 +111,8 @@ def test_saved_steps_map_native_server_names_back() -> None:
     assert [c["mcp_server"] for c in calls] == ["daimon-mcp", "unlisted"]
 
 
-@pytest.mark.asyncio
-async def test_session_round_trip_sends_snake_case_and_journals_declared_name() -> None:
+async def hyphenated_session() -> tuple[GeminiManagedAgents, FakeTransport, MemoryStorage, Session]:
     t, storage = FakeTransport(), MemoryStorage()
-    from mux.state.memory import MemoryStateStore
-
     ma = GeminiManagedAgents(
         t, storage=storage, state_store=MemoryStateStore(), account_scope_id="project"
     )
@@ -138,6 +143,12 @@ async def test_session_round_trip_sends_snake_case_and_journals_declared_name() 
         ),
         key="session",
     )
+    return ma, t, storage, s
+
+
+@pytest.mark.asyncio
+async def test_session_round_trip_sends_snake_case_and_journals_declared_name() -> None:
+    ma, t, _, s = await hyphenated_session()
     stamp = datetime.now(UTC).isoformat()
     t.responses.append(
         {
@@ -158,10 +169,30 @@ async def test_session_round_trip_sends_snake_case_and_journals_declared_name() 
             ],
         }
     )
-    await ma.events.send(SCOPE, s.ref, (UserMessage(content=(TextPart(text="hi"),)),), key="one")
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
     assert [tool for tool in t.requests[0]["tools"] if tool["type"] == "mcp_server"] == [
         {"type": "mcp_server", "name": "daimon_mcp", "url": URL}
     ]
     page = await ma.events.list(SCOPE, s.ref, page=PageRequest())
     (call,) = [e.payload for e in page.data if e.type == "agent.tool_use"]
     assert call["executor"] == "mcp" and call["mcp_server"] == "daimon-mcp"
+
+
+@pytest.mark.asyncio
+async def test_saved_hyphenated_session_asks_for_a_new_thread_without_dispatch() -> None:
+    ma, t, storage, s = await hyphenated_session()
+    # A record persisted before names were mapped: hyphenated wire name, no map.
+    async with storage.transaction() as records:
+        record = records.sessions[s.ref.id]
+        for tool in record.request["tools"]:
+            if isinstance(tool, dict) and tool.get("type") == "mcp_server":
+                tool["name"] = "daimon-mcp"
+        record.mcp_server_names = {}
+    with pytest.raises(ContinuityLost) as lost:
+        await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    assert lost.value.binding_id == "b"
+    assert "mcp_server_name" in str(lost.value) and "start a new thread" in str(lost.value)
+    assert t.requests == [] and t.read_requests == []
+    with pytest.raises(UnsupportedCapability) as refused:
+        validate_tools([{"type": "mcp_server", "name": "daimon-mcp", "url": URL}])
+    assert refused.value.missing == ("mcp_server_name",)

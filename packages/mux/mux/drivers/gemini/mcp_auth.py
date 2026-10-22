@@ -25,6 +25,7 @@ _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}\Z")
 # "MCP server name must be lowercase and snake case".
 _SERVER_NAME = re.compile(r"[a-z][a-z0-9_]{0,127}\Z")
 _PROFILE = "gemini.inline_reuse"
+LEGACY_SERVER_NAME = "mcp_server_name"
 
 
 @dataclass(frozen=True)
@@ -155,12 +156,11 @@ def validate_tools(value: JsonValue) -> None:
                 {"type", "name", "url", "allowed_tools"},
             ):
                 refuse("unbound_mcp_authentication")
-            if (
-                not destination(tool["url"])
-                or not isinstance(tool["name"], str)
-                or not _SERVER_NAME.fullmatch(tool["name"])
-            ):
+            if not destination(tool["url"]) or not isinstance(tool["name"], str):
                 refuse("https_mcp_destination")
+            if not _SERVER_NAME.fullmatch(tool["name"]):
+                # Requests saved before names were mapped (e.g. daimon-mcp).
+                refuse(LEGACY_SERVER_NAME)
         else:
             refuse("mcp_adjacent_tool_type")
 
