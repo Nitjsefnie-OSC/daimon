@@ -268,8 +268,17 @@ def _backend_refusal(
     revision: ConfigRevision | None,
     origin: Literal["channel", "agent", "default"] | None,
     enabled_backends: tuple[Provider, ...] | None,
+    error: Exception | None = None,
 ) -> AdmissionDenied:
     """A `backend_unsupported` refusal naming what to fix, for the refusal copy."""
+    if (
+        isinstance(error, channel_backend.AgentBackendRefused)
+        and error.reason == "backend_not_allowed"
+    ):
+        # The agent's own provider, refused by the allowlist before any revision exists.
+        return AdmissionDenied(
+            reason="backend_unsupported", cause="provider_not_allowed", provider=error.provider
+        )
     provider = revision.backend if revision is not None else None
     cause: BackendRefusalCause | None = None
     if (
@@ -995,7 +1004,7 @@ async def admit_impl(
                     except (channel_backend.AgentBackendRefused, BackendUnsupported) as error:
                         _log_backend_unsupported("agent_preference", error)
                         raise _backend_refusal(
-                            backend_revision, source, policy.enabled_backends
+                            backend_revision, source, policy.enabled_backends, error
                         ) from error
                     # Preparation uses another transaction. Publish the immutable
                     # effective revision and its origin before that transaction.

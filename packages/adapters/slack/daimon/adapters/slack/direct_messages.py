@@ -114,7 +114,9 @@ def _error_message(exc: Exception, *, settings: Settings, team_id: str) -> str:
             _log_dm_setup_needed(team_id=team_id, cause=str(code))  # pyright: ignore[reportUnknownArgumentType]  # SlackApiError.response is untyped
             return _REAUTHORIZE
     if isinstance(exc, AdmissionDenied):
-        return admission_refusal_message(exc.reason, settings, in_dm=True)
+        return admission_refusal_message(
+            exc.reason, settings, in_dm=True, cause=exc.cause, provider=exc.provider
+        )
     return render_error(exc, request_id=bound_request_id())
 
 

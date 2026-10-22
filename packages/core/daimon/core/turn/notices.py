@@ -15,6 +15,7 @@ from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
 from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from mux.contracts.config import DEFAULT_BACKEND
 from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 
@@ -226,11 +227,11 @@ _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
     ),
     "provider_not_allowed": _Copy(
         "{Provider} isn't turned on for this {scope}.",
-        'Ask {who} to turn it on, or to say "switch {agent_mid} to Anthropic".',
+        'Ask {who} to turn it on, or to say "switch {agent_mid} to {default}".',
     ),
     "agent_backend": _Copy(
         "{agent} runs on {provider}, which isn't set up here yet.",
-        'Ask {who} to say "switch {agent_mid} to Anthropic", or to finish setting up {provider}.',
+        'Ask {who} to say "switch {agent_mid} to {default}", or to finish setting up {provider}.',
     ),
 }
 _PROVIDER_NAMES = {
@@ -280,6 +281,7 @@ def admission_refusal_text(
         "agent": agent,
         "agent_mid": agent_name or "this agent",
         "provider": named,
+        "default": provider_name(DEFAULT_BACKEND),
         "Provider": _capitalised(named),
         "scope": nouns.scope,
         "setup": nouns.setup,

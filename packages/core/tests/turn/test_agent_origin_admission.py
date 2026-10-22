@@ -214,3 +214,19 @@ async def test_reauthorization_logs_a_removed_workspace_backend(selector_host):
     assert any(row.get("stage") == "workspace_policy" for row in logs)
     assert any(row.get("stage") == "reauthorize_policy" for row in logs)
     assert (len(host.wire.requests), len(host.calls)) == before
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_an_agent_on_a_provider_the_allowlist_removed_names_that_provider(selector_host):
+    from daimon.core.access_policy import TenantAccessPolicy
+    from daimon.core.stores.access_policy import set_access_policy
+
+    host = selector_host
+    service, agent, actor = preference_for(host)
+    await service.set_backend(agent, "openai", 0, actor)
+    async with host.sessions.begin() as db:
+        await set_access_policy(db, tenant_id=TENANT, policy=TenantAccessPolicy())
+    with pytest.raises(AdmissionDenied, match="backend_unsupported") as refused:
+        await host.admit("new-thread")
+    assert (refused.value.cause, refused.value.provider) == ("provider_not_allowed", "openai")
+    assert host.wire.requests == [] and host.created == []

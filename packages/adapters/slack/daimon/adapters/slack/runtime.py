@@ -108,7 +108,10 @@ def admission_refusal_message(
         cause=cause,
         provider=provider,
     )
-    override = _FOREIGN_REFUSALS.get(reason) if foreign else None
+    # A provider refusal with a cause already names its fix in the foreign nouns
+    # (the people at the workspace that added Daimon): keep its two lines together.
+    caused = reason == "backend_unsupported" and cause is not None
+    override = _FOREIGN_REFUSALS.get(reason) if foreign and not caused else None
     if override is None:
         return text
     headline, next_step = override
