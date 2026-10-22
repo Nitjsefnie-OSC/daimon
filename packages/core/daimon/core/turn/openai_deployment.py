@@ -116,8 +116,12 @@ class OpenAIDeployment(BaseModel):
         elif self.environment_id is None:
             raise ValueError("persistent-workspace deployments require an environment identity")
         validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
-        if self.root_materialization and self.source_capabilities is not None:
-            raise ValueError("an agent template carries no operator capability inputs")
+        if self.root_materialization:
+            if self.source_capabilities is not None or self.skill_ids:
+                # Skills on a template would attach to every agent version it publishes.
+                raise ValueError("an agent template carries no operator capability inputs")
+            if self.spend_limit_usd_cents is None:
+                raise ValueError("an agent template serves every switched agent: cap its spend")
         if self.source_capabilities is not None:
             if (
                 self.profile != PROFILE

@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import asyncio
+import hashlib
 import json
 import os
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
@@ -2973,6 +2974,7 @@ async def materialize_root_counterpart(
     """
     from daimon.core.skills.ingest import SkillIngestError
     from daimon.core.stores.neutral_catalog import CatalogConflict
+    from sqlalchemy import text
 
     validate_counterpart_request(plan, request)
     source, target = request.source, request.target_spec
@@ -2991,20 +2993,30 @@ async def materialize_root_counterpart(
         return await resources.entry(catalog_id)
     except SkillIngestError:
         pass
-    existing = await resources.catalog.get_agent(resources.scope, catalog_id)
-    if existing is not None:
-        # An archived entry is never republished over; this agent version stays refused.
-        log.warning(
-            "turn.root_counterpart_archived",
-            catalog_id=catalog_id,
-            lifecycle=existing.agent.lifecycle,
-            tenant_id=request.scope.tenant_id,
-        )
-        raise AdmissionDenied(reason="backend_unsupported")
-    try:
-        return await resources.publish(catalog_id, target, expected_revision=0, key=catalog_id)
-    except CatalogConflict:
-        return await resources.entry(catalog_id)
+    # Concurrent first turns publish one native agent: the loser waits, then reads
+    # the winner's entry. Catalog entries (and so this key) are per caller account.
+    body = json.dumps([request.scope.tenant_id, request.scope.account_id, plan.project, catalog_id])
+    key = int.from_bytes(hashlib.sha256(body.encode()).digest()[:8], signed=True)
+    async with request.deps.sessionmaker() as session, session.begin():
+        await session.execute(text("SELECT pg_advisory_xact_lock(:key)"), {"key": key})
+        try:
+            return await resources.entry(catalog_id)
+        except SkillIngestError:
+            pass
+        existing = await resources.catalog.get_agent(resources.scope, catalog_id)
+        if existing is not None:
+            # An archived entry is never republished over; this agent version stays refused.
+            log.warning(
+                "turn.root_counterpart_archived",
+                catalog_id=catalog_id,
+                lifecycle=existing.agent.lifecycle,
+                tenant_id=request.scope.tenant_id,
+            )
+            raise AdmissionDenied(reason="backend_unsupported")
+        try:
+            return await resources.publish(catalog_id, target, expected_revision=0, key=catalog_id)
+        except CatalogConflict:
+            return await resources.entry(catalog_id)
 
 
 async def materialize_counterpart(

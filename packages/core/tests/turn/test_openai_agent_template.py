@@ -47,6 +47,7 @@ def template_row(tenant_id: str, **changes: object) -> dict[str, object]:
         "project": "project",
         "environment_id": "native-template",
         "api_key_env": KEY,
+        "spend_limit_usd_cents": 50,
         "root_materialization": True,
     } | changes
 
@@ -109,6 +110,7 @@ async def test_two_concurrent_first_turns_publish_one_counterpart(template):
         read_preparation_counterpart(first), read_preparation_counterpart(second)
     )
     assert a.counterpart == b.counterpart and a.counterpart.local_revision == 1
+    assert len(agent_creates(wire)) == 1, "exactly one native agent, whatever the race"
 
 
 async def test_a_template_never_serves_another_tenant(template):
@@ -148,6 +150,9 @@ async def test_the_planned_session_never_uses_another_agents_counterpart(templat
         {"counterpart_catalog_id": "pinned"},
         {"agent_id": "native"},
         {"worker_materialization": True},
+        # Nor attach skills to every agent it publishes, or run uncapped.
+        {"skill_ids": ["skill_operator"]},
+        {"spend_limit_usd_cents": None},
     ],
 )
 def test_an_openai_template_row_can_pin_no_identity(pin):
