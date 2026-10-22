@@ -269,6 +269,8 @@ async def test_status_only_stream_failures_on_open_or_read_keep_the_turn(
     [
         ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
         ProviderError("upstream", retryable=False, native_code="malformed_interaction"),
+        http_error("upstream", 405, retryable=False),  # an unmapped 4xx is not a blip
+        ProviderError("upstream", retryable=False),  # status-less SDK error (validation)
     ],
 )
 async def test_definite_stream_failures_end_the_turn_and_stop_the_interaction(
@@ -311,3 +313,25 @@ async def test_abandon_is_bounded_and_never_raises(harness: Harness) -> None:
     # The cancel is accepted but Gemini never reports the stop.
     await asyncio.wait_for(io.abandon_native(timeout_s=0.2), timeout=2)
     assert harness.transport.cancelled == ["host"]
+
+
+@pytest.mark.asyncio
+async def test_rate_limited_stream_keeps_its_finalization_and_is_not_abandoned(
+    harness: Harness,
+) -> None:
+    script(harness, [http_error("rate_limited", 429, retryable=True)])
+    state, lifecycle = await turn(harness)
+    assert state.termination == TerminationReason.RATE_LIMITED
+    assert len(lifecycle.terminal_failures) == 1
+    # A rate-limited provider takes no extra calls; the interaction is left alone.
+    assert harness.transport.cancelled == []
+
+
+@pytest.mark.asyncio
+async def test_abandon_cancels_only_this_turns_interaction(harness: Harness) -> None:
+    harness.transport.responses.append(interaction("in_progress"))
+    io = GeminiTurnIO(harness.backend, SCOPE, harness.session)
+    await io.send([{"type": "user.message", "content": [{"type": "text", "text": "hi"}]}])
+    io.root = "an-earlier-turn"
+    await io.abandon_native()
+    assert harness.transport.cancelled == []

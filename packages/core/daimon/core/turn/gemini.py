@@ -617,13 +617,16 @@ class GeminiTurnIO:
         Best effort and bounded: a host failure must not leave Gemini working
         (and spending) on a reply nobody will deliver.
         """
-        if self.root is None:
+        root = self.root
+        if root is None:
             return
         try:
             async with asyncio.timeout(timeout_s):
-                if await self.status() not in {"running", "rescheduling"}:
+                projection = await self.backend.events.reconcile(self.scope, self.session)
+                # Only this turn's own interaction, and only while it still runs.
+                if projection.state != "running" or projection.active_root_turn != root:
                     return
-                stopped = await self._interrupt(timeout_s=timeout_s)
+                stopped = await self._interrupt(timeout_s=timeout_s, root=root)
             log.info(
                 "turn.gemini_native_abandoned",
                 session_id=self.session.id,
@@ -647,11 +650,12 @@ class GeminiTurnIO:
                 kind="interrupt_timeout", message="Gemini cancellation deadline expired"
             ) from error
 
-    async def _interrupt(self, *, timeout_s: float) -> StopObservation:
+    async def _interrupt(self, *, timeout_s: float, root: str | None = None) -> StopObservation:
         deadline = datetime.now(UTC) + timedelta(seconds=timeout_s)
         async with asyncio.timeout(timeout_s):
-            projection = await self.backend.events.reconcile(self.scope, self.session)
-            root = projection.active_root_turn or self.root
+            if root is None:
+                projection = await self.backend.events.reconcile(self.scope, self.session)
+                root = projection.active_root_turn or self.root
             if root is None:
                 records = await self._history()
                 root = next((event.turn_id for event in reversed(records) if event.turn_id), None)
@@ -727,14 +731,19 @@ class _StreamFailure(Exception):
 def _transient_stream_error(error: ProviderError) -> bool:
     """A failed SSE open/read that says nothing about the interaction itself.
 
-    HTTP-status-only upstream errors (an unmapped or 5xx status, no native
-    code) qualify whatever their retry flag; definite refusals, rate limits
-    (finalized with their retry-after) and errors from the driver's own
-    checks (a native code) do not.
+    Only network failures, overload, 408 and 5xx qualify. Other statuses
+    (an unmapped 4xx), status-less SDK errors, definite refusals, rate limits
+    (finalized with their retry-after) and the driver's own check failures (a
+    native code) end the turn.
     """
     if error.category in ("overloaded", "transient_network"):
         return True
-    return error.category == "upstream" and error.native_code is None
+    status = error.native_error_code or ""
+    return (
+        error.category == "upstream"
+        and error.native_code is None
+        and (status == "http_408" or status.startswith("http_5"))
+    )
 
 
 class _LazyStream(AsyncIterator[TurnEvent]):
