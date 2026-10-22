@@ -103,7 +103,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
-- Discord watches recheck live parent visibility, read history and private-thread membership (or Manage Threads) before running and before delivering output. Revoked or unverifiable access pauses the watch with a plain reason and never falls back to the parent channel. Slack and Teams watch enrollment remains unsupported.
+- Discord watches recheck live roles, parent visibility, read history and private-thread membership (or Manage Threads) before running and before every output, including the initial thinking card. Locked threads require Manage Threads. Revoked or unverifiable access pauses the watch with a plain reason and never falls back to the parent channel. Slack and Teams watch enrollment remains unsupported.
 
 - Unattended turns (agent chat `start_turn`/`ask`, routines, watches and wakes)
   run again on Managed Agents sessions that carry the provider's `budget` and

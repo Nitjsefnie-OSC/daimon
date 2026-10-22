@@ -92,6 +92,12 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
     class AfterSend(httpx.AsyncByteStream):
         async def __aiter__(self):
             await asyncio.wait_for(user_sent.wait(), timeout=5)
+            if mode == "private_removed_during_turn":
+                thread.fetch_member.side_effect = discord.NotFound(
+                    MagicMock(status=404, reason="gone"), "Unknown Member"
+                )
+            elif mode == "history_revoked_during_turn":
+                parent.permissions_for.return_value.read_message_history = False
             yield sse_response(
                 [
                     {
@@ -103,17 +109,11 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
                 ]
             ).content
             await asyncio.sleep(0.1)
-            if mode == "private_removed_during_turn":
-                thread.fetch_member.side_effect = discord.NotFound(
-                    MagicMock(status=404, reason="gone"), "Unknown Member"
-                )
-            elif mode == "history_revoked_during_turn":
-                parent.permissions_for.return_value.read_message_history = False
-            else:
+            if mode == "revoked_during_turn":
                 async with db_session_factory.begin() as db:
                     await watches.revoke_capabilities(db, watch.id, now=datetime.now(UTC))
-            thread.send.reset_mock()
-            thread.send.return_value.edit.reset_mock()
+                thread.send.reset_mock()
+                thread.send.return_value.edit.reset_mock()
             yield sse_response(
                 [
                     {
@@ -155,13 +155,17 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
     bot = make_bot(runtime)
     guild = _make_guild(member=_make_member(admin=False))
     guild.id = 710000099
+    guild.fetch_roles = AsyncMock(return_value=[])
     thread = _make_thread(guild=guild)
+    thread.locked = False
     thread.permissions_for.return_value = discord.Permissions(
         view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
     parent = MagicMock(spec=discord.TextChannel)
     parent.permissions_for.return_value = thread.permissions_for.return_value
-    guild.fetch_channel = AsyncMock(return_value=parent)
+    guild.fetch_channel = AsyncMock(
+        side_effect=lambda channel_id: thread if channel_id == thread.id else parent
+    )
     thread.type = discord.ChannelType.private_thread
     thread.fetch_member = AsyncMock(return_value=MagicMock())
     bot.get_channel = MagicMock(return_value=thread)

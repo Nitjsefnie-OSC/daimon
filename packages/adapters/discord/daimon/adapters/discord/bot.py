@@ -214,6 +214,7 @@ from daimon.core.turn.errors import (
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import observe_turn, record_refusal
+from daimon.core.turn.output import OutputAuthorization
 from daimon.core.turn.prepare import PreparedTurn, admitted_session_scope, bind_session
 from daimon.core.turn.protection import (
     ConfirmedProtection,
@@ -3993,10 +3994,26 @@ class DaimonBot(commands.Bot):
         # A thread lost mid-turn sets the same event Stop does: the normal interrupt path.
         self._thread_stops.watch(thread.id, cancel)
 
+        async def watch_binding() -> None:
+            from daimon.core.stores.watches import watch_seed
+
+            async with self.runtime.sessionmaker() as db:
+                seed = await watch_seed(db, row, now=datetime.now(UTC))
+            if seed is None:
+                raise AdmissionDenied(reason="runs_elsewhere")
+            member = await require_watch_thread_access(self.runtime.sessionmaker, row, thread)
+            live_role = (
+                Role.ADMIN
+                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
+                else Role.USER
+            )
+            if live_role is not role or set(member_role_ids(member)) != set(_role_ids):
+                raise AdmissionDenied(reason="invoker_not_allowed")
+
         def _make_lifecycle(
             turn_id: uuid.UUID, on_first_post: Callable[[discord.Message], Awaitable[None]]
         ) -> DiscordTurnLifecycle:
-            return DiscordTurnLifecycle(
+            lifecycle = DiscordTurnLifecycle(
                 sessionmaker=self.runtime.sessionmaker,
                 alert_webhook_url=self.runtime.settings.ops.alert_webhook_url,
                 tenant_id=tenant_id,
@@ -4041,6 +4058,10 @@ class DaimonBot(commands.Bot):
                 ),
             )
 
+            if row.reason == "watch_fired":
+                lifecycle.set_output_authorization(OutputAuthorization(watch_binding))
+            return lifecycle
+
         turn_card_intent, lifecycle = await post_initial_turn_card(
             self.runtime.sessionmaker,
             tenant_id=tenant_id,
@@ -4063,22 +4084,6 @@ class DaimonBot(commands.Bot):
             reuse_existing=True,
             deadline=turn_deadline_at,
         )
-
-        async def watch_binding() -> None:
-            from daimon.core.stores.watches import watch_seed
-
-            async with self.runtime.sessionmaker() as db:
-                seed = await watch_seed(db, row, now=datetime.now(UTC))
-            if seed is None:
-                raise AdmissionDenied(reason="runs_elsewhere")
-            member = await require_watch_thread_access(self.runtime.sessionmaker, row, thread)
-            live_role = (
-                Role.ADMIN
-                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
-                else Role.USER
-            )
-            if live_role is not role or set(member_role_ids(member)) != set(_role_ids):
-                raise AdmissionDenied(reason="invoker_not_allowed")
 
         async def completion_root() -> None:
             if prepared.session_account_id != prepared.admission.account_id:

@@ -1404,6 +1404,8 @@ async def run_prepared_turn_impl(
             assert watch_row is not None
             try:
                 await authorize_watch(prepared.admission, ma_session_id)
+            except asyncio.CancelledError:
+                raise
             except BaseException:
                 cancel.set()
                 raise

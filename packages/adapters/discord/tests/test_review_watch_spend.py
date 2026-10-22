@@ -138,13 +138,17 @@ async def test_review_spend_rechecked_after_admission(db_session_factory, mode, 
     bot = make_bot(runtime)
     guild = _make_guild(member=_make_member(admin=False))
     guild.id = 710000099
+    guild.fetch_roles = AsyncMock(return_value=[])
     thread = _make_thread(guild=guild)
+    thread.locked = False
     thread.permissions_for.return_value = discord.Permissions(
         view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
     parent = MagicMock(spec=discord.TextChannel)
     parent.permissions_for.return_value = thread.permissions_for.return_value
-    guild.fetch_channel = AsyncMock(return_value=parent)
+    guild.fetch_channel = AsyncMock(
+        side_effect=lambda channel_id: thread if channel_id == thread.id else parent
+    )
     thread.type = discord.ChannelType.public_thread
     bot.get_channel = MagicMock(return_value=thread)
 

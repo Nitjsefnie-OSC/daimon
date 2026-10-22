@@ -23,6 +23,10 @@ class OutputAuthorization:
                 raise AdmissionDenied(reason="invoker_not_allowed")
             try:
                 await self.authorize()
+            except asyncio.CancelledError:
+                # Cancelling a progress render is not evidence of revoked access.
+                # This output stays cancelled; the next output must check again.
+                raise
             except BaseException:
                 self.failed = True
                 raise

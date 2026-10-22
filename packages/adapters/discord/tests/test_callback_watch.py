@@ -43,6 +43,7 @@ from .watch_fixtures import (
         "private_member",
         "private_removed",
         "private_removed_after_bind",
+        "private_removed_before_card",
         "private_manager",
         "history_revoked",
         "parent_hidden",
@@ -163,13 +164,17 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
     if mode == "revoked_owner":
         guild = _make_guild()
     guild.id = 710000099
+    guild.fetch_roles = AsyncMock(return_value=[])
     thread = _make_thread(guild=guild)
+    thread.locked = False
     thread.permissions_for.return_value = discord.Permissions(
         view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
     parent = MagicMock(spec=discord.TextChannel)
     parent.permissions_for.return_value = thread.permissions_for.return_value
-    guild.fetch_channel = AsyncMock(return_value=parent)
+    guild.fetch_channel = AsyncMock(
+        side_effect=lambda channel_id: thread if channel_id == thread.id else parent
+    )
     thread.type = discord.ChannelType.public_thread
     if mode.startswith("private_"):
         thread.type = discord.ChannelType.private_thread
@@ -204,6 +209,19 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
                 tenant_id=tenant.id,
                 policy=TenantAccessPolicy(invoker_user_ids=("someone_else",)),
             )
+
+    if mode == "private_removed_before_card":
+        from daimon.adapters.discord import bot as bot_module
+
+        original_post = bot_module.post_initial_turn_card
+
+        async def revoke_before_card(*args, **kwargs):
+            thread.fetch_member.side_effect = discord.NotFound(
+                MagicMock(status=404, reason="gone"), "Unknown Member"
+            )
+            return await original_post(*args, **kwargs)
+
+        monkeypatch.setattr(bot_module, "post_initial_turn_card", revoke_before_card)
 
     bound = []
 
@@ -244,6 +262,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         if mode in {
             "private_removed",
             "private_removed_after_bind",
+            "private_removed_before_card",
             "history_revoked",
             "parent_hidden",
             "lookup_failed",
@@ -262,6 +281,8 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         assert updates and "always_ask" in str(updates)
         assert "Summarize the upload" in str(sent)
         assert thread.send.await_count > 0
+        outgoing = str(thread.send.await_args_list) + str(thread.send.return_value.mock_calls)
+        assert "The upload is ready." in outgoing
         thread.history.assert_not_called()
         assert snapshot.agent.tools == original_tools
         assert snapshot.agent.mcp_servers == original_servers
@@ -294,6 +315,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         if mode in {
             "private_removed",
             "private_removed_after_bind",
+            "private_removed_before_card",
             "history_revoked",
             "parent_hidden",
             "lookup_failed",
@@ -304,6 +326,9 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         else:
             assert wake.status == "skipped", wake
         assert sent == []
+        if mode == "private_removed_before_card":
+            assert bound == []
+            thread.send.assert_not_awaited()
         if mode == "deleted":
             assert wake.skip_reason == "thread_unavailable"
             thread.send.assert_not_awaited()
