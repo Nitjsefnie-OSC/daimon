@@ -57,7 +57,7 @@ from mux.drivers.openai import (
     Transport,
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.openai import NATIVE_MODELS
+from mux.profiles.openai import NATIVE_MODELS, SPEND_CAPPED_MODELS
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
@@ -101,6 +101,9 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     if (
         not runtime.account_scope_id.strip()
         or runtime.controls.model != revision.model
+        or (
+            revision.model in SPEND_CAPPED_MODELS and runtime.controls.spend_limit_usd_cents is None
+        )
         or runtime.controls.multi_agent_enabled is not False
         or runtime.controls.container_size != ("small" if revision.profile == PROFILE else None)
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)

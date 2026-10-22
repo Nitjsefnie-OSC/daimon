@@ -435,23 +435,22 @@ class FleetOrchestrator:
         plus the exact trigger dispatch sends, which embeds a reviewer's reviewed result,
         and the envelope's worst case stays within the deployment's per-turn hold.
         """
-        from daimon.core.neutral_resources import bounded_gemini_worker_tokens
+        from daimon.core.neutral_resources import (
+            bounded_gemini_worker_tokens,
+            require_gemini_worker_envelope,
+        )
         from daimon.core.turn.runtime_manifest import manifest_hold_usd
         from mux.contracts.config import ConfigRevision
         from mux.drivers.gemini import FLASH_PRIMARY
         from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS
 
         limits = resolved.limits
-        if resolved.backend.profile != INLINE_REUSE.profile_id or limits.max_input_tokens:
+        if resolved.backend.profile != INLINE_REUSE.profile_id:
             return resolved
         system = resolved.spec.system or ""
         model = resolved.spec.model.id
-        if (
-            fill
-            and limits.max_output_tokens is None
-            and model in (FLASH_PRIMARY, ARGON_MODEL)
-            and "sandbox" in resolved.declared_drops
-        ):
+
+        def money() -> tuple[Decimal, Decimal | None]:
             markup = getattr(self._ports, "markup", None)
             markup = markup if isinstance(markup, Decimal) else Decimal(1)
             source_id, source_version = _worker_source(parent, resolved)
@@ -462,6 +461,27 @@ class FleetOrchestrator:
                 source_agent_id=source_id,
                 source_agent_version=source_version,
             )
+            return markup, hold
+
+        if limits.max_input_tokens is not None:
+            # Caller-supplied limits: the worst case must still fit budget and hold.
+            markup, hold = money()
+            require_gemini_worker_envelope(
+                model,
+                limits.max_input_tokens,
+                limits.max_output_tokens,
+                limits.budget_usd,
+                markup=markup,
+                hold_usd=hold,
+            )
+            return resolved
+        if (
+            fill
+            and limits.max_output_tokens is None
+            and model in (FLASH_PRIMARY, ARGON_MODEL)
+            and "sandbox" in resolved.declared_drops
+        ):
+            markup, hold = money()
             tokens = bounded_gemini_worker_tokens(
                 system,
                 limits.budget_usd,

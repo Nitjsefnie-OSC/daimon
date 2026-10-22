@@ -132,7 +132,10 @@ default stays `gemini-3.8-flash`. An Argon turn makes one attempt: a 503 is the
 turn's answer, never a fallback to the Flash chain. A fleet worker runs Argon
 only on the bounded token envelope (as Flash does, at Argon's tariff, within its
 budget and the per-turn hold); an Argon worker that cannot get one is refused at
-spawn, never run on the 4096-token cap.
+spawn, never run on the 4096-token cap. Token limits a caller sets explicitly
+get the same bound: a Gemini worker whose worst case (max input at the model's
+input rate plus max output at its output rate) exceeds min(budget / markup,
+hold) is refused at spawn, and again at plan admission against the row's hold.
 Configuring a channel to Argon, and admitting its turns, both refuse whenever
 `provider_prices` has no current Argon row (today: from 2026-12-01; see
 [billing](billing.md)); the message names the date the price window ended.

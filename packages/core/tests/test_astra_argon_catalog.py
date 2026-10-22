@@ -90,20 +90,32 @@ def usage(**changes: object) -> UsageObservation:
     return UsageObservation.model_validate(fields | changes)
 
 
-def test_astra_usage_is_priced_at_its_rate_and_never_above_the_long_context_threshold() -> None:
+def test_astra_usage_is_priced_at_its_rate_and_conservatively_above_272k() -> None:
     price = provider_prices(PERSISTENT_WORKSPACE.profile_id)[("openai", ASTRA)]
     # 80k uncached at $10 + 20k cached at $1 + 10k output at $50, per million.
     assert provider_cost_of(usage(), price, infrastructure_usd=Decimal(0)) == Decimal("1.32")
-    # Above 272k input the tariff changes (2x input, 1.5x output): never priced, so the
-    # usage stays unverified rather than billed at the base rate.
-    assert (
-        provider_cost_of(
-            usage(input_tokens=272_001, input_cached_tokens=0),
-            price,
-            infrastructure_usd=Decimal(0),
+    # Above 272k input OpenAI doubles input/cache and charges 1.5x output. The whole
+    # aggregate is priced at those rates (an upper bound), never at the base rate:
+    # 272,001 uncached at $20 + 10k output at $75, per million.
+    assert provider_cost_of(
+        usage(input_tokens=272_001, input_cached_tokens=0),
+        price,
+        infrastructure_usd=Decimal(0),
+    ) == Decimal("6.19002")
+    # At exactly the threshold, the base rate.
+    assert provider_cost_of(
+        usage(input_tokens=272_000, input_cached_tokens=0),
+        price,
+        infrastructure_usd=Decimal(0),
+    ) == Decimal("3.22")
+
+
+def test_long_context_multipliers_need_a_threshold() -> None:
+    with pytest.raises(ValueError, match="long-context"):
+        replace(
+            provider_prices(PERSISTENT_WORKSPACE.profile_id)[("openai", ASTRA)],
+            max_priced_input_tokens=None,
         )
-        is None
-    )
 
 
 @pytest.mark.parametrize("granted", (True, False))

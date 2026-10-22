@@ -1369,10 +1369,7 @@ def _astra(request):
     return replace(request, admission=replace(request.admission, backend_revision=astra))
 
 
-async def test_astra_worker_runtime_runs_at_astra_controls_and_price(
-    target: tuple, monkeypatch: pytest.MonkeyPatch
-) -> None:
-    request, _, plan, _, owned = target
+def _with_astra(plan, owned, monkeypatch, *, spend_limit: int | None = None) -> None:
     # The deployment row authorizes Astra alongside Luna, as a fleet row would.
     grant = plan.configuration_grant
     assert grant is not None
@@ -1380,17 +1377,33 @@ async def test_astra_worker_runtime_runs_at_astra_controls_and_price(
         update={
             "configuration_grant": grant.model_copy(
                 update={"models": (*grant.models, "gpt-6-astra")}
-            )
+            ),
+            "spend_limit_usd_cents": spend_limit,
         }
     )
     manifest(monkeypatch, owned.manifest_path, [widened.model_dump(mode="json")])
+
+
+async def test_astra_worker_runtime_runs_at_astra_controls_and_price(
+    target: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, _, plan, _, owned = target
+    _with_astra(plan, owned, monkeypatch, spend_limit=5)
     runtime = build_openai_runtime(_astra(request))
     assert runtime.controls.model == "gpt-6-astra"
     assert runtime.price is not None and runtime.price.model == "gpt-6-astra"
     assert (runtime.price.input, runtime.price.output) == (Decimal("10.00"), Decimal("50.00"))
+    # The row's spend limit becomes the session's native spend control.
+    assert runtime.controls.spend_limit_usd_cents == 5
 
 
-async def test_astra_never_runs_an_agent_or_channel_turn(target: tuple) -> None:
-    request, *_ = target
+async def test_astra_without_a_spend_limit_is_refused(
+    target: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, _, plan, _, owned = target
+    _with_astra(plan, owned, monkeypatch)
+    assert request.worker.limits.native_budget_usd is None and plan.spend_limit_usd_cents is None
     with pytest.raises(AdmissionDenied):
-        build_openai_runtime(replace(_astra(request), worker=None))
+        build_openai_runtime(_astra(request))
+    # Luna, with the same row and no spend limit, still builds.
+    assert build_openai_runtime(request).controls.spend_limit_usd_cents is None

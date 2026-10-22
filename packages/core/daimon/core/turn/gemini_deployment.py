@@ -18,7 +18,12 @@ from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
-from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
+from daimon.core.neutral_resources import (
+    NeutralResourceHost,
+    ResolvedWorkerSpec,
+    WorkerSpecRefused,
+    require_gemini_worker_envelope,
+)
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -246,6 +251,18 @@ class GeminiPlan(BaseModel):
         # Argon runs only bounded; the unbounded path is Flash's 4096-token cap.
         if revision.model == ARGON_MODEL and not bounded:
             raise AdmissionDenied(reason="backend_unsupported")
+        if worker.limits.max_input_tokens is not None:
+            # The envelope's worst case at the model's tariff fits budget and hold.
+            try:
+                require_gemini_worker_envelope(
+                    revision.model or "",
+                    worker.limits.max_input_tokens,
+                    worker.limits.max_output_tokens,
+                    worker.limits.budget_usd,
+                    hold_usd=self.hold_usd,
+                )
+            except WorkerSpecRefused:
+                raise AdmissionDenied(reason="backend_unsupported") from None
         scope = worker.permissions.fleet.scope
         if (
             "memory" not in drops

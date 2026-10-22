@@ -11,7 +11,7 @@ from __future__ import annotations
 
 import re
 from collections.abc import Mapping, Sequence
-from dataclasses import dataclass
+from dataclasses import dataclass, replace
 from datetime import UTC, date, datetime, timedelta
 from decimal import Decimal, localcontext
 from types import MappingProxyType
@@ -286,6 +286,9 @@ class ProviderPrice:
     cache_write: Decimal | None = None
     verified: bool = True
     max_priced_input_tokens: int | None = None
+    # (input and cache, output) multipliers above max_priced_input_tokens. Applied
+    # to a whole aggregate, which may mix tiers, so the cost is an upper bound.
+    long_context_multipliers: tuple[Decimal, Decimal] | None = None
     valid_before: date | None = None
     admitted_on: date | None = None
 
@@ -303,6 +306,11 @@ class ProviderPrice:
             type(self.max_priced_input_tokens) is not int or self.max_priced_input_tokens < 0
         ):
             raise ValueError("pricing input threshold requires a nonnegative integer")
+        if self.long_context_multipliers is not None and (
+            self.max_priced_input_tokens is None
+            or any(not factor.is_finite() or factor < 1 for factor in self.long_context_multipliers)
+        ):
+            raise ValueError("long-context multipliers need a threshold and are at least 1")
         if self.valid_before is not None and self.valid_before <= self.checked_on:
             raise ValueError("pricing validity must extend beyond its checked date")
         if not self.provider or not self.model:
@@ -367,11 +375,24 @@ def provider_cost_of(
         or infrastructure_usd is None
     ):
         return None
-    if price.max_priced_input_tokens is not None and (
+    above = price.max_priced_input_tokens is not None and (
         usage.input_tokens is None or usage.input_tokens > price.max_priced_input_tokens
-    ):
+    )
+    if above and (usage.input_tokens is None or price.long_context_multipliers is None):
         # An aggregate cannot establish the pricing tier of its requests.
         return None
+    if above and price.long_context_multipliers is not None:
+        # Conservative: the whole aggregate at the long-context rates.
+        incoming_factor, output_factor = price.long_context_multipliers
+        price = replace(
+            price,
+            input=price.input * incoming_factor,
+            cache_read=price.cache_read * incoming_factor,
+            cache_write=(
+                None if price.cache_write is None else price.cache_write * incoming_factor
+            ),
+            output=price.output * output_factor,
+        )
     if not infrastructure_usd.is_finite() or infrastructure_usd < 0:
         raise ValueError("actual infrastructure cost must be finite and nonnegative")
     with localcontext() as context:
@@ -576,8 +597,8 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 max_priced_input_tokens=272_000,
             ),
             # Checked 2026-10-22 (official model page). Above 272k input tokens
-            # input/cache double and output is 1.5x; this row stays conservative
-            # by refusing to price, and so to admit, anything above the threshold.
+            # input/cache double and output is 1.5x; an aggregate above it is
+            # priced wholly at those rates, an upper bound.
             ProviderPrice(
                 PERSISTENT_WORKSPACE.provider,
                 "gpt-6-astra",
@@ -587,6 +608,7 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("1.00"),
                 Decimal("12.50"),
                 max_priced_input_tokens=272_000,
+                long_context_multipliers=(Decimal(2), Decimal("1.5")),
             ),
         ),
         INLINE_REUSE.profile_id: (

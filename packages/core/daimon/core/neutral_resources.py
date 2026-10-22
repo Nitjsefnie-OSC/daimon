@@ -1131,6 +1131,41 @@ def gemini_worker_cost_usd(model: str, max_input_tokens: int, max_output_tokens:
     return (max_input_tokens * price.input + max_output_tokens * price.output) / Decimal(10**6)
 
 
+def require_gemini_worker_envelope(
+    model: str,
+    max_input_tokens: int,
+    max_output_tokens: int | None,
+    budget_usd: Decimal,
+    *,
+    markup: Decimal = Decimal(1),
+    hold_usd: Decimal | None = None,
+) -> None:
+    """Refuse a bounded Gemini worker envelope its money cannot cover.
+
+    Caller-supplied limits get the same bound as a filled envelope: both token
+    caps are set, input stays within the priced tier, output within
+    GEMINI_MAX_OUTPUT_TOKENS, and the worst case at the model's own tariff,
+    max_input * input_rate + max_output * output_rate, is at most min(budget /
+    markup, hold_usd).
+    """
+    from daimon.core import pricing
+    from mux.profiles.gemini import INLINE_REUSE
+
+    if max_output_tokens is None:
+        raise WorkerSpecRefused("max_output_tokens", "unsupported")
+    if max_output_tokens > GEMINI_MAX_OUTPUT_TOKENS:
+        raise WorkerSpecRefused("max_output_tokens", "unsupported")
+    price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
+    if price is None or markup <= 0:
+        raise WorkerSpecRefused("budget", "unsupported")
+    ceiling = price.max_priced_input_tokens
+    if ceiling is not None and max_input_tokens > ceiling:
+        raise WorkerSpecRefused("max_input_tokens", "unsupported")
+    limit = budget_usd / markup if hold_usd is None else min(budget_usd / markup, hold_usd)
+    if gemini_worker_cost_usd(model, max_input_tokens, max_output_tokens) > limit:
+        raise WorkerSpecRefused("budget", "exhausted")
+
+
 def bounded_gemini_worker_tokens(
     system: str,
     budget_usd: Decimal,

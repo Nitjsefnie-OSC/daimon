@@ -1391,6 +1391,58 @@ async def test_plain_argon_spawn_fills_the_bounded_envelope_or_refuses(captured,
 
 
 @pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
+@pytest.mark.parametrize(
+    ("model", "fits", "oversized"),
+    (
+        # Flash: 262144 * $0.75/M + 65536 * $3.75/M = $0.44 worst case.
+        ("gemini-3.8-flash", (16384, 8192), (262144, 65536)),
+        # Argon: 262144 * $2/M + 65536 * $10/M = $1.18 worst case.
+        ("gemini-4-argon", (10_000, 2048), (262144, 65536)),
+    ),
+)
+async def test_explicit_gemini_worker_caps_must_fit_the_worker_budget(
+    captured, monkeypatch, model, fits, oversized
+):
+    from daimon.core.fleet_orchestration import FleetOrchestrator
+    from daimon.core.neutral_resources import gemini_worker_cost_usd, task_worker_spec
+
+    _in_argon_window(monkeypatch)
+    source, _, grant, _, policy, _ = captured
+    ref = ModelRef(provider="gemini", id=model)
+    widened = grant.model_copy(
+        update={
+            "choices": (
+                *grant.choices,
+                (backend_selection("gemini").model_copy(update={"model": ref.id}), ref),
+            )
+        }
+    )
+    root = compose(captured[:2] + (widened,) + captured[3:])
+    owner = FleetOrchestrator()
+    spec = task_worker_spec(root, role="W3", task="Compare X and Y.", model=ref.id)
+
+    def resolve(limits):
+        return resolve_worker_spec(root, spec, policy=policy, now=NOW, limits=limits)
+
+    def explicit(caps):
+        update = {
+            "max_turns": 1,
+            "budget_usd": Decimal("0.05"),
+            "max_input_tokens": caps[0],
+            "max_output_tokens": caps[1],
+        }
+        return resolve(root.limits.model_copy(update=update))
+
+    kept = explicit(fits)
+    assert owner._bounded_gemini(root, kept, resolve, fill=False, trigger="Go.") is kept  # pyright: ignore[reportPrivateUsage]
+    assert gemini_worker_cost_usd(model, *fits) <= Decimal("0.05")
+    # Caller-supplied caps whose worst case at the model's tariff exceeds the budget.
+    assert gemini_worker_cost_usd(model, *oversized) > Decimal("0.05")
+    with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
+        owner._bounded_gemini(root, explicit(oversized), resolve, fill=False, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
+
+
+@pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
 async def test_fleet_r9_plain_gemini_spawn_fills_limits_only_when_none_are_given(captured):
     from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused
     from daimon.core.neutral_resources import task_worker_spec
