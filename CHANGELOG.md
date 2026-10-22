@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fleet: a plain-language ask such as "compare X vs Y with 3 workers" now works. `fleet_spawn` takes a `task` and an optional granted `model` and fills the rest: the turn's run, the granted backend, an even share of the run's budget and the run's deadline (a later deadline is shortened to it). `fleet_status` and `fleet_collect` default to the turn's run. The root's own model is allowed in its fleet grant without being listed, and a worker on another model of the root's provider keeps the root's effort setting instead of being refused. Only agents with a fleet grant are affected; every grant cap still applies.
+
 - A turn held to its channel (its requester is from another organisation, or the channel is shared with one) uses a memory of its own for that channel and never sees the agent's shared memory or anyone's personal memory; shared and personal memory never see the channel's. `/memory` in such a channel shows the channel's memory, and `/memory mine` and `forget-mine` say personal memory is not used there. A routine posting into a shared channel runs held the same way, and its result is never sent by direct message instead. A Teams `memory` answer for a shared channel is never moved to the 1:1 chat. A session that changes memory this way starts clean.
 
 - Teams: people from another organisation are held to the channel they asked in and cannot use DMs.

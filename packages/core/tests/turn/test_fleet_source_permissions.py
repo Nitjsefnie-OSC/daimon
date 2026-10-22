@@ -907,3 +907,240 @@ async def test_recorded_effort_root_freezes_and_derives_exact_native_or_declared
         )
         with pytest.raises(WorkerSpecRefused, match=r"(?:spec|extensions): unsupported"):
             resolve_worker_spec(frozen, changed, policy=policy, now=NOW)
+
+
+def _run(*, total: str = "2.00", max_workers: int = 4):
+    from types import SimpleNamespace
+
+    return SimpleNamespace(total_budget_usd=Decimal(total), max_workers=max_workers)
+
+
+def _without(grant, provider):
+    return grant.model_copy(
+        update={"choices": tuple(pair for pair in grant.choices if pair[1].provider != provider)}
+    )
+
+
+async def test_fleet_r1_root_model_missing_from_grant_is_granted_implicitly(captured):
+    """r1: a grant without the root's own model refused every turn of the root."""
+    source, _, grant, _, policy, _ = captured
+    root = ModelRef(provider="anthropic", id="claude-haiku-5-5")
+    no_root_provider = _without(grant, "anthropic")
+    permissions = compose(captured[:2] + (no_root_provider,) + captured[3:])
+    assert permissions.models == (*no_root_provider.models, root)
+    assert permissions.backend_grants == (
+        *no_root_provider.backends,
+        backend_selection("anthropic"),
+    )
+    sonnet = no_root_provider.model_copy(
+        update={
+            "choices": (
+                (
+                    backend_selection("anthropic"),
+                    ModelRef(provider="anthropic", id="claude-sonnet-5-5"),
+                ),
+                *no_root_provider.choices,
+            )
+        }
+    )
+    permissions = compose(captured[:2] + (sonnet,) + captured[3:])
+    assert permissions.models == (*sonnet.models, root)
+    assert permissions.backend_grants == sonnet.backends
+    worker = resolve_worker_spec(
+        permissions,
+        permissions.spec.model_copy(update={"tools": (), "declared_drops": ("tools",)}),
+        policy=policy,
+        now=NOW,
+        captured_source=source,
+        resources=permissions.resources,
+        environment=permissions.environment,
+    )
+    assert worker.spec.model.id == root.id and worker.backend.backend == "anthropic"
+
+
+async def test_fleet_r1_root_model_is_not_added_for_a_disabled_provider(captured):
+    from daimon.core.neutral_resources import (
+        _with_root_model,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    _, _, grant, fleet, policy, _ = captured
+    reduced = _without(grant, "anthropic")
+    disabled = policy.model_copy(update={"enabled_backends": ("openai", "gemini")})
+    root = ModelRef(provider="anthropic", id="claude-haiku-5-5")
+    assert _with_root_model(reduced, root, policy=disabled, fleet=fleet) == (
+        reduced.backends,
+        reduced.models,
+    )
+    assert _with_root_model(grant, root, policy=policy, fleet=fleet) == (
+        grant.backends,
+        grant.models,
+    )
+
+
+@pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
+async def test_fleet_r2_same_provider_worker_inherits_root_effort_on_its_own_model(captured, owned):
+    """r2: a same-provider worker on another model was refused 'extensions: unsupported'."""
+    from daimon.core.neutral_resources import task_worker_spec
+    from mux.drivers.anthropic.resources.agents import agent_payload
+
+    source, _, grant, _, policy, _ = captured
+    sonnet = ModelRef(provider="anthropic", id="claude-sonnet-5-5")
+    widened = grant.model_copy(
+        update={"choices": ((backend_selection("anthropic"), sonnet), *grant.choices)}
+    )
+    root = compose(captured[:2] + (widened,) + captured[3:])
+    child = resolve_worker_spec(
+        root,
+        task_worker_spec(root, role="W1", task="Compare X and Y.", model=sonnet.id),
+        policy=policy,
+        now=NOW,
+        captured_source=source,
+        resources=root.resources,
+        environment=root.environment,
+    )
+    assert agent_payload(child.spec)["model"] == {
+        "id": "claude-sonnet-5-5",
+        "speed": "standard",
+        "effort": {"type": "medium"},
+    }
+    assert child.permissions.models == (sonnet,)
+    # Replaying the resolved worker keeps the inherited controls.
+    again = resolve_worker_spec(
+        root,
+        child.spec.model_copy(update={"system": "Compare X and Y."}),
+        policy=policy,
+        now=NOW,
+        captured_source=source,
+        resources=root.resources,
+        environment=root.environment,
+    )
+    assert again.spec.extensions == child.spec.extensions
+    await _prepare_worker(captured, owned, child)
+
+
+async def _prepare_worker(captured, owned, worker):
+    from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsAgent
+    from daimon.core.scope import ResolvedConfig
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.prepare import DEFAULT_MA_CAPABILITIES, ProviderPreparationRequest
+    from daimon.core.turn.runtime_manifest import prepare_source
+    from daimon.testing.turn_fakes import deps_for
+    from mux.contracts.config import ConfigRevision
+
+    source, admission, _, fleet, _, _ = captured
+    trace = ScriptedTransport()
+    async with trace.client() as client:
+        prepared = await prepare_source(
+            ProviderPreparationRequest(
+                deps=replace(
+                    deps_for(client, owned[3]),
+                    agent_backends=True,
+                    channel_backends=True,
+                    turn_path="mux",
+                ),
+                admission=Admission(
+                    account_id=fleet.account_id,
+                    agent=BetaManagedAgentsAgent.model_validate(source.source.native),
+                    environment=BetaEnvironment.model_validate(source.environment.native),
+                    config=ResolvedConfig(agent_name="helper", environment_name="default"),
+                    grant=admission,
+                    backend_revision=ConfigRevision.create(fleet.root.channel, 1, worker.backend),
+                    backend_revision_origin="agent",
+                ),
+                scope=worker.permissions.fleet.scope,
+                tenant_id=source.tenant_id,
+                platform="discord",
+                external_user_id="member",
+                thread_id=fleet.root.thread_id,
+                session_account_id=fleet.account_id,
+                reuse_existing=True,
+                capabilities=DEFAULT_MA_CAPABILITIES,
+                transfer=None,
+                deadline=worker.limits.deadline,
+                now=lambda: NOW,
+                source=source.model_copy(update={"resource_scope": worker.permissions.fleet.scope}),
+                worker=worker,
+            )
+        )
+    assert prepared.target_spec == worker.spec
+    assert not trace.requests
+
+
+@pytest.mark.parametrize("captured", ["haiku55", "haiku55_effort"], indirect=True)
+async def test_fleet_r3_r4_plain_task_workers_resolve_with_default_limits(captured):
+    """r3/r4: a plain ask needs no run_id, backend, budget or deadline arithmetic."""
+    from daimon.core.neutral_resources import default_worker_limits, task_worker_spec
+
+    source, _, grant, _, policy, _ = captured
+    root = compose(captured)
+    for model in (None, *(model.id for model in grant.models)):
+        spec = task_worker_spec(root, role="W", task="Compare X and Y.", model=model)
+        limits = default_worker_limits(
+            root.limits, _run(total="0.90", max_workers=3), (), provider=spec.model.provider
+        )
+        assert limits.deadline == root.limits.deadline and limits.max_turns == 1
+        assert limits.budget_usd == Decimal("0.30")
+        child = resolve_worker_spec(
+            root,
+            spec,
+            policy=policy,
+            now=NOW,
+            captured_source=source,
+            resources=root.resources if spec.model.provider == "anthropic" else (),
+            environment=root.environment if spec.model.provider == "anthropic" else None,
+            limits=limits,
+        )
+        assert child.spec.model.id == (model or "claude-haiku-5-5")
+        assert ("model_controls" in child.declared_drops) == (
+            spec.model.provider != "anthropic" and bool(root.spec.extensions)
+        )
+    with pytest.raises(WorkerSpecRefused, match="backend: not_subset"):
+        task_worker_spec(root, role="W", task="Compare.", model="gemini-3.8-pro")
+    with pytest.raises(WorkerSpecRefused, match="system: unbound"):
+        task_worker_spec(root, role="W", task="  ")
+
+
+def test_default_worker_limits_split_the_run_and_provider_lines_and_clamp_deadline():
+    from types import SimpleNamespace
+
+    from daimon.core.neutral_resources import default_worker_limits
+
+    ceiling = WorkerLimits(
+        budget_usd=Decimal("2.00"),
+        deadline=NOW + timedelta(minutes=10),
+        max_turns=2,
+        provider_limits_usd={
+            "anthropic": Decimal("0.60"),
+            "openai": Decimal("0.60"),
+            "gemini": Decimal("0.80"),
+        },
+    )
+    run = _run()
+    assert default_worker_limits(ceiling, run, (), provider="openai").budget_usd == Decimal("0.50")
+    spent = (SimpleNamespace(backend="anthropic", reserved_usd=Decimal("0.30")),)
+    assert default_worker_limits(ceiling, run, spent, provider="anthropic").budget_usd == Decimal(
+        "0.30"
+    )
+    assert default_worker_limits(ceiling, run, spent, provider="gemini").budget_usd == Decimal(
+        "0.56"
+    )
+    later = default_worker_limits(
+        ceiling, run, (), provider="openai", deadline=NOW + timedelta(hours=1)
+    )
+    assert later.deadline == ceiling.deadline
+    explicit = default_worker_limits(
+        ceiling,
+        None,
+        (),
+        provider="openai",
+        budget_usd=Decimal("0.10"),
+        deadline=NOW + timedelta(seconds=100),
+        max_turns=2,
+    )
+    assert (explicit.budget_usd, explicit.deadline, explicit.max_turns) == (
+        Decimal("0.10"),
+        NOW + timedelta(seconds=100),
+        2,
+    )
+    with pytest.raises(WorkerSpecRefused, match="budget: unbound"):
+        default_worker_limits(ceiling, None, (), provider="openai")

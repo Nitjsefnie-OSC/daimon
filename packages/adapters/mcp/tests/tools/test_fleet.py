@@ -7,7 +7,7 @@ from dataclasses import replace
 from datetime import UTC, datetime, timedelta
 from decimal import Decimal
 from typing import Any, Literal, cast
-from unittest.mock import AsyncMock, Mock, create_autospec
+from unittest.mock import ANY, AsyncMock, Mock, create_autospec
 
 import pytest
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
@@ -974,3 +974,93 @@ async def test_host_bridge_refuses_root_mismatch_or_nested_worker_before_store_r
         with pytest.raises(ToolError, match="caller_root_mismatch|worker_depth_exceeded"):
             await client.call_tool("fleet_status", {"run_id": str(RUN)})
     assert owner.mock_calls == []
+
+
+def plain_root() -> WorkerPermissions:
+    root = host_parent()
+    luna = ModelRef(provider="openai", id="gpt-6-luna")
+    return replace(
+        root,
+        backend_grants=(*root.backend_grants, backend_selection("openai")),
+        models=(*root.models, luna),
+    )
+
+
+def plain_bridge(root: WorkerPermissions) -> tuple[HostFleetToolService, Mock]:
+    orchestrator = create_autospec(FleetOrchestrator, instance=True)
+    orchestrator.spawn.return_value = {"run_id": str(RUN), "status": "pending"}
+    orchestrator.read_snapshot.return_value = host_owner().read_run.return_value
+    orchestrator.collect.return_value = {"run_id": str(RUN), "status": "waiting"}
+
+    async def load(caller):
+        assert caller is AUTH
+        return root, TenantAccessPolicy(enabled_backends=("anthropic", "openai"))
+
+    return HostFleetToolService(orchestrator, load), orchestrator
+
+
+@pytest.mark.parametrize("model", [None, "gpt-6-luna"])
+async def test_fleet_r3_r4_plain_spawn_needs_only_role_task_and_model(model) -> None:
+    """r3 invented a run_id and r4 a too-late deadline; neither is needed now."""
+    root = plain_root()
+    bridge, orchestrator = plain_bridge(root)
+    request = {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+    if model is not None:
+        request["model"] = model
+    async with Client(registered(bridge)) as client:
+        await client.call_tool("fleet_spawn", request)
+        await client.call_tool(
+            "fleet_spawn",
+            {**request, "deadline": (datetime.now(UTC) + timedelta(hours=1)).isoformat()},
+        )
+    first, later = orchestrator.spawn.await_args_list
+    kwargs = first.kwargs
+    assert kwargs["run_id"] is None and kwargs["backend"] is None and kwargs["clone"] is None
+    agent = kwargs["agent"]
+    assert agent.model == (root.spec.model if model is None else root.models[1])
+    assert agent.system == "Compare X and Y."
+    assert agent.declared_drops == (
+        ("skills", "tools") if model is None else ("mcp", "memory", "sandbox", "skills", "tools")
+    )
+    limits = kwargs["limits"]
+    # Run budget $1 over 3 worker slots; the run's deadline; one turn.
+    assert limits.budget_usd == Decimal("0.33") and limits.max_turns == 1
+    assert limits.deadline == root.limits.deadline
+    assert later.kwargs["limits"].deadline == root.limits.deadline
+    orchestrator.read_snapshot.assert_awaited_with(root, ANY, RUN)
+
+
+async def test_plain_spawn_refuses_ungranted_models_and_mixed_specs() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    request = {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+    async with Client(registered(bridge)) as client:
+        with pytest.raises(ToolError, match="backend: not_subset"):
+            await client.call_tool("fleet_spawn", {**request, "model": "gemini-3.8-pro"})
+        with pytest.raises(ToolError, match="exactly one"):
+            await client.call_tool("fleet_spawn", {**request, **arguments("fleet_spawn")})
+        with pytest.raises(ToolError, match="goes with a task"):
+            await client.call_tool(
+                "fleet_spawn", {**arguments("fleet_spawn"), "model": "gpt-6-luna"}
+            )
+    orchestrator.spawn.assert_not_awaited()
+
+
+async def test_explicit_budget_skips_the_run_read_and_reaches_the_resolver() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {"operation_key": "W1", "role": "W1", "task": "Go.", "budget_usd": "0.90"},
+        )
+    assert orchestrator.spawn.await_args.kwargs["limits"].budget_usd == Decimal("0.90")
+    orchestrator.read_snapshot.assert_not_awaited()
+
+
+@pytest.mark.parametrize("tool", ["fleet_status", "fleet_collect"])
+async def test_status_and_collect_default_to_this_turns_run(tool) -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    orchestrator.status.return_value = {"run_id": str(RUN), "status": "running"}
+    async with Client(registered(bridge)) as client:
+        result = await client.call_tool(tool, {})
+    assert result.data["run_id"] == str(RUN)
+    assert getattr(orchestrator, tool.removeprefix("fleet_")).await_args.kwargs["run_id"] == RUN

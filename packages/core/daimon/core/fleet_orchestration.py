@@ -283,7 +283,7 @@ class FleetOrchestrator:
         now: datetime,
         operation_key: str,
         role: str,
-        backend: BackendConfig,
+        backend: BackendConfig | None,
         limits: WorkerLimits,
         run_id: uuid.UUID | None = None,
         agent: AgentSpec | None = None,
