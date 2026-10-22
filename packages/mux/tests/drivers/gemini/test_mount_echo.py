@@ -227,3 +227,135 @@ async def test_scrubbed_protected_read_matches_the_unprotected_parse() -> None:
         plain = await SDKTransport(client).get("native")
         await client.aio.aclose()
     assert scrubbed == plain
+
+
+# The REAL echo (F2-G r13, read structure-only from the live interaction):
+# Gemini returns the transform as a LIST of header objects, on GET and on the
+# stream's interaction.completed event.
+REAL_LIST = [{"Authorization": "Bearer " + TOKEN}]
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_the_real_list_shaped_echo_is_scrubbed_and_the_answer_survives(
+    operation: str, caplog: pytest.LogCaptureFixture, recwarn: pytest.WarningsRecorder
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    async with transport(responder(completed(transform=REAL_LIST), operation)) as sdk:
+        result = await call(sdk, operation)
+    interaction = result["interaction"] if operation == "stream" else result
+    assert isinstance(interaction, dict)
+    assert interaction["environment"]["network"] == {  # type: ignore[index]
+        "allowlist": [{"domain": "storage.googleapis.com"}]
+    }
+    assert interaction["steps"][-1]["content"][0]["text"] == "final answer"  # type: ignore[index]
+    assert TOKEN not in json.dumps(result) and "Authorization" not in json.dumps(result)
+    assert TOKEN not in caplog.text
+    assert not any(TOKEN in str(warning.message) for warning in recwarn)
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", OPERATIONS)
+@pytest.mark.parametrize(
+    ("transform", "reason"),
+    [
+        pytest.param([OURS, OURS], "unrecognized_shape", id="list-of-two"),
+        pytest.param([], "unrecognized_shape", id="empty-list"),
+        pytest.param([{**OURS, "X-Extra": "1"}], "unrecognized_shape", id="list-extra-key"),
+        pytest.param([{"authorization": "Bearer " + TOKEN}], "unrecognized_shape", id="key-case"),
+        pytest.param(
+            [{"Authorization": "bearer " + TOKEN}], "not_dispatched_by_this_transport", id="scheme"
+        ),
+        pytest.param(["Bearer " + TOKEN], "unrecognized_shape", id="list-of-string"),
+        pytest.param([[OURS]], "unrecognized_shape", id="nested-list"),
+        pytest.param(
+            [{"Authorization": "Bearer someone-else"}],
+            "not_dispatched_by_this_transport",
+            id="foreign-token",
+        ),
+    ],
+)
+async def test_any_other_list_shape_refuses_with_a_path_and_reason_but_no_value(
+    operation: str,
+    transform: object,
+    reason: str,
+    caplog: pytest.LogCaptureFixture,
+) -> None:
+    caplog.set_level(logging.DEBUG)
+    async with transport(responder(completed(transform=transform), operation)) as sdk:
+        with pytest.raises(ProviderError, match="gcs_transform_echo") as error:
+            await call(sdk, operation)
+    prefix = "$.interaction" if operation == "stream" else "$"
+    assert f"path={prefix}.environment.network.allowlist[0].transform" in caplog.text
+    assert f"reason={reason}" in caplog.text
+    assert TOKEN not in caplog.text and TOKEN not in str(error.value)
+    assert "someone-else" not in caplog.text
+
+
+@pytest.mark.asyncio
+async def test_a_transform_outside_the_mount_location_logs_its_path() -> None:
+    import logging as _logging
+
+    records: list[_logging.LogRecord] = []
+
+    class Collect(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            records.append(record)
+
+    handler = Collect()
+    _logging.getLogger("mux.drivers.gemini.transport").addHandler(handler)
+    try:
+        body = completed(transform=REAL_LIST)
+        body["steps"][0]["network"] = {"transform": {"X": "y"}}  # type: ignore[index]
+        async with transport(responder(body, "get")) as sdk:
+            with pytest.raises(ProviderError, match="gcs_transform_echo"):
+                await sdk.get("native")
+    finally:
+        _logging.getLogger("mux.drivers.gemini.transport").removeHandler(handler)
+    (message,) = [r.getMessage() for r in records]
+    assert "path=$.steps[0].network.transform" in message
+    assert "reason=outside_mount_location" in message
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("operation", OPERATIONS)
+async def test_a_token_used_as_a_key_elsewhere_refuses_and_is_never_logged(
+    operation: str, caplog: pytest.LogCaptureFixture
+) -> None:
+    # Review probe: the real echo plus model output whose network object is
+    # keyed by the token. The token check runs before any path is logged.
+    body = completed(transform=REAL_LIST)
+    body["steps"][0]["arguments"] = {"network": {"Bearer " + TOKEN: {"transform": 1}}}  # type: ignore[index]
+    caplog.set_level(logging.DEBUG)
+    async with transport(responder(body, operation)) as sdk:
+        with pytest.raises(ProviderError, match="gcs_token_echo") as error:
+            await call(sdk, operation)
+    assert TOKEN not in caplog.text and TOKEN not in str(error.value)
+
+
+@pytest.mark.asyncio
+async def test_diagnostic_paths_name_only_schema_keys() -> None:
+    import logging as _logging
+
+    records: list[_logging.LogRecord] = []
+
+    class Collect(_logging.Handler):
+        def emit(self, record: _logging.LogRecord) -> None:
+            records.append(record)
+
+    secret_key = "unknown-secret-looking-key"
+    handler = Collect()
+    _logging.getLogger("mux.drivers.gemini.transport").addHandler(handler)
+    try:
+        body = completed(transform=REAL_LIST)
+        body["steps"][0]["arguments"] = {  # type: ignore[index]
+            secret_key: {"network": {"transform": {"X": "y"}}}
+        }
+        async with transport(responder(body, "get")) as sdk:
+            with pytest.raises(ProviderError, match="gcs_transform_echo"):
+                await sdk.get("native")
+    finally:
+        _logging.getLogger("mux.drivers.gemini.transport").removeHandler(handler)
+    (message,) = [r.getMessage() for r in records]
+    assert "path=$.steps[0].arguments.<key>.network.transform" in message
+    assert secret_key not in message

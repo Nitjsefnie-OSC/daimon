@@ -4,8 +4,9 @@ from __future__ import annotations
 
 import copy
 import json
+import logging
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
-from typing import Any, Protocol, cast, runtime_checkable
+from typing import Any, NoReturn, Protocol, cast, runtime_checkable
 
 import httpx
 from google import genai
@@ -23,6 +24,7 @@ from mux.drivers.gemini.mcp_auth import (
 from mux.errors import ProviderError
 
 API_REVISION = "2026-05-20"
+log = logging.getLogger(__name__)
 type Object = dict[str, JsonValue]
 
 
@@ -80,29 +82,100 @@ def storage_request_token(request: Mapping[str, JsonValue]) -> RedactedCredentia
     return None
 
 
+def _refuse_transform(path: str, reason: str) -> NoReturn:
+    """Fail closed, logging only where and why (never the value)."""
+    log.warning("gemini mount transform echo refused: path=%s reason=%s", path, reason)
+    raise ProviderError("permission", retryable=False, native_code="gcs_transform_echo")
+
+
+def echoed_mount_header(transform: object) -> str | None:
+    """The Authorization value of an echoed mount transform, if it has our shape.
+
+    We send `{"Authorization": "Bearer <t>"}`; Gemini echoes it as a list of
+    header objects, `[{"Authorization": "Bearer <t>"}]` (F2-G r13). Either form
+    with exactly that one header qualifies; anything else does not.
+    """
+    if isinstance(transform, list):
+        if len(cast(list[object], transform)) != 1:
+            return None
+        transform = cast(list[object], transform)[0]
+    if not isinstance(transform, dict):
+        return None
+    headers = cast(dict[str, object], transform)
+    value = headers.get("Authorization")
+    return value if set(headers) == {"Authorization"} and isinstance(value, str) else None
+
+
 def scrub_mount_echo(value: Object, tokens: set[RedactedCredential]) -> Object:
     """Remove the echo of our own storage-mount transform, and nothing else.
 
     A completed interaction echoes the request's environment, including the
     mount rule's Authorization transform. Only that exact location is cleaned:
     `environment.network.allowlist[i].transform` on the interaction itself or
-    on a stream event's `interaction`, for the storage domain, equal to a
-    transform this transport dispatched. Any other transform refuses.
+    on a stream event's `interaction`, for the storage domain, carrying a
+    header this transport dispatched. Any other transform refuses.
     """
     result = copy.deepcopy(value)
-    ours = [{"Authorization": "Bearer " + token} for token in tokens]
+    ours = {"Bearer " + token for token in tokens}
     nested = result.get("interaction")
-    for owner in (result, nested) if isinstance(nested, dict) else (result,):
+    owners = [("$", result)]
+    if isinstance(nested, dict):
+        owners.append(("$.interaction", nested))
+    for prefix, owner in owners:
         environment = owner.get("environment")
         network = environment.get("network") if isinstance(environment, dict) else None
         rules = network.get("allowlist") if isinstance(network, dict) else None
-        for rule in rules if isinstance(rules, list) else []:
+        for index, rule in enumerate(rules if isinstance(rules, list) else []):
             if not isinstance(rule, dict) or "transform" not in rule:
                 continue
-            if rule.get("domain") != "storage.googleapis.com" or rule["transform"] not in ours:
-                raise ProviderError("permission", retryable=False, native_code="gcs_transform_echo")
+            path = f"{prefix}.environment.network.allowlist[{index}].transform"
+            if rule.get("domain") != "storage.googleapis.com":
+                _refuse_transform(path, "foreign_domain")
+            header = echoed_mount_header(rule["transform"])
+            if header is None:
+                _refuse_transform(path, "unrecognized_shape")
+            if header not in ours:
+                _refuse_transform(path, "not_dispatched_by_this_transport")
             del rule["transform"]
     return result
+
+
+# Diagnostic paths name only these schema keys; any other key (which model
+# output can choose, even a credential) renders as "<key>".
+_SCHEMA_KEYS = frozenset(
+    {
+        "interaction",
+        "environment",
+        "network",
+        "allowlist",
+        "transform",
+        "steps",
+        "tools",
+        "headers",
+        "sources",
+        "arguments",
+        "content",
+        "result",
+        "agent_config",
+    }
+)
+
+
+def transform_paths(value: JsonValue, path: str = "$", *, in_network: bool = False) -> list[str]:
+    """Redacted key paths of network transforms (presence only, for diagnostics)."""
+    found: list[str] = []
+    if isinstance(value, dict):
+        if in_network and "transform" in value:
+            found.append(path + ".transform")
+        for key, child in value.items():
+            name = key if key in _SCHEMA_KEYS else "<key>"
+            found += transform_paths(
+                child, f"{path}.{name}", in_network=in_network or key == "network"
+            )
+    elif isinstance(value, list):
+        for index, child in enumerate(value):
+            found += transform_paths(child, f"{path}[{index}]", in_network=in_network)
+    return found
 
 
 def checked_storage_response(
@@ -113,13 +186,15 @@ def checked_storage_response(
         return value
     known = tokens or set()
     value = scrub_mount_echo(value, known)
-    if network_transform_present(value):
-        raise ProviderError("permission", retryable=False, native_code="gcs_transform_echo")
-    # The token anywhere else (model output, a tool result, another field) is a
-    # leak: check decoded values and the re-encoded bytes of the scrubbed payload.
+    # The token anywhere else (model output, a tool result, another field, a
+    # key) is a leak: check decoded keys/values and the re-encoded bytes of the
+    # scrubbed payload FIRST, before any diagnostic path is built or logged.
     encoded = json.dumps(value).encode()
     if any(contains_secret(value, t) or t.encode() in encoded for t in known):
+        log.warning("gemini mount token echo refused: reason=token_outside_mount_location")
         raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
+    if network_transform_present(value):
+        _refuse_transform(",".join(transform_paths(value)), "outside_mount_location")
     return value
 
 
