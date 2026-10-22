@@ -563,8 +563,12 @@ async def _produce_fleet_budget(
     markup: Decimal,
     reserve: bool,
     financial: bool,
+    snapshot: bool = False,
 ) -> dict[uuid.UUID, FleetBudgetUsage]:
     """The sole product producer of held exposure and admission decisions.
+
+    A `snapshot` pass reads the caller's read-only transaction without the tenant
+    lock or row locks and persists nothing: it decides from what it would persist.
 
     Use the store's tenant/actor/run/worker lock order. Read originals, derive
     conservative money once, and persist before returning an admission refusal.
@@ -574,6 +578,8 @@ async def _produce_fleet_budget(
     """
     if not markup.is_finite() or markup <= 0:
         raise FleetConflict("fleet billing markup must be positive and finite")
+    if snapshot and reserve:
+        raise FleetConflict("a snapshot read cannot reserve")
     facts = parent.fleet
     if facts.scope.is_platform or facts.scope.is_legacy_host_authorized:
         raise FleetConflict("fleet budget requires tenant authority")
@@ -586,8 +592,11 @@ async def _produce_fleet_budget(
             run_id=facts.run_id,
             financial=financial,
             persisted=True,
+            locking=not snapshot,
         )
-        roots = await mux_state.list_fleet_root_finances(session, tenant_id=tenant_id)
+        roots = await mux_state.list_fleet_root_finances(
+            session, tenant_id=tenant_id, locking=not snapshot
+        )
         await _financial_room(
             session,
             tenant_id=tenant_id,
@@ -700,13 +709,19 @@ async def _produce_fleet_budget(
                         exposures[member.id] = max(member.reserved_usd, floor)
                     debit_total += debit
                 debits[other_run.id] = debit_total
-            graph = await fleet_store.save_budget(
-                session,
-                tenant_id=tenant_id,
-                graph=graph,
-                exposures=exposures,
-                debits=debits,
-                zero_spend=frozenset(zero_spend),
+            graph = (
+                fleet_store.project_budget(
+                    graph, exposures=exposures, debits=debits, zero_spend=frozenset(zero_spend)
+                )
+                if snapshot
+                else await fleet_store.save_budget(
+                    session,
+                    tenant_id=tenant_id,
+                    graph=graph,
+                    exposures=exposures,
+                    debits=debits,
+                    zero_spend=frozenset(zero_spend),
+                )
             )
             run, workers = next(pair for pair in graph if pair[0].id == run.id)
             available, channel_available = await _financial_room(
@@ -853,6 +868,32 @@ async def produce_fleet_budget(
     )
 
 
+async def read_fleet_budget_snapshot(
+    sessionmaker: async_sessionmaker[AsyncSession],
+    *,
+    parent: WorkerPermissions,
+    prices: Mapping[tuple[str, str], ModelRates | ProviderPrice],
+    markup: Decimal,
+) -> dict[uuid.UUID, FleetBudgetUsage]:
+    """The passive producer's decisions from one consistent read-only snapshot.
+
+    Takes no tenant lock and no row lock, so admissions holding them never delay
+    it; writes nothing, so it never replaces the locked refresh that persists floors.
+    """
+    async with sessionmaker.begin() as session:
+        await session.execute(text("SET TRANSACTION ISOLATION LEVEL REPEATABLE READ, READ ONLY"))
+        return await _produce_fleet_budget(
+            session,
+            parent=parent,
+            worker_id=None,
+            prices=prices,
+            markup=markup,
+            reserve=False,
+            financial=False,
+            snapshot=True,
+        )
+
+
 async def _reserve_fleet_worker(
     session: AsyncSession,
     *,
@@ -937,7 +978,9 @@ BUDGET_READ_TIMEOUT_LIMIT = 3
 #: fails closed. A holder this long is stuck (or holding over slow work), not admitting.
 BUDGET_LOCK_BUSY_LIMIT_S = 10.0
 #: Seconds the lock may stay busy while its holders keep changing (admissions making
-#: progress) before the watch fails closed anyway: the longest the run's usage goes unread.
+#: progress) before the watch fails closed anyway. Busy polls still decide from a
+#: lock-free snapshot, so this bounds how long the locked refresh cannot persist floors,
+#: not how long usage goes unread.
 BUDGET_LOCK_CONTENDED_LIMIT_S = 60.0
 
 # The granted holder of one advisory key, from the same transaction the watch opened.
@@ -945,11 +988,13 @@ _LOCK_HOLDER = text(
     """
     SELECT a.pid, a.xact_start, a.state, a.wait_event_type, a.wait_event,
            extract(epoch FROM clock_timestamp() - a.xact_start) AS xact_s,
-           left(a.query, 120) AS query
+           a.query_id
     FROM pg_locks AS l JOIN pg_stat_activity AS a ON a.pid = l.pid
     WHERE l.locktype = 'advisory' AND l.granted AND l.objsubid = 1
+      AND l.database = (SELECT oid FROM pg_database WHERE datname = current_database())
       AND l.classid = ((hashtextextended(:key, 0) >> 32) & 4294967295)::oid
       AND l.objid = (hashtextextended(:key, 0) & 4294967295)::oid
+    ORDER BY a.xact_start, a.pid
     LIMIT 1
     """
 )
@@ -978,7 +1023,7 @@ async def _lock_holder(session: AsyncSession, key: str) -> dict[str, object] | N
         "state": row["state"],
         "wait": f"{row['wait_event_type']}:{row['wait_event']}",
         "xact_s": round(float(row["xact_s"]), 3) if row["xact_s"] is not None else None,
-        "query": row["query"],
+        "query_id": row["query_id"],
     }
 
 
@@ -1001,9 +1046,11 @@ async def watch_fleet_budget(
     Caller registers each worker's cancellation event in the same mapping only
     after its admission commits, and sets finished when the run ends. A cancelled or
     completed cohort never ends the active run watch; unavailable usage still
-    fails closed and requests cancellation of all registered workers. A busy tenant
-    lock is logged with its holder and fails closed only when one transaction holds
-    it past BUDGET_LOCK_BUSY_LIMIT_S or it stays busy past BUDGET_LOCK_CONTENDED_LIMIT_S.
+    fails closed and requests cancellation of all registered workers. While the tenant
+    lock is busy, each poll decides from a lock-free read-only snapshot of the same
+    producer, so contention never stops overrun cancellation. The holder is logged;
+    the watch fails closed when one transaction holds the lock past
+    BUDGET_LOCK_BUSY_LIMIT_S or it stays busy past BUDGET_LOCK_CONTENDED_LIMIT_S.
     """
     if parent.fleet.enabled is not True or parent.fleet.depth != 0:
         raise FleetConflict("fleet watch requires explicit root opt-in")
@@ -1021,6 +1068,7 @@ async def watch_fleet_budget(
         while not finished.is_set():
             started = asyncio.get_running_loop().time()
             watched = tuple(cancelled.items())
+            snapshot_read = False
             try:
                 # The read gets its whole timeout after the lock wait, so a lock granted
                 # late in the wait is not then counted as a slow read.
@@ -1068,20 +1116,54 @@ async def watch_fleet_budget(
                     log.info("fleet.budget_lock_busy", holder=holder)
                 stuck = now - holder_since >= BUDGET_LOCK_BUSY_LIMIT_S
                 contended = now - busy_since >= BUDGET_LOCK_CONTENDED_LIMIT_S
-                if not (stuck or contended):
-                    await asyncio.sleep(poll_interval)
-                    continue
-                log.warning(
-                    "fleet.budget_read_unavailable",
-                    reason="lock_busy",
-                    error_class="BudgetLockBusy",
-                    holder=holder,
-                    busy_s=round(now - busy_since, 3),
-                    holder_s=round(now - holder_since, 3),
-                )
-                for event in cancelled.values():
-                    event.set()
-                return "usage_unavailable"
+                if stuck or contended:
+                    log.warning(
+                        "fleet.budget_read_unavailable",
+                        reason="lock_busy",
+                        error_class="BudgetLockBusy",
+                        holder=holder,
+                        busy_s=round(now - busy_since, 3),
+                        holder_s=round(now - holder_since, 3),
+                    )
+                    for event in cancelled.values():
+                        event.set()
+                    return "usage_unavailable"
+                # Contention must not blind the watch: decide from a lock-free,
+                # read-only snapshot of the same producer. The locked refresh that
+                # persists floors resumes when the lock is free.
+                try:
+                    async with asyncio.timeout(timeout):
+                        usages = await read_fleet_budget_snapshot(
+                            sessionmaker, parent=parent, prices=prices, markup=markup
+                        )
+                    if any(worker_id not in usages for worker_id, _ in watched):
+                        raise FleetConflict("watched worker is unavailable")
+                except TimeoutError:
+                    timeouts += 1
+                    if timeouts < BUDGET_READ_TIMEOUT_LIMIT:
+                        log.info("fleet.budget_read_slow", consecutive=timeouts, snapshot=True)
+                        await asyncio.sleep(poll_interval)
+                        continue
+                    log.warning(
+                        "fleet.budget_read_unavailable",
+                        reason="read_unavailable",
+                        error_class="TimeoutError",
+                        snapshot=True,
+                    )
+                    for event in cancelled.values():
+                        event.set()
+                    return "usage_unavailable"
+                except Exception as error:
+                    log.warning(
+                        "fleet.budget_read_unavailable",
+                        reason="read_unavailable",
+                        error_class=type(error).__name__,
+                        snapshot=True,
+                    )
+                    for event in cancelled.values():
+                        event.set()
+                    return "usage_unavailable"
+                snapshot_read = True
             except TimeoutError:
                 # One slow read (e.g. while sibling admissions hold the run lock)
                 # is not unavailable usage: retry, and fail closed only after
@@ -1107,7 +1189,9 @@ async def watch_fleet_budget(
                 for event in cancelled.values():
                     event.set()
                 return "usage_unavailable"
-            timeouts, busy_since, holder_key, holder_since = 0, None, None, None
+            timeouts = 0
+            if not snapshot_read:
+                busy_since, holder_key, holder_since = None, None, None
             for worker_id, event in watched:
                 usage = usages.get(worker_id)
                 if event.is_set() or usage is None:

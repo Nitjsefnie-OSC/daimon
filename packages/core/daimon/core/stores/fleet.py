@@ -20,11 +20,12 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any, Literal, cast
 
-from daimon.core._models import Account
+from daimon.core._models import Account, Tenant
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
 from daimon.core.fleet import (
@@ -891,6 +892,7 @@ async def lock_budget(
     run_id: uuid.UUID | None,
     financial: bool = True,
     persisted: bool = False,
+    locking: bool = True,
 ) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
     """Join the caller's financial transaction before any fleet row transition.
 
@@ -902,19 +904,24 @@ async def lock_budget(
     requested run for terminal readback. Passive refresh uses tenant KEY SHARE;
     reservation and fresh native admission retain FOR UPDATE. Return original
     allocation stamps.
+
+    Without `locking` this is a read of the caller's snapshot: no tenant lock and no
+    row locks, for a read-only transaction that must never wait behind writers.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"fleet:{tenant_id}"},
-    )
-    # Same tenant/account order as audit and erasure.
-    tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id, financial=financial)
+    if locking:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"fleet:{tenant_id}"},
+        )
+        # Same tenant/account order as audit and erasure.
+        tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id, financial=financial)
+    else:
+        tenant = await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id))
+    actor_query = select(Account.id).where(Account.id == actor_id, Account.tenant_id == tenant_id)
     actor = await session.scalar(
-        select(Account.id)
-        .where(Account.id == actor_id, Account.tenant_id == tenant_id)
-        .with_for_update(read=True, key_share=True)
+        actor_query.with_for_update(read=True, key_share=True) if locking else actor_query
     )
     if tenant is None or actor is None:
         raise FleetConflict("financial admission requires a live tenant actor")
@@ -927,8 +934,9 @@ async def lock_budget(
             | (FleetRunRow.reserved_usd > FleetRunRow.observed_usd),
         )
         .order_by(FleetRunRow.id)
-        .with_for_update()
     )
+    if locking:
+        run_query = run_query.with_for_update()
     runs = (
         (await read_persisted_columns(session, run_query, reject_new=True)).all()
         if persisted
@@ -941,8 +949,9 @@ async def lock_budget(
             FleetWorkerRow.run_id.in_(run.id for run in runs),
         )
         .order_by(FleetWorkerRow.id)
-        .with_for_update()
     )
+    if locking:
+        worker_query = worker_query.with_for_update()
     workers = (
         (await read_persisted_columns(session, worker_query, reject_new=True)).all()
         if persisted
@@ -954,6 +963,37 @@ async def lock_budget(
         ),
         {w.id: w.started_at for w in workers},
     )
+
+
+def project_budget(
+    graph: BudgetGraph,
+    *,
+    exposures: Mapping[uuid.UUID, Decimal],
+    debits: Mapping[uuid.UUID, Decimal],
+    zero_spend: frozenset[uuid.UUID] = frozenset(),
+) -> BudgetGraph:
+    """What `save_budget` would persist, computed without writing, for a snapshot read.
+
+    The same release rule applies; run sums use the same exact stored amounts.
+    """
+    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
+    for run, workers in graph:
+        projected: list[FleetWorker] = []
+        for worker in workers:
+            amount = _amount(exposures[worker.id])
+            if amount < worker.reserved_usd and worker.id not in zero_spend:
+                raise FleetConflict("unknown worker exposure cannot be released")
+            projected.append(replace(worker, reserved_usd=amount))
+        with localcontext() as arithmetic:
+            arithmetic.prec = 80  # exact for stored micro-dollar amounts, as SQL sums are
+            total = sum((worker.reserved_usd for worker in projected), Decimal(0))
+        result.append(
+            (
+                replace(run, reserved_usd=total, observed_usd=_amount(debits[run.id])),
+                tuple(projected),
+            )
+        )
+    return tuple(result)
 
 
 async def save_budget(

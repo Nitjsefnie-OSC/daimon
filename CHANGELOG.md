@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Fleet: slow admissions taking turns on the tenant fleet lock no longer make the budget watcher cancel every worker in the run. It logs which transaction holds the lock and fails closed only when one transaction holds it for 10 s, or it stays busy for 60 s; a budget read granted late in its lock wait is no longer counted as a slow read.
+- Fleet: slow admissions taking turns on the tenant fleet lock no longer make the budget watcher cancel every worker in the run. While the lock is busy the watcher keeps checking every worker's spend from a lock-free read-only snapshot, logs which transaction holds the lock, and fails closed when one transaction holds it for 10 s or it stays busy for 60 s; a budget read granted late in its lock wait is no longer counted as a slow read.
 
 - Fleet: a plain-language Gemini worker is no longer refused for its deadline. A worker's default deadline is now the sooner of the run's deadline and the Gemini worker runtime limit (120 s), and a later deadline is shortened the same way; Anthropic and OpenAI workers keep the run's deadline.
 

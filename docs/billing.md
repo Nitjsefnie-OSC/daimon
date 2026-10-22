@@ -1141,10 +1141,13 @@ these decisions at four Hz by default, including producer time in the interval,
 and remains active across completed or cancelled cohorts until the run owner
 sets the run-finished event. Unavailable usage fails closed and cancels all
 registered workers. A busy tenant fleet lock is not by itself unavailable usage:
-the watcher logs the holding transaction (`fleet.budget_lock_busy`) and keeps
-polling while holders change, failing closed when one transaction holds the lock
-for `BUDGET_LOCK_BUSY_LIMIT_S` (10 s) or the lock stays busy for
-`BUDGET_LOCK_CONTENDED_LIMIT_S` (60 s). The watcher has no separate worker
+on each busy poll the watcher logs the holding transaction
+(`fleet.budget_lock_busy`) and decides from `read_fleet_budget_snapshot`, the same
+producer read from a REPEATABLE READ, READ ONLY snapshot with no tenant or row
+locks and no writes, so contention never stops overrun cancellation. It still
+fails closed when one transaction holds the lock for `BUDGET_LOCK_BUSY_LIMIT_S`
+(10 s) or the lock stays busy for `BUDGET_LOCK_CONTENDED_LIMIT_S` (60 s), and
+after `BUDGET_READ_TIMEOUT_LIMIT` consecutive slow reads. The watcher has no separate worker
 deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
 admission, replacement inventory and exact final settlement remain unavailable
 here. These interfaces create no ledger charge or provider-native hard cap;
