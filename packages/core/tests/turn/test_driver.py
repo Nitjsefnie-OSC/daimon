@@ -6,9 +6,11 @@ from typing import cast
 
 from anthropic import AsyncAnthropic
 from anthropic.types.beta.sessions import BetaManagedAgentsImageBlockParam
+from daimon.core.config import RecruitmentSettings
 from daimon.core.errors import TurnError
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.testing.turn_fakes import (
     BlockForever,
@@ -72,6 +74,7 @@ async def test_progress_generation_stops_before_render_cancellation_and_final_re
     lc = Lifecycle()
     await asyncio.wait_for(
         run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -100,6 +103,7 @@ async def test_run_turn_folds_full_stream_and_returns_terminal_state() -> None:
     cancel = asyncio.Event()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -137,6 +141,7 @@ async def test_run_turn_finalizes_session_status_terminated_as_terminal_failure(
 
     final = await asyncio.wait_for(
         run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -174,6 +179,7 @@ async def test_run_turn_finalizes_requires_action_idle_as_actionable_failure() -
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -199,6 +205,7 @@ async def test_run_turn_posts_user_message_after_opening_stream() -> None:
     lc = RecordingLifecycle()
 
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -233,6 +240,7 @@ async def test_run_turn_prepends_image_blocks_before_text_block() -> None:
     }
 
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="what's in this image?",
@@ -270,6 +278,7 @@ async def test_run_turn_always_fires_final_render_before_terminal_success() -> N
     lc = RecordingLifecycle()
 
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -304,6 +313,7 @@ async def test_render_loop_rerenders_unchanged_state_during_a_long_tool_call() -
 
     await asyncio.wait_for(
         run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -344,6 +354,7 @@ async def test_reconnect_refolds_from_empty_and_continues_the_turn() -> None:
 
     lc = RecordingLifecycle()
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -376,6 +387,7 @@ async def test_reconnect_does_not_re_emit_pre_reconnect_content() -> None:
 
     lc = RecordingLifecycle()
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -411,6 +423,7 @@ async def test_double_connection_error_surfaces_connection_lost() -> None:
 
     lc = RecordingLifecycle()
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -436,6 +449,7 @@ async def test_non_retryable_status_error_surfaces_upstream() -> None:
     fa.beta.sessions.events.stream_scripts = [[RaiseStatus(status_code=500)]]
     lc = RecordingLifecycle()
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -460,6 +474,7 @@ async def test_upstream_error_clears_stop_reason() -> None:
 
     lc = RecordingLifecycle()
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -487,6 +502,7 @@ async def test_rate_limit_error_populates_rate_limit_until_from_retry_after() ->
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -515,6 +531,7 @@ async def test_inband_rate_limited_session_error_wraps_but_rate_limit_until_stay
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -556,6 +573,7 @@ async def test_interrupt_during_replay_raises_interrupted_without_posting_user_i
 
     lc = RecordingLifecycle()
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -607,6 +625,7 @@ async def test_interrupt_during_reconnect_stream_open_raises_interrupted_without
 
     lc = RecordingLifecycle()
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -640,6 +659,7 @@ async def test_interrupt_before_stream_open_raises_interrupted_with_pre_stream_p
 
     lc = RecordingLifecycle()
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -685,6 +705,7 @@ async def test_interrupt_mid_consume_posts_user_interrupt_and_ends_clean_on_ack(
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
         final = await run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -722,6 +743,7 @@ async def test_interrupt_mid_consume_timeout_surfaces_interrupt_timeout() -> Non
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
         final = await run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -749,6 +771,7 @@ async def test_structlog_emits_turn_started_completed_on_happy_path() -> None:
 
     with structlog.testing.capture_logs() as logs:
         await run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_42",
             user_message="hi",
@@ -783,6 +806,7 @@ async def test_structlog_emits_reconnect_events_on_retry() -> None:
 
     with structlog.testing.capture_logs() as logs:
         await run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_42",
             user_message="hi",
@@ -812,6 +836,7 @@ async def test_structlog_turn_rate_limited_carries_retry_after_s_and_until() -> 
 
     with structlog.testing.capture_logs() as logs:
         await run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
             anthropic=_cast(fa),
             session_id="sess_42",
             user_message="hi",
@@ -862,6 +887,7 @@ async def test_reconnect_on_reused_session_two_turn_log_renders_only_current_tur
 
     lc = RecordingLifecycle()
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_reused",
         user_message="hi turn 2",
@@ -908,6 +934,7 @@ async def test_run_turn_sends_system_message_after_user_message_when_blocks_give
     ]
 
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="continue the task",
@@ -936,6 +963,7 @@ async def test_run_turn_sends_only_the_user_message_when_system_blocks_are_empty
     ]
 
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -991,6 +1019,7 @@ async def test_mcp_failure_then_reply_finalizes_as_success_carrying_the_failure(
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -1021,6 +1050,7 @@ async def test_mcp_failure_with_no_output_finalizes_as_failure_naming_the_server
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -1070,6 +1100,7 @@ async def test_retrying_error_that_never_settles_and_produces_nothing_is_a_failu
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -1100,6 +1131,7 @@ async def test_retrying_error_behind_a_partial_answer_fails_when_ma_says_retries
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -1134,6 +1166,7 @@ async def test_driver_acknowledges_only_after_final_delivery():
             phases.append(phase)
 
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",

@@ -17,9 +17,11 @@ from datetime import UTC, datetime, timedelta
 from typing import cast
 
 from anthropic import AsyncAnthropic
+from daimon.core.config import RecruitmentSettings
 from daimon.core.turn import run_turn
 from daimon.core.turn.ceiling import CEILING_MESSAGE
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.turn_fakes import (
     BlockForever,
     DelayThenYield,
@@ -45,6 +47,7 @@ async def test_no_deadline_leaves_the_driver_unbounded() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -64,6 +67,7 @@ async def test_past_deadline_returns_a_ceiling_turn_error() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -85,6 +89,7 @@ async def test_ceiling_breach_delivers_on_terminal_failure_exactly_once() -> Non
     lc = RecordingLifecycle()
 
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -108,6 +113,7 @@ async def test_ceiling_breach_closes_the_opened_stream() -> None:
     lc = RecordingLifecycle()
 
     await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -131,6 +137,7 @@ async def test_a_future_deadline_does_not_disturb_a_normal_turn() -> None:
     lc = RecordingLifecycle()
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -169,6 +176,7 @@ async def test_ceiling_breach_during_stream_open_leaks_no_task_and_no_stream() -
     fa.beta.sessions.events.stream = _slow_stream  # type: ignore[assignment]
 
     final = await run_turn(
+        privacy=TurnPrivacy("discord", RecruitmentSettings()),
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
