@@ -52,6 +52,7 @@ from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.state import TurnState, extract_final_response
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import render_turn_origin, turn_origin
 from sqlalchemy.exc import SQLAlchemyError
 
@@ -379,6 +380,7 @@ async def reply_to_dm(
         admission = await admit(
             deps,
             tenant_id=conversation.tenant_id,
+            requester_org=RequesterOrg.HOST,
             platform=platform,
             external_user_id=external_user_id,
             channel_id=conversation.channel_id,
@@ -455,6 +457,8 @@ async def reply_to_dm(
                 responder_ma_agent_id=admission.agent.id,
                 responder_name=admission.agent.name,
                 role=role,
+                sender_foreign=admission.hold is not None and admission.hold.client,
+                shared_channel=admission.shared_channel,
             ) as origin,
         ):
             user_message = f"{render_turn_origin(origin)}\n{context}\n\n{text}"

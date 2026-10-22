@@ -234,6 +234,7 @@ from daimon.core.turn.thread_queue import (
     group_by_author,
     release_thread,
 )
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
     HandoffNotice,
@@ -3973,6 +3974,7 @@ class DaimonBot(commands.Bot):
         admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id=row.requester_external_user_id,
             channel_id=row.parent_channel_id,
@@ -4272,6 +4274,8 @@ class DaimonBot(commands.Bot):
                 configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                 configuration_target_name=admission.config.configuration_target_name,
                 role=role,
+                sender_foreign=admission.hold is not None and admission.hold.client,
+                shared_channel=admission.shared_channel,
                 is_setup=admission.config.thread_binding_kind == "setup",
             ) as origin:
                 outcome = await run_prepared_turn(
@@ -4734,6 +4738,7 @@ class DaimonBot(commands.Bot):
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
+                requester_org=RequesterOrg.HOST,
                 platform="discord",
                 external_user_id=str(message.author.id),
                 channel_id=parent_channel_id,
@@ -4817,6 +4822,12 @@ class DaimonBot(commands.Bot):
                     "turn.skipped.own_agents_only",
                     guild_id=guild_id,
                     channel_id=parent_channel_id,
+                    user_id=str(message.author.id),
+                )
+            elif err.reason == "client_requester":
+                log.info(
+                    "turn.skipped.client_requester",
+                    guild_id=guild_id,
                     user_id=str(message.author.id),
                 )
             elif err.reason == "balance_depleted":
@@ -5176,6 +5187,8 @@ class DaimonBot(commands.Bot):
             configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
             configuration_target_name=admission.config.configuration_target_name,
             role=role,
+            sender_foreign=admission.hold is not None and admission.hold.client,
+            shared_channel=admission.shared_channel,
             is_setup=admission.config.thread_binding_kind == "setup",
             message_text=message.content,
             queued_message=content_override is not None,

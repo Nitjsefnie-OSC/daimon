@@ -514,6 +514,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     from daimon.core.turn.outcomes import drain_outcomes
     from daimon.core.turn.persistence import current_persistence
     from daimon.core.turn.runtimes import build_channel_runtime, ensure_channel_runtime
+    from daimon.core.turn_hold import RequesterOrg
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant_config
     from mux.contracts.extensions import ExtensionConfig
     from mux.contracts.ids import SkillRef, ThreadRef
@@ -1053,6 +1054,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     admitted = await admit(
         request.deps,
         tenant_id=TENANT,
+        requester_org=RequesterOrg.HOST,
         platform="slack",
         external_user_id="caller",
         channel_id=REVISION.channel.channel_id,

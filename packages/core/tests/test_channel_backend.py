@@ -27,6 +27,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma import build_fake_anthropic, resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -175,6 +176,7 @@ async def _admit(deps: TurnDeps, tenant: TenantRow, channel_id: str = "chan-1") 
     return await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="user-1",
         channel_id=channel_id,

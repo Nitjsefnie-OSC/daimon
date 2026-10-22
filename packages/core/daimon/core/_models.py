@@ -198,6 +198,9 @@ class PlatformPrincipal(Base):
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
     active_agent_name: Mapped[str | None] = mapped_column(Text, nullable=True)
+    # Home organisation id of a person verified to belong to another organisation.
+    # Sticky: written once by admission, never cleared by code.
+    foreign_home_id: Mapped[str | None] = mapped_column(Text, nullable=True)
 
 
 class PrincipalLink(Base):
@@ -2485,6 +2488,35 @@ class TurnOrigin(Base):
     # Set by `archive_thread` on this turn's own thread; the adapter archives
     # the thread after the turn's last post.
     archive_requested_at: Mapped[datetime | None] = mapped_column(DateTime(timezone=True))
+    # The origin channel is shared with another organisation.
+    shared_channel: Mapped[bool] = mapped_column(
+        Boolean, nullable=False, server_default=text("false")
+    )
+
+
+class SharedChannel(Base):
+    """A channel known to be shared with another organisation, recorded once and kept.
+
+    `source` is who revealed it: the platform's own signal, or a verified client
+    requester seen there. Every turn in it is held to it (`daimon.core.turn_hold`).
+    """
+
+    __tablename__ = "shared_channels"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "platform", "channel_id", name="pk_shared_channels"),
+        ForeignKeyConstraint(
+            ["tenant_id"], ["tenants.id"], ondelete="CASCADE", name="fk_shared_channels_tenants"
+        ),
+        CheckConstraint("source IN ('platform', 'client')", name="ck_shared_channels_source"),
+    )
+
+    tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    platform: Mapped[str] = mapped_column(Text, nullable=False)
+    channel_id: Mapped[str] = mapped_column(Text, nullable=False)
+    first_seen_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
 
 
 class PendingSkillAdd(Base):

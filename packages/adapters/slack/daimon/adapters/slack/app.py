@@ -270,6 +270,7 @@ from daimon.core.turn.thread_queue import (
     group_by_author,
     release_thread,
 )
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names
 from daimon.core.turn_origin import (
     build_handoff_notice,
@@ -2086,6 +2087,7 @@ class SlackApp:
             admission = await admit(
                 self.runtime.turn_deps,
                 tenant_id=tenant_id,
+                requester_org=RequesterOrg.HOST,
                 platform="slack",
                 external_user_id=author_id,
                 channel_id=channel,
@@ -2153,6 +2155,14 @@ class SlackApp:
                     team_id=team_id,
                     channel_id=channel,
                     thread_id=thread_id,
+                )
+            elif err.reason == "client_requester":
+                log.info(
+                    "turn.skipped.client_requester",
+                    tenant_id=str(tenant_id),
+                    user_id=str(event.get("user") or ""),
+                    team_id=team_id,
+                    channel_id=channel,
                 )
             elif err.reason == "balance_depleted":
                 log.info(
@@ -2821,6 +2831,8 @@ class SlackApp:
                     configuration_target_ma_agent_id=admission.config.configuration_target_ma_agent_id,
                     configuration_target_name=admission.config.configuration_target_name,
                     role=Role.ADMIN if is_admin else Role.USER,
+                    sender_foreign=admission.hold is not None and admission.hold.client,
+                    shared_channel=admission.shared_channel,
                 ) as origin:
                     outcome = await run_prepared_turn(
                         self.runtime.turn_deps,
@@ -3116,6 +3128,7 @@ class SlackApp:
         follow_admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,
+            requester_org=RequesterOrg.HOST,
             platform="slack",
             external_user_id=row.requester_external_user_id,
             channel_id=channel,
@@ -3336,6 +3349,8 @@ class SlackApp:
                 ),
                 configuration_target_name=(follow_admission.config.configuration_target_name),
                 role=role,
+                sender_foreign=follow_admission.hold is not None and follow_admission.hold.client,
+                shared_channel=follow_admission.shared_channel,
                 is_setup=follow_admission.config.thread_binding_kind == "setup",
             ) as follow_origin:
                 await run_prepared_turn(

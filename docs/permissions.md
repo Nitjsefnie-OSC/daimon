@@ -234,6 +234,31 @@ with `approved=True`. A session without that card, an agent key or a run
 nobody watches is refused, so a plumbing failure refuses rather than
 publishes.
 
+## Held turns
+
+A turn is **held** to the channel it was asked in when the requester belongs
+to another organisation than the one that added Daimon (a *client*), or when
+the channel is shared with another organisation. A requester whose
+organisation the platform could not determine is treated as a client for that
+turn only; nothing about them is stored.
+
+A held turn reads and posts only inside its channel and the threads under it.
+It cannot send direct messages, save routines, create agents or start
+workers, and publishing needs the requester's Approve. It reads only sessions
+that ran inside the same channel. No admin exemption applies, whatever the
+requester's stored role. A client also cannot change any agent, channel,
+budget or rule, and cannot start a turn in a DM, hub, routine or agent chat;
+Daimon answers them in the channel they share.
+
+Admission records what the platform verified. A person verified as belonging
+to another organisation is stored as a plain user and marked foreign; the mark
+is never cleared, so they stay a client when a later lookup cannot say. A
+channel found to be shared, by the platform's own signal or by a verified
+client asking there, is remembered, so every later turn in it is held.
+
+The hold is separate from agent rules: the default agent and an agent
+bound to several channels still run, read and post inside a held channel.
+
 ## Exemptions
 
 - **Server admins** are exempt where the output reaches them alone: their own
@@ -244,7 +269,8 @@ publishes.
 - A **setup thread** under a `readers: own` channel answers as the built-in
   agent.
 
-Agent keys and tokens with no person behind them are never exempt.
+Agent keys and tokens with no person behind them are never exempt, and no
+exemption applies to a held turn.
 [Trust model](architecture.md#trust-model) has the full table.
 
 ## Changing the rules

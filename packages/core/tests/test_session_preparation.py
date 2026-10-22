@@ -89,6 +89,7 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_fresh_session,
 )
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.usage_sweep import settle_stamped_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
@@ -2498,6 +2499,7 @@ async def test_admission_origin_controls_the_actual_memory_mount(
     admission = await admit(
         admission_deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="user-1",
         channel_id="channel-1",
@@ -2847,6 +2849,7 @@ async def _changed_channel_agent(
     first_admission = await admit(
         admission_deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="user-1",
         channel_id="channel-1",
@@ -2883,6 +2886,7 @@ async def _admit_next(admission_deps: TurnDeps, tenant: TenantRow) -> Admission:
     return await admit(
         admission_deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="user-1",
         channel_id="channel-1",

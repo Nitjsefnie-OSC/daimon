@@ -153,6 +153,8 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )

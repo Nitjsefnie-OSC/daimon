@@ -133,6 +133,7 @@ class PlatformPrincipalRow(BaseModel):
     account_id: uuid.UUID
     created_at: datetime
     active_agent_name: str | None = None
+    foreign_home_id: str | None = None
 
 
 class PrincipalLinkRow(BaseModel):
@@ -1118,6 +1119,7 @@ class TurnOriginRow(BaseModel):
     created_at: datetime
     expires_at: datetime
     sender_foreign: bool = False
+    shared_channel: bool = False
 
 
 class _Facts(BaseModel):

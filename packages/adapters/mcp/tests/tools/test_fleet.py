@@ -683,6 +683,8 @@ async def test_installed_bridge_requires_the_exact_active_origin(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=-1 if fault == "expired" else 10),
             now=now,
         )
@@ -750,6 +752,8 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))

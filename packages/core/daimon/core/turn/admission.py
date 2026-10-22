@@ -85,10 +85,11 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
-from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.stores.identity import get_or_create_platform_principal, mark_principal_foreign
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
+from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.stores.thread_sessions import get_thread_session_at
 from daimon.core.tenant_balance import is_over_balance
 from daimon.core.turn.approvals import daimon_rule_set_for
@@ -101,7 +102,7 @@ from daimon.core.turn.errors import (
     SessionBusyError,
 )
 from daimon.core.turn.outcomes import TurnObservation, current_outcome
-from daimon.core.turn_hold import TurnHold
+from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.contracts.admission import Admission as BackendAdmission
 from mux.contracts.config import BackendConfig, ConfigRevision, ResolvedBackend, resolve_default
 from mux.contracts.ids import Scope, ThreadRef
@@ -109,6 +110,7 @@ from mux.errors import ScopeViolation
 from mux.profiles import MANAGED_AGENTS
 from mux.profiles.selfhosted import LOOP
 from mux.state.lease import Slot
+from sqlalchemy.ext.asyncio import AsyncSession
 
 __all__ = [
     "Admission",
@@ -158,6 +160,9 @@ class AdmissionGrant:
     is_dm: bool
     # Set by the DM path: the conversation's source, whose seal is re-checked.
     dm_source: DmSource | None = None
+    # The channel the turn is held to; every question asked again carries it, so
+    # a hold never relaxes between admission and the moment the session is built.
+    hold: TurnHold | None = None
 
 
 @dataclass(frozen=True)
@@ -191,6 +196,8 @@ class Admission:
     # from another organisation, or the channel is shared with one. Its session
     # gets a credential bound to that channel. None for an ordinary turn.
     hold: TurnHold | None = None
+    # The origin channel is shared with another organisation (stamped on the turn origin).
+    shared_channel: bool = False
     private_dm_id: str | None = None
     # The channel and thread the turn runs in, and every sealed id that seals
     # them (the channel and a thread sealed on its own): stamped on the session
@@ -310,7 +317,19 @@ async def admit(
     category_id: str | None = None,
     category_unresolved: bool = False,
     observer: AdmissionObserver | None = None,
+    requester_org: RequesterOrg,
+    requester_home_id: str | None = None,
+    channel_shared: bool | None = None,
 ) -> Admission:
+    """Admit a turn, or raise the typed reason it is refused.
+
+    `requester_org` is the platform's word on which organisation the requester
+    belongs to; every caller states it. `requester_home_id` names the home
+    organisation of an `OTHER` requester. `channel_shared` is the platform's live
+    signal that the channel is shared with another organisation (None: no signal).
+    A client (another organisation, unknown, or one already recorded as foreign) is
+    held to the channel it asked in, as is anyone in a shared channel.
+    """
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
     )
@@ -331,6 +350,9 @@ async def admit(
                 dm_source_channel_id=dm_source_channel_id,
                 category_id=category_id,
                 category_unresolved=category_unresolved,
+                requester_org=requester_org,
+                requester_home_id=requester_home_id,
+                channel_shared=channel_shared,
             )
     except BaseException as exc:
         observation.finish(error=exc)
@@ -391,6 +413,9 @@ async def admit_impl(
     dm_source_channel_id: str | None = None,
     category_id: str | None = None,
     category_unresolved: bool = False,
+    requester_org: RequesterOrg,
+    requester_home_id: str | None = None,
+    channel_shared: bool | None = None,
 ) -> Admission:
     """Run the full pre-turn gate sequence; raise instead of returning bool."""
     started = last_stage = perf_counter()
@@ -410,24 +435,50 @@ async def admit_impl(
             platform=platform,
             external_id=external_user_id,
         )
-        if role is not None:
-            await set_role(session, principal.account_id, role)
+        client = requester_org is not RequesterOrg.HOST or principal.foreign_home_id is not None
+        await _record_requester(
+            session,
+            principal_id=principal.id,
+            account_id=principal.account_id,
+            requester_org=requester_org,
+            requester_home_id=requester_home_id,
+            role=role,
+        )
+        shared = False
+        if not is_dm:
+            shared = await _record_shared_channel(
+                session,
+                tenant_id=tenant_id,
+                platform=platform,
+                channel_id=channel_id,
+                requester_org=requester_org,
+                channel_shared=channel_shared,
+            )
         await session.commit()
         mark("identity")
+        if is_dm and client:
+            # A client has no private conversation with Daimon.
+            raise AdmissionDenied(reason="client_requester")
+        hold = TurnHold(platform, channel_id, client) if (client or shared) and not is_dm else None
         # Read after the role commit, so a refused turn still records the role.
         policy = await load_access_policy(session, tenant_id=tenant_id)
         mark("policy_and_admins")
 
         # Refusals must happen before config is read. Keeping the session here
         # reuses its connection for the config cascade after authorization.
-        subject = build_subject(is_admin=role is Role.ADMIN, platform_user_id=external_user_id)
+        # A held turn has no admin exemption anywhere in admission.
+        subject = build_subject(
+            is_admin=role is Role.ADMIN and hold is None,
+            platform_user_id=external_user_id,
+            client=client,
+        )
         turn_place = build_turn_place(
             channel_id=channel_id,
             thread_id=thread_id,
             category_id=category_id,
             category_unresolved=category_unresolved,
         )
-        _require_turn_start(policy, subject, turn_place)
+        _require_turn_start(policy, subject, turn_place, hold)
         mark("start_policy")
 
         if (observation := current_outcome.get()) is not None:
@@ -752,6 +803,7 @@ async def admit_impl(
         channel_id=channel_id,
         thread_id=thread_id,
         is_dm=is_dm,
+        hold=hold,
     )
     _require_run_agent(policy, grant)
     mark("agent_policy")
@@ -805,6 +857,8 @@ async def admit_impl(
             daimon_rule_tools=daimon_rules.tools,
             daimon_rules_need_driver=daimon_rules.needs_driver,
             source_sealed=source_sealed,
+            hold=hold,
+            shared_channel=shared,
             origin_channel_id=channel_id,
             origin_thread_id=thread_id,
             origin_seal_ids=seal_ids,
@@ -1019,6 +1073,8 @@ async def admit_impl(
         daimon_rule_tools=daimon_rules.tools,
         daimon_rules_need_driver=daimon_rules.needs_driver,
         source_sealed=source_sealed,
+        hold=hold,
+        shared_channel=shared,
         origin_channel_id=channel_id,
         origin_thread_id=thread_id,
         origin_seal_ids=seal_ids,
@@ -1048,9 +1104,68 @@ async def admit_impl(
     return result
 
 
-def _require_turn_start(policy: TenantAccessPolicy, subject: Subject, place: Place) -> None:
+async def _record_requester(
+    session: AsyncSession,
+    *,
+    principal_id: uuid.UUID,
+    account_id: uuid.UUID,
+    requester_org: RequesterOrg,
+    requester_home_id: str | None,
+    role: Role | None,
+) -> None:
+    """Write what the platform verified about the requester, and nothing it did not.
+
+    HOST: the adapter's live role, if any. OTHER: the foreign marker, and role USER
+    whatever the caller passed, so a stored admin is demoted. UNKNOWN: nothing at
+    all, so a lookup that failed once never demotes or promotes a stored role.
+    """
+    if requester_org is RequesterOrg.OTHER:
+        if not requester_home_id:
+            raise ValueError("requester_home_id is required when requester_org is OTHER")
+        await mark_principal_foreign(session, principal_id=principal_id, home_id=requester_home_id)
+        await set_role(session, account_id, Role.USER)
+    elif requester_org is RequesterOrg.HOST and role is not None:
+        await set_role(session, account_id, role)
+
+
+async def _record_shared_channel(
+    session: AsyncSession,
+    *,
+    tenant_id: uuid.UUID,
+    platform: str,
+    channel_id: str,
+    requester_org: RequesterOrg,
+    channel_shared: bool | None,
+) -> bool:
+    """Whether the channel is shared with another organisation, recording it when learned.
+
+    The platform's live signal wins as the recorded source; a verified `OTHER`
+    requester also reveals it. An `UNKNOWN` requester never marks a channel.
+    """
+    source: Literal["platform", "client"] | None = None
+    if channel_shared is True:
+        source = "platform"
+    elif requester_org is RequesterOrg.OTHER:
+        source = "client"
+    if source is not None:
+        await mark_channel_shared(
+            session,
+            tenant_id=tenant_id,
+            platform=platform,
+            channel_id=channel_id,
+            source=source,
+        )
+        return True
+    return await is_channel_shared(
+        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    )
+
+
+def _require_turn_start(
+    policy: TenantAccessPolicy, subject: Subject, place: Place, hold: TurnHold | None
+) -> None:
     """Protection, then the invoker allowlist; any denial refuses the turn."""
-    decision = authorize(policy, subject=subject, action=Action.START_TURN, place=place)
+    decision = authorize(policy, subject=subject, action=Action.START_TURN, place=place, hold=hold)
     if not decision:
         raise AdmissionDenied(
             reason="invoker_not_allowed"
@@ -1068,6 +1183,7 @@ def _require_run_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> Non
         surface=grant.surface,
         agent=grant.agent,
         place=grant.run_place,
+        hold=grant.hold,
     )
     if not decision:
         raise AdmissionDenied(
@@ -1082,6 +1198,7 @@ def _asks_before_publishing(policy: TenantAccessPolicy, grant: AdmissionGrant) -
         action=Action.PUBLISH,
         agent=grant.agent,
         origin=grant.run_place,
+        hold=grant.hold,
     )
 
 
@@ -1114,7 +1231,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         return admission
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
-    _require_turn_start(policy, grant.subject, grant.turn_place)
+    _require_turn_start(policy, grant.subject, grant.turn_place, grant.hold)
     _require_run_agent(policy, grant)
     if deps.backend_selection_enabled and admission.backend_revision is not None:
         try:
