@@ -34,7 +34,7 @@ from .test_gemini_resume import ANSWER, steps
 TOKEN = RedactedCredential("offline-mount-token-never-escapes")
 
 
-def snapshot(interaction_id: str, status: str) -> dict:
+def snapshot(interaction_id: str, status: str, transform: object = None) -> dict:
     stamp = datetime.now(UTC).isoformat()
     raw: dict = {
         "id": interaction_id,
@@ -47,7 +47,8 @@ def snapshot(interaction_id: str, status: str) -> dict:
     }
     if status != "in_progress":
         raw["steps"] = steps()
-        # What Gemini echoes on completion: the request's environment, mount transform included.
+        # What Gemini echoes on completion: the request's environment, mount
+        # transform included (really as a list of header objects, F2-G r13).
         raw["environment"] = {
             "type": "remote",
             "sources": [{"type": "gcs", "source": "gs://skills/v1/", "target": ".agents/skills/s"}],
@@ -55,7 +56,7 @@ def snapshot(interaction_id: str, status: str) -> dict:
                 "allowlist": [
                     {
                         "domain": "storage.googleapis.com",
-                        "transform": {"Authorization": "Bearer " + TOKEN},
+                        "transform": transform,
                     }
                 ]
             },
@@ -64,7 +65,15 @@ def snapshot(interaction_id: str, status: str) -> dict:
 
 
 @pytest.mark.asyncio
+@pytest.mark.parametrize(
+    "transform",
+    [
+        pytest.param([{"Authorization": "Bearer " + TOKEN}], id="real-list-shape"),
+        pytest.param({"Authorization": "Bearer " + TOKEN}, id="object-shape"),
+    ],
+)
 async def test_completed_mounted_turn_delivers_its_answer_without_the_token(
+    transform: object,
     caplog: pytest.LogCaptureFixture,
 ) -> None:
     created: list[str] = []
@@ -79,7 +88,7 @@ async def test_completed_mounted_turn_delivers_its_answer_without_the_token(
             phase["done"] = True
             frame = {
                 "event_type": "interaction.completed",
-                "interaction": snapshot("r12", "completed"),
+                "interaction": snapshot("r12", "completed", transform),
             }
             return httpx.Response(
                 200,
@@ -87,7 +96,7 @@ async def test_completed_mounted_turn_delivers_its_answer_without_the_token(
                 content=("data: " + json.dumps(frame) + "\n\n").encode(),
             )
         return httpx.Response(
-            200, json=snapshot("r12", "completed" if phase["done"] else "in_progress")
+            200, json=snapshot("r12", "completed" if phase["done"] else "in_progress", transform)
         )
 
     async with httpx.AsyncClient(transport=httpx.MockTransport(respond)) as http:
