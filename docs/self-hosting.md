@@ -495,8 +495,19 @@ persists its own starting position for recovery.
 On a deadline or abandonment the finalizer attempts bounded cancellation and
 replays usage. Unmatched requests remain pending under their original admission;
 subsequent session replay also records late receipts from earlier turns.
-Unavailable skills are reported once in the bound thread. A changed agent or
-environment revision requires a fresh session binding.
+Unavailable skills are reported once in the bound thread.
+
+Editing the agent applies to an open thread at its next message. When the agent's
+instructions, model, tools, skills or MCP servers change between two messages, the
+second turn runs with the new configuration on the same harness session, so files
+the thread already wrote to its workspace are still there. A turn that is running
+when the edit lands finishes on the configuration it started with. A message sent
+while it is still running does not start a turn: the person is told the current work
+must finish first, and the edit applies to their next message after it ends. Each
+turn is metered at the model and tariff it used. A changed environment (a different environment or a
+new environment revision), a different account scope, or an archived agent still
+requires a fresh session binding. This applies to the self-hosted backend only;
+the OpenAI backend still refuses a changed bound configuration.
 
 ## Self-host on OpenAI
 

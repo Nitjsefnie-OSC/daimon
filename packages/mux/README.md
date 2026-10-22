@@ -6,6 +6,18 @@ capability checks. `daimon selfhosted init` initializes matching named records
 and prints their IDs without provider credentials. Both the host and driver use `HarnessConfig`
 from `mux.drivers.selfhosted.config` for `selfhosted.environment` version 1.
 
+The self-hosted driver supports in-place agent edits on an open session. The
+harness takes instructions, model, tool policy, skills and MCP servers on every
+turn, so `sessions.plan_update` returns `in_place` for an edited agent with the
+same environment (revision included) and `refuse` for another agent or
+environment, a changed environment revision, an archived agent, or session
+resources or extensions. `apply_update` makes no harness call: it advances the
+pinned agent revision and config revision on the session's binding (next
+generation, applies at the next turn), which the host persists with the store's
+generation compare-and-swap; replaying an applied plan is a no-op. The driver
+does not look for an active turn. The host defers an update while a turn holds the
+thread's lease.
+
 `HarnessConfig.session_pool` opts direct transport into ACA dynamic-session
 routing. It requires HTTPS and Entra audience `https://dynamicsessions.io`;
 the host binds that audience to the exact pool origin before acquiring tokens.

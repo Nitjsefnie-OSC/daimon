@@ -2,11 +2,13 @@
 
 from __future__ import annotations
 
-from collections.abc import Awaitable, Callable
+import contextlib
+from collections.abc import AsyncIterator, Awaitable, Callable
 from dataclasses import dataclass, replace
+from datetime import datetime, timedelta
 from decimal import Decimal
 from typing import cast
-from uuid import NAMESPACE_URL, uuid5
+from uuid import NAMESPACE_URL, uuid4, uuid5
 
 from daimon.core.mux_backend import (
     TurnBackend,
@@ -17,7 +19,7 @@ from daimon.core.mux_backend import (
 from daimon.core.pricing import ProviderPrice
 from daimon.core.stores.mux_state import PostgresStateStore
 from daimon.core.turn.admission import reauthorize
-from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn.errors import AdmissionDenied, SessionBusyError
 from daimon.core.turn.io import TurnCodecRequest, TurnIO, register_turn_codec
 from daimon.core.turn.persistence import current_persistence
 from daimon.core.turn.prepare import (
@@ -32,11 +34,11 @@ from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Scope, ThreadRef
 from mux.contracts.ports import Agents, Environments
-from mux.contracts.resources import ProviderBinding, SessionSpec
+from mux.contracts.resources import Agent, ProviderBinding, Session, SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.drivers.selfhosted import Authorization, SelfHostedDriver, ToolsResolver, Transport
-from mux.errors import ContinuityLost, ScopeViolation, UnsupportedCapability
-from mux.state.lease import Slot
+from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
+from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
 
@@ -182,6 +184,147 @@ def _codec(request: TurnCodecRequest) -> TurnIO:
     )
 
 
+BUSY_RETRY_S = 5
+"""How long a caller waits before the message that applies a deferred agent edit."""
+
+
+class _PinnedAgents:
+    """Serves the agent snapshot this turn was planned against.
+
+    The driver reads the agent again when it builds the harness request. An
+    edit that lands after preparation must not reach a turn that was already
+    prepared (and billed) on the old configuration; the next turn picks it up.
+    """
+
+    def __init__(self, agents: Agents, agent: Agent) -> None:
+        self._agents, self._agent = agents, agent
+
+    async def retrieve(self, scope: Scope, ref: ResourceRef) -> Agent:
+        live = await self._agents.retrieve(scope, ref)
+        if ref != self._agent.ref or live.lifecycle != "active":
+            # An agent archived after preparation must not execute: hand the
+            # driver the live record so it refuses exactly as it would unpinned.
+            # A merely edited agent keeps serving the snapshot (next turn applies it).
+            return live
+        return self._agent
+
+    def __getattr__(self, name: str) -> object:
+        return getattr(self._agents, name)
+
+
+def _busy(now: datetime, reason: str) -> SessionBusyError:
+    return SessionBusyError(
+        pending_reasons=(reason,), retry_after=now + timedelta(seconds=BUSY_RETRY_S)
+    )
+
+
+async def _pin_planned_agent(
+    runtime: SelfHostedHostRuntime, scope: Scope, spec: SessionSpec, now: datetime
+) -> SelfHostedHostRuntime:
+    agent = await runtime.agents.retrieve(scope, spec.agent)
+    if agent.revision != spec.agent_revision:
+        # The agent was edited between planning and now; the plan's tools and
+        # instructions no longer match it. The next message plans afresh.
+        raise _busy(now, "agent_edited")
+    return replace(runtime, agents=_PinnedAgents(runtime.agents, agent))
+
+
+UPDATE_LEASE_TTL = timedelta(seconds=30)
+
+
+@contextlib.asynccontextmanager
+async def _hold_slot(store: StateStore, slot: Slot, now: datetime) -> AsyncIterator[Lease]:
+    """Hold the thread's lease while its binding is advanced.
+
+    A turn holds this lease while it runs, so failing to take it means a turn is
+    in flight. Holding it until the new generation is published keeps a rival
+    turn from starting beneath the update: it cannot acquire the lease meanwhile,
+    and one that acquires after sees the new generation in its binding check.
+    Each update is its own holder, so concurrent updates exclude each other too.
+    """
+    try:
+        lease = await store.acquire_lease(
+            slot,
+            holder="selfhosted-update:" + str(uuid4()),
+            turn_id="update:" + str(uuid4()),
+            now=now,
+            ttl=UPDATE_LEASE_TTL,
+        )
+    except LeaseBusy as error:
+        raise _busy(now, "session_active") from error
+    try:
+        yield lease
+    finally:
+        # A lease lost to expiry already belongs to a newer holder: leave it alone.
+        with contextlib.suppress(StaleFence):
+            await store.release_lease(lease)
+
+
+def _config_changed(
+    binding: ProviderBinding, revision: ConfigRevision, runtime: SelfHostedHostRuntime, digest: str
+) -> bool:
+    refs = binding.native_refs
+    return (
+        binding.config_revision != revision.local
+        or refs.get("model") != runtime.model
+        or refs.get("plan_digest") != digest
+    )
+
+
+async def _advance_binding(
+    request: ProviderPreparationRequest,
+    store: StateStore,
+    *,
+    backend: SelfHostedDriver,
+    slot: Slot,
+    binding: ProviderBinding,
+    session: Session,
+    spec: SessionSpec,
+    runtime: SelfHostedHostRuntime,
+    digest: str,
+) -> ProviderBinding:
+    """Move an open thread's binding to the edited agent, on the same session.
+
+    The agent's instructions, model, tools, skills and MCP servers travel on
+    every harness turn, so the session (and its workspace) is kept and only
+    the pins change. A thread with a turn in flight waits instead: that turn
+    finishes on the configuration it started with and the next message applies
+    the edit. Written through the store's generation compare-and-swap.
+    """
+    now = request.now()
+    async with _hold_slot(store, slot, now) as lease:
+        ref = session.ref
+        # Read the state again under the lease: a turn may have started since `session`.
+        if (await backend.sessions.retrieve(request.scope, ref)).state != "idle":
+            raise _busy(now, "session_active")
+        plan = await backend.sessions.plan_update(request.scope, ref, spec)
+        if plan.action == "refuse":
+            raise ContinuityLost(binding.id, plan.unmet)
+        key = "selfhosted:update:" + str(uuid5(NAMESPACE_URL, binding.id + digest))
+        await backend.sessions.apply_update(
+            request.scope, plan, expected=plan.expected_revision, key=key
+        )
+        advanced = (await backend.sessions.retrieve(request.scope, ref)).binding
+        successor = advanced.model_copy(
+            update={
+                "generation": binding.generation + 1,
+                "config_revision": spec.config_revision,
+                "native_refs": {
+                    **advanced.native_refs,
+                    "model": runtime.model,
+                    "plan_digest": digest,
+                },
+            }
+        )
+        try:
+            # Publish only while this update still holds the slot: renewing fails
+            # if the lease expired and a rival turn took it in the meantime.
+            await store.renew_lease(lease, now=request.now(), ttl=UPDATE_LEASE_TTL)
+            return await store.put_binding(successor, expected_generation=binding.generation)
+        except (BindingConflict, StaleFence) as error:
+            raise _busy(now, "binding_changed") from error
+
+
 async def prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTurn:
     try:
         return await _prepare_selfhosted(request)
@@ -249,6 +392,7 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
             or ref.account_id not in (None, request.scope.account_id)
         ):
             raise ScopeViolation(ref.id, "self-hosted plan contains a foreign resource")
+    runtime = await _pin_planned_agent(runtime, request.scope, spec, request.now())
     store = request.deps.state_store or PostgresStateStore(request.deps.sessionmaker)
     await store.put_config_revision(revision)
     slot = Slot(
@@ -262,12 +406,9 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         not request.reuse_existing
         or binding.profile != PROFILE
         or binding.provider != "selfhosted"
-        or binding.config_revision != revision.local
         or binding.native_refs.get("agent") != spec.agent.id
         or binding.native_refs.get("environment") != spec.environment.id
         or binding.native_refs.get("account_scope") != runtime.account_scope_id
-        or binding.native_refs.get("model") != runtime.model
-        or binding.native_refs.get("plan_digest") != digest
     ):
         raise ContinuityLost(binding.id, ("bound self-hosted configuration changed",))
     backend = driver(runtime, revision, request.scope, binding, store=store)
@@ -310,6 +451,19 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         native = await backend.sessions.retrieve(request.scope, ref)
         if native.state == "terminated":
             raise ContinuityLost(binding.id, ("self-hosted session terminated",))
+        if _config_changed(binding, revision, runtime, digest):
+            binding = await _advance_binding(
+                request,
+                store,
+                backend=backend,
+                slot=slot,
+                binding=binding,
+                session=native,
+                spec=spec,
+                runtime=runtime,
+                digest=digest,
+            )
+            backend = driver(runtime, revision, request.scope, binding, store=store)
 
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != ref or observation.thread_id is not None:
