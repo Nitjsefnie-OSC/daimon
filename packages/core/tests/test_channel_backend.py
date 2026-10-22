@@ -147,18 +147,19 @@ def _pricing_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
     monkeypatch.setattr(pricing, "datetime", Clock)
 
 
-def test_argon_is_admitted_for_a_channel_only_inside_its_price_window(
+def test_argon_is_admitted_for_channels_and_workers_only_inside_its_price_window(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
     _pricing_clock(monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
     check_backend(_revision(_ARGON))
-    with pytest.raises(BackendUnsupported, match="can't run fleet workers"):
-        check_backend(_revision(_ARGON), worker=True)
+    # A fleet worker may run Argon (the host keeps it on the bounded envelope).
+    check_backend(_revision(_ARGON), worker=True)
     _pricing_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
-    with pytest.raises(
-        BackendUnsupported, match="gemini-4-argon's price window ended on 2026-11-30"
-    ):
-        check_backend(_revision(_ARGON))
+    for worker in (False, True):
+        with pytest.raises(
+            BackendUnsupported, match="gemini-4-argon's price window ended on 2026-11-30"
+        ):
+            check_backend(_revision(_ARGON), worker=worker)
     # The Flash default and the cheap worker model are not tariff-gated.
     flash = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
     check_backend(_revision(flash))

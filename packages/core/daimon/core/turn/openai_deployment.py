@@ -49,7 +49,8 @@ from mux.drivers.openai import SessionControls, Transport
 from mux.drivers.openai.mcp_auth import KEY as MCP_METADATA_KEY
 from mux.drivers.openai.skill_bindings import reserved as skill_metadata_key
 from mux.errors import ScopeViolation
-from mux.profiles import get_profile
+from mux.profiles import get_profile, selectable_models
+from mux.profiles.openai import NATIVE_MODELS, SPEND_CAPPED_MODELS
 from pydantic import (
     BaseModel,
     ConfigDict,
@@ -130,7 +131,8 @@ class OpenAIDeployment(BaseModel):
                 or self.mcp_credential_file is None
                 or not self.mcp_credential_file.is_absolute()
                 or self.source_capabilities.model.provider != get_profile(self.profile).provider
-                or self.source_capabilities.model.id != "gpt-6-luna"
+                or self.source_capabilities.model.id
+                not in selectable_models(get_profile(self.profile).provider)
                 or tuple(item.target.id for item in self.source_capabilities.skills)
                 != self.skill_ids
             ):
@@ -375,7 +377,12 @@ def authorized_deployments(
 
 def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRuntime:
     revision = request.admission.backend_revision
-    if revision is None or revision.model != "gpt-6-luna":
+    if (
+        revision is None
+        or revision.model not in NATIVE_MODELS
+        # A worker-only model never runs an agent's or channel's own turn.
+        or (request.worker is None and revision.model not in selectable_models(revision.backend))
+    ):
         raise AdmissionDenied(reason="backend_unsupported")
     deployment = load_deployment(request)
     if deployment.worker_materialization and request.worker is None:
@@ -397,6 +404,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         if spend_limit is not None and spend_limit != requested:
             raise AdmissionDenied(reason="backend_unsupported")
         spend_limit = requested
+    if revision.model in SPEND_CAPPED_MODELS and spend_limit is None:
+        # Astra's tariff tops out at $50/M output (x1.5 above 272k): never run it uncapped.
+        raise AdmissionDenied(reason="backend_unsupported")
     scope = request.scope
     worker_agent: ResourceRef | None = None
     # A template's counterpart for this agent version, once its catalog entry is known.
@@ -634,7 +644,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
         authorization=authorize,
         mcp_secrets=resolve_mcp if deployment.source_capabilities is not None else None,
         controls=SessionControls(
-            model="gpt-6-luna",
+            model=revision.model,
             multi_agent_enabled=False,
             container_size="small" if deployment.profile == PROFILE else None,
             spend_limit_usd_cents=spend_limit,

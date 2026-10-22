@@ -603,7 +603,8 @@ async def explicit_worker_request(owned, monkeypatch, request):
     )
     limits = (
         root.limits.model_copy(
-            update={"max_input_tokens": 262144, "max_output_tokens": 65536, "max_turns": 1}
+            # Explicit caps whose worst case at Flash's tariff fits the $0.05 hold.
+            update={"max_input_tokens": 16384, "max_output_tokens": 8192, "max_turns": 1}
         )
         if worker_token_caps is True
         else None
@@ -614,7 +615,10 @@ async def explicit_worker_request(owned, monkeypatch, request):
 
         # The plain-language spawn path: limits derived from the resolved prompt.
         derived = bounded_gemini_worker_tokens(
-            worker.spec.system, worker.limits.budget_usd, model=worker.spec.model.id
+            worker.spec.system,
+            worker.limits.budget_usd,
+            model=worker.spec.model.id,
+            hold_usd=owned.plan.hold_usd,
         )
         worker = resolve_worker_spec(
             root,

@@ -18,7 +18,7 @@ from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
 from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, WORKER_MODEL
-from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
+from mux.profiles.openai import ASTRA_MODEL, CONVERSATION_ONLY, LUNA_MODEL, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 
 PROFILES: Mapping[str, Profile] = {
@@ -195,8 +195,9 @@ class BackendSelection:
 _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "anthropic": BackendSelection(BackendConfig(), ("per_caller", "shared")),
     "openai": BackendSelection(
-        BackendConfig(backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"),
+        BackendConfig(backend="openai", profile="openai.persistent_workspace", model=LUNA_MODEL),
         ("per_caller",),
+        allowed_models=(ASTRA_MODEL,),
         profiles=(CONVERSATION_ONLY.profile_id,),
     ),
     "selfhosted": BackendSelection(
@@ -207,7 +208,8 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
         ("per_caller",),
         allowed_models=(WORKER_MODEL, ARGON_MODEL),
-        channel_only_models=(ARGON_MODEL,),
+        # Argon runs fleet workers only on the bounded token envelope
+        # (`FleetOrchestration._bounded_gemini`); the host refuses it unbounded.
         tariff_gated_models=(ARGON_MODEL,),
         # The host runs Flash-Lite only token-capped (`turn.gemini._runtime_model`).
         worker_only_models=(WORKER_MODEL,),

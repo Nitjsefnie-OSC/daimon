@@ -306,7 +306,7 @@ def test_explicit_luna_registration_and_unchanged_default():
 
     assert resolve_default(BackendConfig()).profile == "anthropic.managed_agents"
     with pytest.raises(channel_backend.BackendUnsupported):
-        channel_backend.check_backend(REVISION.model_copy(update={"model": "gpt-6-astra"}))
+        channel_backend.check_backend(REVISION.model_copy(update={"model": "gpt-6-uncatalogued"}))
 
 
 async def test_native_preparation_binding_and_reuse(composed):
@@ -350,7 +350,7 @@ async def test_wrong_native_model_cannot_run(composed):
 async def test_model_refusal_before_transport_or_plan(composed):
     request, wire, _, _, runtime = composed
     with pytest.raises(UnsupportedCapability):
-        runtime_for(runtime, REVISION.model_copy(update={"model": "gpt-6-astra"}))
+        runtime_for(runtime, REVISION.model_copy(update={"model": "gpt-6-uncatalogued"}))
     assert wire.requests == []
 
 

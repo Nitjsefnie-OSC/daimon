@@ -1261,8 +1261,15 @@ from `daimon.core.pricing.provider_prices(profile)`. Their provider identities c
 is evaluated against the UTC date. These immutable source rows
 were checked on 2026-10-14 against the official OpenAI model/Agents usage pages
 and Gemini pricing/Antigravity pages listed in `PROVIDER_PRICING_SOURCES`.
-Coverage is `gpt-6-luna`, `gemini-3.5-flash-lite`, and `gemini-3.8-flash`;
-unsupported models stay unpriced. Flash promotional rates expire at 2027-01-01.
+Coverage is `gpt-6-luna`, `gpt-6-astra`, `gemini-3.5-flash-lite`, and
+`gemini-3.8-flash`; unsupported models stay unpriced. `gpt-6-astra` (checked
+2026-10-22: input $10, output $50, cached input $1, cache writes $12.50 per 1M
+tokens) has the same 272,000-token threshold as Luna: above it OpenAI doubles
+input and cache rates and charges 1.5x output. A larger Astra aggregate is
+priced wholly at those long-context rates (it may mix tiers, so this is an
+upper bound); a larger Luna aggregate stays unpriced. An Astra session always
+runs under a native spend limit: a deployment row or worker that supplies none
+is refused at admission. Flash promotional rates expire at 2027-01-01.
 `gemini-4-argon` carries only its introductory rate (checked 2026-10-22: input
 $2, output $10, cached input $0.10 = 95% off, per 1M tokens), valid through
 2026-11-30. No post-intro rate is checked in. From 2026-12-01 Argon is unpriced

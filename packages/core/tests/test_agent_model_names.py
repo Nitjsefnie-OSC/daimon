@@ -25,21 +25,24 @@ def test_natural_names_use_the_priced_runtime_catalog(name, model):
 
 
 def test_real_phrasings_and_b2_availability():
-    assert [m.id for m in resolve_models("compare with claude opus and gpt")] == [
+    assert [m.id for m in resolve_models("compare with claude opus and luna")] == [
         "claude-opus-5-5",
         "gpt-6-luna",
     ]
+    # With Astra selectable, a bare "gpt" names two OpenAI models: never guess.
+    with pytest.raises(ValueError, match="could mean") as error:
+        resolve_models("compare with claude opus and gpt")
+    assert "luna" in str(error.value) and "astra" in str(error.value)
     assert [m.id for m in resolve_models("3 workers: sonnet, luna, flash")] == [
         "claude-sonnet-5-5",
         "gpt-6-luna",
         "gemini-3.8-flash",
     ]
-    try:
-        result = resolve_models("use astra, opus 5.5 and gemini 4 argon")
-    except ValueError as exc:
-        assert '"astra"' in str(exc) and "isn't available" in str(exc)
-    else:
-        assert [m.id for m in result] == ["gpt-6-astra", "claude-opus-5-5", "gemini-4-argon"]
+    assert [m.id for m in resolve_models("use astra, opus 5.5 and gemini 4 argon")] == [
+        "gpt-6-astra",
+        "claude-opus-5-5",
+        "gemini-4-argon",
+    ]
 
 
 def test_ambiguous_provider_and_unknown_names_never_pick_a_model():

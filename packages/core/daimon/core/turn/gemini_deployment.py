@@ -18,7 +18,12 @@ from daimon.core.channel_backend import load_backend_agent
 from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
 from daimon.core.mcp_auth import read_private_credential_bytes, resolve_agent_mcp_credential
 from daimon.core.mux_backend import TurnRuntime, register_turn_backend
-from daimon.core.neutral_resources import NeutralResourceHost, ResolvedWorkerSpec
+from daimon.core.neutral_resources import (
+    NeutralResourceHost,
+    ResolvedWorkerSpec,
+    WorkerSpecRefused,
+    require_gemini_worker_envelope,
+)
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.errors import AdmissionDenied
@@ -89,6 +94,9 @@ from pydantic import (
 )
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
+
+# Models a bounded (token-envelope) fleet worker may run.
+BOUNDED_WORKER_MODELS = (FLASH_PRIMARY, ARGON_MODEL)
 
 
 def _private_storage_credential(
@@ -230,7 +238,7 @@ class GeminiPlan(BaseModel):
         return self
 
     def worker_deployment(
-        self, worker: ResolvedWorkerSpec, revision: ConfigRevision
+        self, worker: ResolvedWorkerSpec, revision: ConfigRevision, *, markup: Decimal = Decimal(1)
     ) -> GeminiDeployment:
         """Compile the resolved worker without adding resources or implicit execution."""
         if self.source_capabilities is not None:
@@ -238,8 +246,24 @@ class GeminiPlan(BaseModel):
         spec, drops = worker.spec, worker.declared_drops
         worker.limits.require_profile(INLINE_REUSE)
         bounded = worker.limits.max_input_tokens is not None
-        if bounded and (revision.model != FLASH_PRIMARY or "sandbox" not in drops):
+        if bounded and (revision.model not in BOUNDED_WORKER_MODELS or "sandbox" not in drops):
             raise AdmissionDenied(reason="backend_unsupported")
+        # Argon runs only bounded; the unbounded path is Flash's 4096-token cap.
+        if revision.model == ARGON_MODEL and not bounded:
+            raise AdmissionDenied(reason="backend_unsupported")
+        if worker.limits.max_input_tokens is not None:
+            # The envelope's worst case at the model's tariff fits budget and hold.
+            try:
+                require_gemini_worker_envelope(
+                    revision.model or "",
+                    worker.limits.max_input_tokens,
+                    worker.limits.max_output_tokens,
+                    worker.limits.budget_usd,
+                    markup=markup,
+                    hold_usd=self.hold_usd,
+                )
+            except WorkerSpecRefused:
+                raise AdmissionDenied(reason="backend_unsupported") from None
         scope = worker.permissions.fleet.scope
         if (
             "memory" not in drops
@@ -247,7 +271,7 @@ class GeminiPlan(BaseModel):
             or worker.resources
             or (self.worker_materialization and worker.permissions.seal_ids)
             or revision.profile != self.profile
-            or revision.model not in (FLASH_PRIMARY, WORKER_MODEL)
+            or revision.model not in (FLASH_PRIMARY, WORKER_MODEL, ARGON_MODEL)
             or spec.model != ModelRef(provider="gemini", id=revision.model or "")
             or worker.backend.profile != self.profile
             or worker.backend.model != revision.model
@@ -320,7 +344,7 @@ class GeminiPlan(BaseModel):
         if revision is None:
             raise AdmissionDenied(reason="backend_unsupported")
         if request.worker is not None:
-            return self.worker_deployment(request.worker, revision)
+            return self.worker_deployment(request.worker, revision, markup=request.deps.markup)
         target, source = request.target_spec, request.source
         from daimon.core.turn.runtime_manifest import source_instructions_preserved
 
@@ -443,7 +467,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         revision is None
         or revision.model
         not in (
-            (FLASH_PRIMARY, WORKER_MODEL)
+            (FLASH_PRIMARY, WORKER_MODEL, ARGON_MODEL)
             if request.worker is not None
             else selectable_models(INLINE_REUSE.provider)
         )
@@ -657,7 +681,8 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
 
     async def materialize(preparation: ProviderPreparationRequest) -> AgentRevision:
         async def host(_: TurnPersistence, worker: ResolvedWorkerSpec) -> NeutralResourceHost:
-            if plan.worker_deployment(worker, revision) != deployment:
+            markup = preparation.deps.markup
+            if plan.worker_deployment(worker, revision, markup=markup) != deployment:
                 raise AdmissionDenied(reason="backend_unsupported")
             return resources(preparation)
 

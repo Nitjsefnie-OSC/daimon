@@ -116,7 +116,7 @@ channel is checked after the config cascade and before any provider call:
 its profile must meet the configuration (`admit` above), and this release
 must be able to run it, which today means `anthropic.managed_agents` with
 the agent's own model, per caller or shared (below), or, per caller only,
-`openai.persistent_workspace` with `gpt-6-luna` or `gemini.inline_reuse`
+`openai.persistent_workspace` with `gpt-6-luna` or `gpt-6-astra`, or `gemini.inline_reuse`
 with `gemini-3.8-flash`. Anything else is refused as
 `backend_unsupported`, recorded as `admission_denied` in the turn outcome,
 never run on Anthropic in its place. The refusal carries a `cause` for its
@@ -127,10 +127,15 @@ names the chat words that fix it; a refusal with no cause never blames the
 channel.
 
 A channel may also name `gemini-4-argon` (Gemini 4 Argon, 1M-token context)
-on `gemini.inline_reuse`. The agent-preference switch and the default stay on
-`gemini-3.8-flash`; only an explicit channel revision selects Argon. An Argon
-turn makes one attempt: a 503 is the turn's answer, never a fallback to the
-Flash chain. Fleet grants and worker specs naming Argon are refused up front.
+on `gemini.inline_reuse`, and an agent's config may pick it (below); the
+default stays `gemini-3.8-flash`. An Argon turn makes one attempt: a 503 is the
+turn's answer, never a fallback to the Flash chain. A fleet worker runs Argon
+only on the bounded token envelope (as Flash does, at Argon's tariff, within its
+budget and the per-turn hold); an Argon worker that cannot get one is refused at
+spawn, never run on the 4096-token cap. Token limits a caller sets explicitly
+get the same bound: a Gemini worker whose worst case (max input at the model's
+input rate plus max output at its output rate) exceeds min(budget / markup,
+hold) is refused at spawn, and again at plan admission against the row's hold.
 Configuring a channel to Argon, and admitting its turns, both refuse whenever
 `provider_prices` has no current Argon row (today: from 2026-12-01; see
 [billing](billing.md)); the message names the date the price window ended.
@@ -1189,7 +1194,7 @@ late record leaves the entire batch unchanged.
 
 ### OpenAI host turns
 
-Explicit caller-private `openai.persistent_workspace` channels run `gpt-6-luna`
+Explicit caller-private `openai.persistent_workspace` channels run `gpt-6-luna` or `gpt-6-astra`
 through the mux turn path when channel backends are enabled and the host supplies
 `OpenAIHostRuntime`. That injection contains scoped provisioned native resource
 references, a private transport factory, explicit small hosted-container controls,
@@ -1514,8 +1519,9 @@ project; admission's Anthropic agent/environment IDs are never reused for OpenAI
 An optional positive integer `spend_limit_usd_cents` is passed through the
 provider's public session controls only when an operator supplies it for a
 verified project. Omission uses the provider fix's unset control; its native
-representation belongs to the OpenAI driver. The host fixes `gpt-6-luna`,
-small containers and disabled delegation.
+representation belongs to the OpenAI driver. The host runs the admitted model
+(`gpt-6-luna` or `gpt-6-astra`) and prices it at that model's row, with small
+containers and disabled delegation.
 
 Unconfigured channels and the default Anthropic path read neither the manifest
 nor any provider key and construct no foreign client. G1 rechecks policy before
@@ -2269,7 +2275,7 @@ An admin may also pick a model with the provider: `model` on
 `request_agent_backend_switch` and `set_agent_backend`, and `--model` on the
 CLI ("switch agent to gemini-4-argon"). Only the provider's selectable models
 are accepted: Gemini's gemini-3.8-flash (the default) and gemini-4-argon;
-OpenAI's gpt-6-luna. Gemini's gemini-3.5-flash-lite stays a fleet-worker model:
+OpenAI's gpt-6-luna (the default) and gpt-6-astra. Gemini's gemini-3.5-flash-lite stays a fleet-worker model:
 the host runs it only token-capped. Naming the default stores no model,
 as before. The model is part of the preview digest and the stored revision;
 revert restores the previous model; the card names it. Switching the

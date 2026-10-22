@@ -57,6 +57,7 @@ from mux.drivers.openai import (
     Transport,
 )
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
+from mux.profiles.openai import NATIVE_MODELS, SPEND_CAPPED_MODELS
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
@@ -94,12 +95,15 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     if (
         revision.profile not in PROFILES
         or revision.backend != "openai"
-        or revision.model != "gpt-6-luna"
+        or revision.model not in NATIVE_MODELS
     ):
         raise UnsupportedCapability(("openai_host_model",), PROFILE)
     if (
         not runtime.account_scope_id.strip()
-        or runtime.controls.model != "gpt-6-luna"
+        or runtime.controls.model != revision.model
+        or (
+            revision.model in SPEND_CAPPED_MODELS and runtime.controls.spend_limit_usd_cents is None
+        )
         or runtime.controls.multi_agent_enabled is not False
         or runtime.controls.container_size != ("small" if revision.profile == PROFILE else None)
         or not isinstance(runtime.journal, OpenAIRecoveryJournal)
@@ -107,7 +111,7 @@ def runtime_for(runtime: TurnRuntime | None, revision: ConfigRevision | None) ->
     ):
         raise UnsupportedCapability(("openai_host_controls_and_durable_state",), PROFILE)
     if runtime.price is not None and (
-        runtime.price.provider != "openai" or runtime.price.model != "gpt-6-luna"
+        runtime.price.provider != "openai" or runtime.price.model != revision.model
     ):
         raise ValueError("OpenAI host price differs from admitted model")
     return runtime
@@ -477,7 +481,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
                 **native.binding.native_refs,
                 "agent": spec.agent.id,
                 "account_scope": runtime.account_scope_id,
-                "model": "gpt-6-luna",
+                "model": revision.model or "",
                 "plan_digest": plan_digest,
             },
             generation=1,
@@ -507,6 +511,9 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         else None
     )
 
+    # runtime_for admitted exactly one native model; usage is priced at its rate.
+    model_id = revision.model or ""
+
     async def record(*, observation: UsageObservation) -> bool:
         if observation.session != ref or observation.thread_id is not None:
             raise ScopeViolation(ref.id, "OpenAI host usage differs from bound root session")
@@ -521,7 +528,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             infrastructure_usd=infrastructure,
             billing_grain="turn",
             managed_session_id=ref.id,
-            model_id="gpt-6-luna",
+            model_id=model_id,
             markup=request.deps.markup,
             channel_id=revision.channel.channel_id,
         )
@@ -530,9 +537,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
             from mux.contracts.ids import ModelRef
 
             footer_cost.note(
-                observation.model_copy(
-                    update={"model": ModelRef(provider="openai", id="gpt-6-luna")}
-                ),
+                observation.model_copy(update={"model": ModelRef(provider="openai", id=model_id)}),
                 price=runtime.price,
                 infrastructure_usd=infrastructure,
                 settled=settled,

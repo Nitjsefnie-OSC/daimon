@@ -128,11 +128,24 @@ def entry(selected: ProviderPreparationRequest, tmp_path: Path) -> dict[str, Jso
 
 @pytest.fixture
 def worker_target(
-    tmp_path: Path, request: pytest.FixtureRequest
+    tmp_path: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec]:
     root = parent("gemini")
-    if getattr(request, "param", None) == "cheap":
-        model = ModelRef(provider="gemini", id="gemini-3.5-flash-lite")
+    variant = getattr(request, "param", None)
+    if variant == "argon":
+
+        class InArgonWindow(datetime):
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+                return datetime(2026, 11, 30, tzinfo=UTC)
+
+        # Argon is tariff-gated; its intro price is current through 2026-11-30.
+        monkeypatch.setattr(pricing, "datetime", InArgonWindow)
+    if variant in ("cheap", "argon"):
+        model = ModelRef(
+            provider="gemini",
+            id="gemini-3.5-flash-lite" if variant == "cheap" else "gemini-4-argon",
+        )
         selection = resolve_default(
             BackendConfig(backend="gemini", profile=PROFILE, model=model.id)
         )
@@ -199,6 +212,64 @@ def test_cheap_worker_model_is_canonical_and_admitted_before_compilation(
     assert compile_agent(deployment.agent, max_total_tokens=deployment.max_total_tokens)[
         "agent_config"
     ] == {"type": "antigravity", "model": "gemini-3.5-flash-lite", "max_total_tokens": 4096}
+
+
+@pytest.mark.parametrize("worker_target", ("argon",), indirect=True)
+def test_argon_worker_compiles_only_on_the_bounded_envelope(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+) -> None:
+    plan, revision, worker = worker_target
+    check_backend(revision, worker=True)
+    assert worker.backend.model == revision.model == "gemini-4-argon"
+    # Unbounded (the 4096-token cap path is Flash's), Argon is refused.
+    with pytest.raises(AdmissionDenied):
+        plan.worker_deployment(worker, revision)
+    # A bounded envelope whose worst case at Argon's tariff fits the $0.05 hold:
+    # 10k input at $2/M + 2048 output at $10/M = $0.04048.
+    bounded = replace(
+        worker,
+        limits=worker.limits.model_copy(
+            update={"max_input_tokens": 10_000, "max_output_tokens": 2048, "max_turns": 1}
+        ),
+    )
+    deployment = plan.worker_deployment(bounded, revision)
+    assert deployment.agent.model == ModelRef(provider="gemini", id="gemini-4-argon")
+    assert deployment.max_total_tokens is None
+    assert (deployment.max_input_tokens, deployment.max_output_tokens) == (10_000, 2048)
+    # The markup counts too: a $0.06 budget at 2x markup buys only $0.03 of provider cost.
+    priced = replace(
+        bounded, limits=bounded.limits.model_copy(update={"budget_usd": Decimal("0.06")})
+    )
+    assert plan.worker_deployment(priced, revision, markup=Decimal(1)) == deployment
+    with pytest.raises(AdmissionDenied):
+        plan.worker_deployment(priced, revision, markup=Decimal(2))
+
+
+@pytest.mark.parametrize(
+    ("worker_target", "max_input", "max_output"),
+    (
+        # Flash: 262144 * $0.75/M + 65536 * $3.75/M = $0.44 against a $0.05 hold.
+        ("flash", 262144, 65536),
+        # Argon: 30k * $2/M + 2048 * $10/M = $0.08 against a $0.05 hold.
+        ("argon", 30_000, 2048),
+    ),
+    indirect=["worker_target"],
+)
+def test_explicit_worker_caps_whose_worst_case_exceeds_the_hold_are_refused(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+    max_input: int,
+    max_output: int,
+) -> None:
+    plan, revision, worker = worker_target
+
+    def capped(max_input: int, max_output: int) -> ResolvedWorkerSpec:
+        update = {"max_input_tokens": max_input, "max_output_tokens": max_output, "max_turns": 1}
+        return replace(worker, limits=worker.limits.model_copy(update=update))
+
+    # Control: the same worker with an envelope that fits is admitted.
+    assert plan.worker_deployment(capped(1000, 1024), revision).max_output_tokens == 1024
+    with pytest.raises(AdmissionDenied):
+        plan.worker_deployment(capped(max_input, max_output), revision)
 
 
 @pytest.mark.parametrize("missing", ("backend", "model"))
@@ -2033,7 +2104,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
         owned.manifest_path.write_text(json.dumps([values]))
     if journal_owner == "implicit":
         selected = replace(selected, deps=replace(selected.deps, state_store=None))
-    assert selected.worker.limits.max_input_tokens == 262144
+    assert selected.worker.limits.max_input_tokens == 16384
     result = await run_worker(
         selected,
         parent=root,
@@ -2049,7 +2120,7 @@ async def test_capped_worker_materialization_runs_through_headless_preparation_a
     sent = json.loads(inputs[0].content)
     assert sent["model"] == "gemini-3.8-flash"
     assert sent["system_instruction"] == selected.worker.spec.system
-    assert sent["generation_config"] == {"max_output_tokens": 65536}
+    assert sent["generation_config"] == {"max_output_tokens": 8192}
     assert not {"agent", "agent_config", "environment", "previous_interaction_id"} & sent.keys()
     assert len([r for r in owned.wire.requests if r.method == "POST"]) == 1
 

@@ -132,7 +132,10 @@ def _runtime_model(runtime: TurnRuntime | None) -> str:
         return FLASH_PRIMARY
     model = deployment.agent.model.id
     capped = deployment.max_total_tokens is not None or deployment.max_input_tokens is not None
-    if (capped and model in (FLASH_PRIMARY, WORKER_MODEL)) or (not capped and model == ARGON_MODEL):
+    bounded = deployment.max_input_tokens is not None
+    if (capped and model in (FLASH_PRIMARY, WORKER_MODEL)) or (
+        model == ARGON_MODEL and (bounded or not capped)
+    ):
         return model
     return FLASH_PRIMARY
 
@@ -197,7 +200,7 @@ def gemini_backend(
         type(deployment.max_input_tokens) is not int
         or deployment.max_input_tokens <= 0
         or deployment.max_output_tokens is None
-        or required_model != FLASH_PRIMARY
+        or required_model not in (FLASH_PRIMARY, ARGON_MODEL)
     ):
         raise UnsupportedCapability(("worker_token_envelope",), PROFILE)
     if deployment.max_output_tokens is not None:
