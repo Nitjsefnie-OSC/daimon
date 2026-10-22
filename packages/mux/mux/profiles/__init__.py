@@ -188,6 +188,8 @@ class BackendSelection:
     channel_only_models: tuple[str, ...] = ()
     # Allowed models admitted only while the host holds a current dated tariff.
     tariff_gated_models: tuple[str, ...] = ()
+    # Allowed models only a bounded fleet worker runs; an agent or channel never picks them.
+    worker_only_models: tuple[str, ...] = ()
 
 
 _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
@@ -207,6 +209,8 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
         allowed_models=(WORKER_MODEL, ARGON_MODEL),
         channel_only_models=(ARGON_MODEL,),
         tariff_gated_models=(ARGON_MODEL,),
+        # The host runs Flash-Lite only token-capped (`turn.gemini._runtime_model`).
+        worker_only_models=(WORKER_MODEL,),
     ),
 }
 RUNNABLE_PROFILES: frozenset[str] = frozenset(
@@ -226,12 +230,18 @@ def backend_selection(backend: Provider) -> ResolvedBackend:
 
 
 def selectable_models(backend: Provider) -> tuple[str, ...]:
-    """The models an admin may select for `backend`, its default first."""
+    """The models an admin may select for an agent on `backend`, its default first.
+
+    Worker-only models (Flash-Lite) are left out: the host runs them only for a
+    token-capped fleet worker, never for an agent's or channel's own turn.
+    """
     declared = _BACKEND_SELECTIONS[backend]
     default = resolve_default(declared.config).model
     return tuple(
         dict.fromkeys(
-            model for model in (default, *(declared.allowed_models or ())) if model is not None
+            model
+            for model in (default, *(declared.allowed_models or ()))
+            if model is not None and model not in declared.worker_only_models
         )
     )
 

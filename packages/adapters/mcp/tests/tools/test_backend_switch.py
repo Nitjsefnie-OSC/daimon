@@ -530,7 +530,7 @@ async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(acti
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview" and preview.model == "gemini-4-argon"
-    assert preview.models == ("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon")
+    assert preview.models == ("gemini-3.8-flash", "gemini-4-argon")
     assert "gemini-4-argon" in preview.cost_line
     gate()
     agent()

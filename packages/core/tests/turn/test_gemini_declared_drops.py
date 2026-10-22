@@ -387,7 +387,7 @@ async def test_unconfirmed_or_foreign_source_refuses_before_factory(ordinary, mo
     assert constructed == calls == posts == []
 
 
-@pytest.mark.parametrize("model", ["gemini-4-argon", "gemini-3.5-flash-lite"])
+@pytest.mark.parametrize("model", ["gemini-4-argon"])
 def test_ordinary_compiler_runs_a_picked_model_only_when_target_and_admission_agree(
     ordinary, model
 ):

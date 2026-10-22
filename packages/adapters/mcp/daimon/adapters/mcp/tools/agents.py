@@ -1277,8 +1277,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             Existing threads keep their provider; channel settings still apply.
             expected_revision refuses a setting changed since it was read.
             preview_only returns the compatibility and cost preview without applying it.
-            model picks one of the provider's selectable models (Gemini: gemini-3.8-flash,
-            gemini-3.5-flash-lite, gemini-4-argon); omit it for the provider's default.
+            model picks one of the provider's selectable models (Gemini: gemini-3.8-flash or
+            gemini-4-argon); omit it for the provider's default.
             """
             return await _set_agent_backend_impl(
                 runtime,
@@ -1505,8 +1505,8 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
             Use when an admin asks to switch an agent to Anthropic, OpenAI or Gemini,
             optionally naming a model: "switch agent to gemini-4-argon". ``model`` is one
-            of the returned ``models`` (Gemini: gemini-3.8-flash, gemini-3.5-flash-lite,
-            gemini-4-argon); omit it for the provider's default. The switch applies to
+            of the returned ``models`` (Gemini: gemini-3.8-flash or gemini-4-argon); omit
+            it for the provider's default. The switch applies to
             new conversations wherever the agent answers; switching the default agent
             applies to every channel on this server. For "fork agent to gemini", copy the
             agent with fork_agent, then switch the copy; say plainly that the copy isn't

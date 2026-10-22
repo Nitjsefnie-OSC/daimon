@@ -65,6 +65,7 @@ from mux.drivers.gemini.flash import FLASH_PRIMARY, FlashAttempt
 from mux.drivers.gemini.storage import ArtifactRecord, Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import ScopeViolation
+from mux.profiles import selectable_models
 from mux.profiles.gemini import ARGON_MODEL
 from pydantic import JsonValue
 from sqlalchemy.ext.asyncio import async_sessionmaker
@@ -1689,6 +1690,56 @@ async def test_argon_after_its_intro_tariff_refuses_before_runtime_discovery(
     with pytest.raises(AdmissionDenied) as refused:
         build_gemini_runtime(selected)
     assert refused.value.reason == "backend_unsupported"
+
+
+async def test_cheap_model_does_not_enable_an_ordinary_channel_runtime(
+    selected: ProviderPreparationRequest,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from mux.profiles.gemini import WORKER_MODEL
+
+    revision = selected.admission.backend_revision
+    assert revision is not None and selected.worker is None
+    changed = revision.model_copy(update={"model": WORKER_MODEL})
+    selected = replace(selected, admission=replace(selected.admission, backend_revision=changed))
+    getter = os.environ.get
+
+    def no_manifest(name: str, default: str | None = None) -> str | None:
+        if name == "DAIMON_TURN__PROVIDER_RUNTIME_FILE":
+            pytest.fail("unsupported ordinary model discovered its runtime")
+        return getter(name, default)
+
+    monkeypatch.setattr(os.environ, "get", no_manifest)
+    with pytest.raises(AdmissionDenied) as refused:
+        build_gemini_runtime(selected)
+    assert refused.value.reason == "backend_unsupported"
+
+
+@pytest.mark.parametrize("model", selectable_models("gemini"))
+def test_every_agent_selectable_model_composes_an_uncapped_host_turn(model: str) -> None:
+    """What the card offers is what the host runs: an agent's turn is uncapped."""
+    from daimon.core.mux_backend import TurnRuntime
+    from daimon.core.turn.gemini import (  # pyright: ignore[reportPrivateUsage]
+        GeminiDeployment,
+        GeminiJournal,
+        _runtime_model,
+    )
+    from mux.contracts.ids import ModelRef
+    from mux.contracts.resources import AgentSpec, EnvironmentSpec
+
+    deployment = GeminiDeployment(
+        "digest",
+        1,
+        "project",
+        AgentSpec(name="agent", model=ModelRef(provider="gemini", id=model)),
+        EnvironmentSpec(name="remote"),
+    )
+    runtime = TurnRuntime(
+        transport_factory=lambda *_: None,
+        journal=GeminiJournal(storage=None, state_store=None, deployment=deployment),  # pyright: ignore[reportArgumentType]
+        usage_store=None,
+    )
+    assert _runtime_model(runtime) == model
 
 
 @pytest.mark.parametrize("model", ["gemini-3.8-pro", "gemini-2.5-flash"])

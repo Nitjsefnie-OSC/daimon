@@ -509,6 +509,7 @@ def backend_switch_callbacks(
     current_admin: Callable[[str], Awaitable[bool]],
     resource_host: NeutralResourceHost | None = None,
     default_agent_name: str | None = None,
+    place_word: str = "server",
 ) -> tuple[
     Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]],
     Callable[[ConfirmationPrompt, str], Awaitable[str | None]],
@@ -576,7 +577,6 @@ def backend_switch_callbacks(
             "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
             preview.cost_line,
         )
-        provider = preview.target_backend.capitalize()
         target = preview.target_backend + (
             f" ({preview.target_model})" if preview.target_model else ""
         )
@@ -587,7 +587,7 @@ def backend_switch_callbacks(
             else ""
         )
         reach = (
-            "Affects new conversations in every channel on this server"
+            f"Affects new conversations in every channel on this {place_word}"
             if default_agent_name is not None and agent.name == default_agent_name
             else f"Affects new conversations wherever {agent.name} answers"
         )
@@ -600,11 +600,6 @@ def backend_switch_callbacks(
                 "consequence": (
                     reach
                     + "; existing threads keep their model."
-                    + (
-                        f"\nMemory isn't available on {provider}."
-                        if "memory" in preview.declared_drops
-                        else ""
-                    )
                     + (
                         "\n" + unavailable + ". Revert any time; nothing is deleted."
                         if unavailable

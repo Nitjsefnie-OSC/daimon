@@ -853,8 +853,12 @@ def test_switch_prompt_carries_an_optional_model() -> None:
     assert legacy.backend_switch is not None and "model" not in legacy.backend_switch.model_dump()
 
 
-@pytest.mark.parametrize("default_agent", [False, True])
-async def test_card_names_the_model_and_where_the_switch_applies(owned_preview, default_agent):
+@pytest.mark.parametrize(
+    ("default_agent", "place"), [(False, "server"), (True, "server"), (True, "workspace")]
+)
+async def test_card_names_the_model_and_where_the_switch_applies(
+    owned_preview, default_agent, place
+):
     from unittest.mock import AsyncMock
 
     from daimon.core.confirmation import backend_switch_callbacks
@@ -883,13 +887,14 @@ async def test_card_names_the_model_and_where_the_switch_applies(owned_preview, 
         account_id=actor.account_id,
         current_admin=AsyncMock(return_value=True),
         default_agent_name="Researcher" if default_agent else "daimon",
+        place_word=place,
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
     assert prepared.title == "Switch Researcher to gemini (gemini-4-argon)?"
     assert prepared.consequence is not None
     reach = (
-        "Affects new conversations in every channel on this server"
+        f"Affects new conversations in every channel on this {place}"
         if default_agent
         else "Affects new conversations wherever Researcher answers"
     )

@@ -2212,13 +2212,14 @@ have precedence.
 An admin may also pick a model with the provider: `model` on
 `request_agent_backend_switch` and `set_agent_backend`, and `--model` on the
 CLI ("switch agent to gemini-4-argon"). Only the provider's selectable models
-are accepted: Gemini's gemini-3.8-flash (the default), gemini-3.5-flash-lite
-and gemini-4-argon; OpenAI's gpt-6-luna. Naming the default stores no model,
+are accepted: Gemini's gemini-3.8-flash (the default) and gemini-4-argon;
+OpenAI's gpt-6-luna. Gemini's gemini-3.5-flash-lite stays a fleet-worker model:
+the host runs it only token-capped. Naming the default stores no model,
 as before. The model is part of the preview digest and the stored revision;
 revert restores the previous model; the card names it. Switching the
 deployment's default agent says it affects new conversations in every channel
-on the server; a lost capability (memory on Gemini and OpenAI) is listed
-before Confirm.
+on the server (workspace on Slack, team on Teams); a lost capability (memory
+on Gemini and OpenAI) is listed before Confirm.
 
 The CLI exposes `daimon agents backend set NAME BACKEND [--model MODEL]` and
 `daimon agents backend clear NAME`, using the existing tenant selector and

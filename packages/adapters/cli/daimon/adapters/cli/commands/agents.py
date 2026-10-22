@@ -60,6 +60,7 @@ from daimon.core.stores import agent_tool_rules as tool_rules_store
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
+from mux.profiles import selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 from typer.core import TyperGroup
@@ -798,6 +799,15 @@ async def agents_backend_change(
         target = BackendConfig.model_validate({"backend": backend}).backend
     except ValidationError as exc:
         raise typer.BadParameter("Choose a backend supported by this deployment.") from exc
+    if model is not None:
+        if revert or target is None:
+            raise typer.BadParameter(
+                "--model applies to set with a backend; clear and revert take none."
+            )
+        if model not in selectable_models(target):
+            raise typer.BadParameter(
+                f"--model must be one of: {', '.join(selectable_models(target)) or 'none here'}."
+            )
     if as_json and not yes and not dry_run:
         raise typer.BadParameter("Use --yes with --json after reviewing the backend preview.")
     async with rt.sessionmaker.begin() as session:
@@ -854,11 +864,13 @@ async def agents_backend_change(
         if current_revision is None:
             raise channel_backend.AgentBackendRefused("no_previous_revision")
         target = None
+        model = None
         if current_revision.previous_local is not None:
             previous = await service.revision(agent, current_revision.previous_local)
             if previous is None:
                 raise channel_backend.AgentBackendRefused("no_previous_revision")
-            target = previous.backend
+            # Revert restores the previous model too; its preview must say so.
+            target, model = previous.backend, previous.model
     preview = await service.preview(agent, target, model)
     preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
     if not as_json:

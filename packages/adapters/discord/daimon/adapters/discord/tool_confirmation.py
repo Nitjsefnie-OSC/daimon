@@ -354,6 +354,7 @@ def discord_confirmation_hook(
                 account_id=account_id,
                 current_admin=current_admin,
                 default_agent_name=runtime.deployment_default.agent_name,
+                place_word="server",
             )
 
     rule_factory = runtime.sessionmaker if runtime is not None else None
