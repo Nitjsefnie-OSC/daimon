@@ -97,7 +97,7 @@ async def openai_skill_host(
 
 def bind_host(host: object, *, auth: AuthIdentity, workspace: str) -> NeutralResourceHost:
     """Select the native OpenAI catalog for the shared scope binder."""
-    from mux.drivers.openai.agents import OpenAIAgents
+    from mux.drivers.openai import OpenAIAgents
 
     return bind_native_host(
         host,

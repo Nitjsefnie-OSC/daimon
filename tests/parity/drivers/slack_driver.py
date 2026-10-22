@@ -96,6 +96,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.turn.deps import build_turn_deps
+from daimon.testing.turn_leg import turn_leg
 from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
@@ -338,6 +339,7 @@ class SlackDriver:
     ) -> SlackRuntime:
         settings = MagicMock()
         settings.crypto.keys = (SecretStr(fernet_key),)
+        settings.turn = turn_leg()  # the selected leg, a real TurnSettings
         settings.slack = SlackSettings(
             signing_secret=SecretStr("parity-signing-secret"),
             app_token=SecretStr("xapp-parity-test"),

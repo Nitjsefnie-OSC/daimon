@@ -179,3 +179,13 @@ class Profile(Contract):
         if version not in versions:
             raise ExtensionVersionError(namespace, version, versions)
         return ExtensionRef(namespace=namespace, version=version)
+
+
+__all__ = [
+    "AccountingMode",
+    "CORE_CAPABILITIES",
+    "Capability",
+    "Profile",
+    "SUPPORTED",
+    "Support",
+]

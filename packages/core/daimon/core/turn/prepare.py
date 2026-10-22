@@ -101,7 +101,7 @@ from mux.contracts.actions import UserMessage
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.resources import Agent, AgentSpec, SessionSpec
-from mux.drivers.anthropic.sessions_lifecycle import SessionCreateRequest, SessionReads
+from mux.drivers.anthropic import SessionCreateRequest, SessionReads
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
 from pydantic import JsonValue
@@ -795,7 +795,7 @@ async def create_ma_session(
         from daimon.core.turn.run import (
             _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
         )
-        from mux.drivers.anthropic.transport import single_attempt_mutation
+        from mux.drivers.anthropic import single_attempt_mutation
 
         try:
             named = False
@@ -1484,11 +1484,7 @@ async def bind_session_impl(
         async def _native_worker() -> PreparedTurn:
             from daimon.core.turn.persistence import current_persistence
             from daimon.core.turn.runtime_manifest import capture_preparation_source, prepare_source
-            from mux.drivers.anthropic.resources.agents import (
-                agent_payload,
-                agent_record,
-                native_tools_match,
-            )
+            from mux.drivers.anthropic import agent_payload, agent_record, native_tools_match
 
             persistence = current_persistence.get()
             if (
@@ -1603,7 +1599,7 @@ async def bind_session_impl(
                 from daimon.core.turn.run import (
                     _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
                 )
-                from mux.drivers.anthropic.transport import single_attempt_mutation
+                from mux.drivers.anthropic import single_attempt_mutation
 
                 with single_attempt_mutation():
                     await _archive_orphaned_session(

@@ -18,7 +18,7 @@ from anthropic import AsyncAnthropic
 from daimon.core.errors import SkillsListTruncatedError
 from daimon.core.mux_backend import managed_agents, platform_scope
 from daimon.core.mux_compat import legacy_call, legacy_iter
-from mux.drivers.anthropic.resources.platform_export import PlatformExport
+from mux.drivers.anthropic import PlatformExport
 from pydantic import JsonValue
 
 

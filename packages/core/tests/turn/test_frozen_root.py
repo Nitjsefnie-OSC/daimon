@@ -41,7 +41,7 @@ from daimon.core.turn_origin import turn_origin
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
+from daimon.testing.turn_fakes import RecordingLifecycle, deps_for_pinned_mux
 from mux.contracts.resources import ProviderBinding
 from mux.errors import OperationConflict, ScopeViolation
 from mux.state.store import binding_slot
@@ -332,7 +332,10 @@ async def root_turn(
                 return None
 
             deps = replace(
-                deps_for(client, sm), fleet_enabled=True, fleet_root_grants=None, state_store=store
+                deps_for_pinned_mux(client, sm),
+                fleet_enabled=True,
+                fleet_root_grants=None,
+                state_store=store,
             )
             backend = managed_agents(
                 client, scope=scope, resources=frozenset({("session", acknowledged.id)})
