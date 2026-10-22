@@ -75,6 +75,20 @@ async def test_preview_confirm_clears_only_this_channel(active_chat):
     )
     assert cleared.status == "cleared"
     assert (await state(runtime, channel))[1] == "channel_clear"
+    from daimon.core.stores.security_audit import list_events
+
+    async with runtime.session_factory() as session:
+        (event,) = await list_events(session, tenant_id=auth.tenant_id, tool_name="channel_backend")
+    # Who cleared which channel's pin.
+    assert (event.operation, event.outcome, event.target_channel_id, event.platform) == (
+        "clear_pin",
+        "allowed",
+        origin.parent_channel_id,
+        origin.platform,
+    )
+    assert event.account_id == auth.account_id
+    assert event.platform_user_id == auth.platform_user_id
+    assert event.scope == f"cleared openai pin local {preview.expected_revision}"
     assert (await state(runtime, other))[1] == "channel", "another channel's pin is untouched"
     gate()
     after = await _request_channel_pin_clear_impl(runtime, auth, origin_context_id=str(origin.id))
@@ -160,3 +174,25 @@ async def test_a_session_recorded_before_the_pin_tool_cannot_gate_it(active_chat
     gate()
     with pytest.raises(ToolError, match="cannot verify"):
         await _request_channel_pin_clear_impl(runtime, auth, origin_context_id=str(origin.id))
+
+
+async def test_the_clear_rechecks_the_confirmed_pin_under_its_own_lock(active_chat):
+    from daimon.core.authz import Subject
+    from daimon.core.channel_backend import AgentBackendRefused, BackendActor, clear_channel_backend
+    from daimon.core.stores.security_audit import list_events
+
+    runtime, auth, origin, *_ = active_chat
+    channel = await pin(runtime, origin)
+    async with runtime.session_factory() as session:
+        confirmed = await current_backend(session, channel)
+    await pin(runtime, origin, backend="gemini", model="gemini-4-argon")
+    actor = BackendActor(
+        auth.tenant_id, auth.account_id, Subject(is_admin=True, platform_user_id="u")
+    )
+    with pytest.raises(AgentBackendRefused, match="stale"):
+        async with runtime.session_factory.begin() as session:
+            await clear_channel_backend(session, channel, actor=actor, expected=confirmed)
+    latest, kind = await state(runtime, channel)
+    assert (latest.backend, kind) == ("gemini", "channel"), "nothing cleared"
+    async with runtime.session_factory() as session:
+        assert not await list_events(session, tenant_id=auth.tenant_id, tool_name="channel_backend")

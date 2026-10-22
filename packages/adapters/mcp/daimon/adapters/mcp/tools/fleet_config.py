@@ -333,13 +333,14 @@ async def _request_channel_pin_clear_impl(
         )
     if expected_revision != pin.local or preview_digest != digest:
         raise ToolError("This channel's pin changed. Preview and confirm again. Nothing changed.")
-    async with runtime.session_factory.begin() as session:
-        current = await current_backend(session, channel)
-        if current is None or current.local != pin.local or current.digest != pin.digest:
-            raise ToolError(
-                "This channel's pin changed. Preview and confirm again. Nothing changed."
-            )
-        await clear_channel_backend(session, channel)
+    try:
+        async with runtime.session_factory.begin() as session:
+            # Re-checked under the clear's own lock; who and which channel are audited.
+            await clear_channel_backend(session, channel, actor=_actor(auth), expected=pin)
+    except AgentBackendRefused as exc:
+        raise ToolError(
+            "This channel's pin changed. Preview and confirm again. Nothing changed."
+        ) from exc
     return ChannelPinInfo(
         status="cleared",
         pinned=None,

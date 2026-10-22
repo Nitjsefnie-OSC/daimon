@@ -227,19 +227,55 @@ async def set_channel_backend(
     return await mux_state.put_config_revision(session, revision)
 
 
-async def clear_channel_backend(session: AsyncSession, channel: ChannelRef) -> ConfigRevision:
-    """Clear the override while retaining an immutable default revision for thread pins."""
+async def clear_channel_backend(
+    session: AsyncSession,
+    channel: ChannelRef,
+    *,
+    actor: BackendActor | None = None,
+    expected: ConfigRevision | None = None,
+) -> ConfigRevision:
+    """Clear the override while retaining an immutable default revision for thread pins.
+
+    `expected` is the pin a confirmed preview showed: under the policy write lock
+    the channel must still hold exactly that pin, else `AgentBackendRefused`.
+    `actor` records who cleared which channel in the security audit.
+    """
     await policy_store.lock_policy_writes_exclusive(session, tenant_id=uuid.UUID(channel.tenant_id))
     latest = await current_backend(session, channel)
-    if (
-        latest is not None
-        and await mux_state.config_origin(session, channel, latest.local) == "channel_clear"
+    origin = await mux_state.config_origin(session, channel, latest.local) if latest else None
+    if expected is not None and (
+        latest is None
+        or origin != "channel"
+        or latest.local != expected.local
+        or latest.digest != expected.digest
     ):
+        raise AgentBackendRefused("stale_revision")
+    if latest is not None and origin == "channel_clear":
         return latest
     revision = ConfigRevision.create(
         channel, await mux_state.next_config_local(session, channel), resolve_default(None)
     )
-    return await mux_state.put_config_revision(session, revision, origin="channel_clear")
+    cleared = await mux_state.put_config_revision(session, revision, origin="channel_clear")
+    if actor is not None:
+        await security_audit.append_event(
+            session,
+            tenant_id=uuid.UUID(channel.tenant_id),
+            account_id=actor.account_id,
+            agent_id=None,
+            platform=channel.platform,
+            platform_user_id=actor.subject.platform_user_id,
+            tool_name="channel_backend",
+            operation="clear_pin",
+            outcome="allowed",
+            reason="completed",
+            target_channel_id=channel.channel_id,
+            scope=(
+                f"cleared {latest.backend} pin local {latest.local}"
+                if latest is not None
+                else "no pin"
+            ),
+        )
+    return cleared
 
 
 def require_current_tariff(revision: ConfigRevision) -> None:
