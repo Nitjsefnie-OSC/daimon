@@ -135,11 +135,11 @@ def test_legacy_create_nulls_are_a_closed_field_allowlist():
 
 
 async def test_duplicate_native_config_namespaces_fail_before_io():
-    from daimon.testing.ma_transport import ScriptedTransport
     from mux.contracts.extensions import ExtensionConfig
     from mux.contracts.ids import ModelRef, Scope
     from mux.contracts.resources import AgentSpec
     from mux.drivers.anthropic import AnthropicManagedAgents
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     extension = ExtensionConfig(namespace="anthropic.agent_tools", version=1, value={"tools": []})
     transport = ScriptedTransport()

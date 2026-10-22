@@ -3,7 +3,6 @@
 from datetime import UTC, datetime
 
 import pytest
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -26,6 +25,7 @@ from mux.drivers.gemini.mcp_auth import (
 from mux.drivers.gemini.normalize import saved_events
 from mux.errors import ContinuityLost, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 
 URL = "https://daimon.invalid/mcp"
 SCOPE = Scope(tenant_id="t", account_id="a", principal_id="p", authorization_id="allowed")

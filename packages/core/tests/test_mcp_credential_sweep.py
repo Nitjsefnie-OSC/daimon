@@ -647,7 +647,7 @@ async def test_sweep_isolates_one_vault_failure_and_continues(
 async def test_retired_vault_is_not_archived_while_any_live_session_mounts_it(
     db_session_factory, mounted
 ):
-    from daimon.testing import ma_session
+    from mux.testing.drivers.anthropic.ma_models import ma_session
 
     display = f"daimon-mcp:{uuid.uuid4()}"
     archives = []

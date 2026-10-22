@@ -71,15 +71,15 @@ from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.thread_agent_bindings import get_binding
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
     combine_handlers,
     make_fake_ma_handler,
 )
-from daimon.testing.ma_models import ma_agent
-from daimon.testing.turn_fakes import deps_for
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

@@ -34,8 +34,9 @@ from daimon.core.turn import run as run_module
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import CreatedSession, create_ma_session
 from daimon.testing.db import build_test_engine
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -443,8 +444,8 @@ async def _prepared_root_create(root_turn, monkeypatch: pytest.MonkeyPatch):
     creates, and the paths the fake saw archived."""
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
     from daimon.core.turn.runtime_manifest import run_controlled_preparation
-    from daimon.testing.ma import make_fake_memory_store_handler
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma import make_fake_memory_store_handler
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     request = await select_controls(root_turn)
     transport = root_turn[-1]

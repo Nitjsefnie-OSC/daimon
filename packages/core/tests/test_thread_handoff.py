@@ -41,10 +41,10 @@ from daimon.core.thread_handoff import (
     hand_over_thread,
     switch_thread_on_request,
 )
-from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool

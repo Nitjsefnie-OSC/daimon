@@ -30,12 +30,12 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.channel_skills import add_channel_skill
 from daimon.core.stores.domain import Role
 from daimon.core.stores.seeded_skills import record_seeded_skill
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.middleware import Middleware, MiddlewareContext
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

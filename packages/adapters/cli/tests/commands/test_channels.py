@@ -43,9 +43,9 @@ from daimon.core.stores.access_policy import load_access_policy, set_access_poli
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from rich.console import Console
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner

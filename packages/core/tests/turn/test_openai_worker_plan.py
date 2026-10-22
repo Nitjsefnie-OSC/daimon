@@ -19,7 +19,6 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.openai_deployment import OpenAIDeployment, build_openai_runtime
 from daimon.core.turn.openai_host import driver
 from daimon.testing.db import require_owned_sessionmaker
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.ids import SkillRef, ThreadRef
 from mux.contracts.resources import (
     AgentPatch,
@@ -35,6 +34,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError
+from mux.testing.isolated_sdk import build_async_openai
 from pydantic import ValidationError
 from sqlalchemy.ext.asyncio import async_sessionmaker
 

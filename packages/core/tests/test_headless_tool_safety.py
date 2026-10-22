@@ -17,8 +17,9 @@ from daimon.core.config import McpSettings
 from daimon.core.headless_runner import run_turn
 from daimon.core.sessions import create_session
 from daimon.core.tool_safety import ToolSafetyPolicy
-from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import HttpUrl
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)

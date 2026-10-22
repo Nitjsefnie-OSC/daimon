@@ -64,8 +64,9 @@ from daimon.core.stores.turn_card_intents import list_recoverable_turn_card_inte
 from daimon.core.turn.posture import Billed, BillingPosture
 from daimon.core.turn.prepare import ContinuityOutcome
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing import ma_agent, ma_model_usage, ma_session, ma_session_agent
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.request import SocketModeRequest

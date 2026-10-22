@@ -11,7 +11,6 @@ from typing import cast
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Revision, Scope, SkillRef
 from mux.contracts.resources import AgentSpec, MCPConnection, SessionSpec, ToolSpec
@@ -25,6 +24,7 @@ from mux.drivers.openai.transport import Object, SDKTransport, object_json
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.testing.isolated_sdk import build_async_openai
 from openai import AsyncOpenAI
 from pydantic import JsonValue
 

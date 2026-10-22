@@ -19,8 +19,9 @@ from daimon.core.config import TurnQueueSettings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import build_fake_anthropic, make_agent_env_echo_handler, make_fake_ma_handler
+from daimon.testing.ma import make_agent_env_echo_handler
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

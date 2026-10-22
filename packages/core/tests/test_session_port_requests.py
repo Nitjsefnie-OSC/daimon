@@ -17,12 +17,13 @@ from anthropic.types.beta.session_create_params import Resource
 from daimon.core.session_ports_compat import create_session_record, session_scope
 from daimon.core.session_seal import inherited_seal_ids
 from daimon.core.sessions import create_isolated_session, create_session
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.actions import UserMessage
 from mux.contracts.ids import Scope
 from mux.contracts.resources import Session, SessionSpec
 from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import JsonValue
 
 

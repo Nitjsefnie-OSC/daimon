@@ -15,8 +15,9 @@ from daimon.core.headless_runner import run_turn
 from daimon.core.routine_delivery import agent_posted_to
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma import MARouter, build_fake_anthropic, sse_response
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, sse_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 
 _NOW = dt.datetime(2026, 9, 28, 12, 0, tzinfo=dt.UTC)
 

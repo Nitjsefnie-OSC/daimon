@@ -57,7 +57,6 @@ from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.task_continuations import record_continuation as insert_reader_fixture
 from daimon.testing.db import build_test_engine, isolated_test_schema, require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import Event, NativeProvenance
 from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
@@ -65,6 +64,7 @@ from mux.contracts.resources import ProviderBinding
 from mux.drivers.anthropic.normalize import EventNormalizer
 from mux.state.journal import JournalEntry
 from mux.state.lease import Slot
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import ValidationError
 from sqlalchemy import select, update
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker

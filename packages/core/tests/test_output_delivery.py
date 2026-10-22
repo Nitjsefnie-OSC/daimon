@@ -26,14 +26,14 @@ from daimon.core.output_delivery import (
     render_oversize_notice,
     sweep_session_outputs,
 )
-from daimon.testing.ma import (
+from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     MARouter,
     build_fake_anthropic,
     combine_handlers,
     list_response,
 )
-from daimon.testing.ma_sessions import FakeSessionsState, make_fake_sessions_handler
 
 NOW = datetime(2026, 8, 25, 12, 0, 0, tzinfo=UTC)
 
