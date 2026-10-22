@@ -111,11 +111,34 @@ form say so, so whoever picks it up answers in the channel.
 
 ### People from another organisation
 
-A shared channel's external participants (B2B direct connect) and guests
-(Entra B2B guest accounts in ours) are treated as members, as everyone in a
-Discord server is. Teams opens no 1:1 chat across organisations, so a 1:1
-chat naming another tenant is refused. A shared channel another
-organisation hosts keeps its files on that organisation's site.
+Daimon works out which organisation each sender belongs to and fails closed. A sender
+is treated as one of ours only on positive evidence: the message names our tenant in
+a standard or private channel (neither can hold a direct connect member) or in a 1:1
+chat, or a roster lookup with the bot's own token (no extra Graph permission)
+returns the same person in our tenant. Guests of our tenant count as ours. Anyone
+whose message names another tenant, or whom the roster places in one, is from another
+organisation. When nothing settles it (a shared channel, a group chat, a queued
+follow-up, a failed lookup) the sender is unplaced, and Daimon treats them as from
+another organisation for that one turn only: nothing is recorded against them.
+
+A turn from another organisation or an unplaced sender, and every turn in a channel
+shared with another organisation, is held to that channel and its threads: it reads
+and posts only there and carries no administrator authority. A person from another organisation also
+has no 1:1 chat with Daimon, because Teams opens none across organisations, so a
+1:1 chat naming another tenant is refused.
+
+Their button clicks are limited the same way. In a channel, a click from outside the
+organisation or from someone Daimon cannot place answers "That's only for people in
+the organisation that added Daimon." Only Stop and Approve or Deny on the turn's own
+card, and feedback in a thread the person asked in, still work.
+
+A channel is shared when Teams types it `shared`; a channel type that is missing or
+unrecognised is never assumed to be standard. A shared channel another organisation
+hosts keeps its files on that organisation's site.
+
+These rules are built from the documented Bot Framework and Graph fields and tested
+with synthetic payloads. They have not been checked against a real cross-tenant
+conversation.
 
 ### Commands and admins
 

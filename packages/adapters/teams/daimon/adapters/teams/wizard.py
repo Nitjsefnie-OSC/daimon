@@ -22,7 +22,13 @@ from daimon.adapters.teams.card_actions import (
     submitted_fields,
     toast,
 )
-from daimon.adapters.teams.identity import TeamsInbound, canonical_uuid, display_bot_name
+from daimon.adapters.teams.identity import (
+    TeamsInbound,
+    canonical_uuid,
+    channel_shared_of,
+    classify_sender,
+    display_bot_name,
+)
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core.stores.domain import WizardSessionRow
 from daimon.core.stores.wizard_session import (
@@ -107,6 +113,13 @@ def _inbound(
     conversation = conversation_of(row.channel_id)
     personal = activity.conversation.conversation_type == "personal"
     team = activity.channel_data.team if activity.channel_data is not None else None
+    channel = activity.channel_data.channel if activity.channel_data is not None else None
+    org, home_id = classify_sender(
+        activity.from_,
+        activity.channel_data,
+        ours=canonical_uuid(entra_tenant_id) or entra_tenant_id,
+        direct_chat=personal,
+    )
     return TeamsInbound(
         kind="dm" if personal else "channel",
         entra_tenant_id=entra_tenant_id,
@@ -122,6 +135,9 @@ def _inbound(
         user_name=activity.from_.name,
         timestamp=datetime.now(UTC).isoformat(),
         from_form=True,
+        requester_org=org,
+        home_tenant_id=home_id,
+        channel_shared=None if personal else channel_shared_of(channel.type if channel else None),
     )
 
 

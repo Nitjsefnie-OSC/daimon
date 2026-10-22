@@ -49,6 +49,7 @@ from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.slots import holding, wait_for_slot
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn_hold import RequesterOrg
 from microsoft_teams.api import AdaptiveCardActionCardResponse, MessageActivity
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -580,7 +581,7 @@ async def test_a_channel_command_from_another_organisation_is_not_sent_to_a_1_1_
     inbound = dataclasses.replace(
         make_inbound("support", conversation=THREAD_ID, kind="channel"),
         channel_id=CHANNEL_ID,
-        is_foreign=True,
+        requester_org=RequesterOrg.OTHER,
     )
     await teams._handle(inbound)
     [(_, reply, _)] = sender.sent

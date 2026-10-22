@@ -25,7 +25,7 @@ from __future__ import annotations
 import html
 import re
 import uuid
-from collections.abc import Mapping
+from collections.abc import Iterable, Mapping
 from dataclasses import dataclass
 from html.parser import HTMLParser
 from typing import Literal
@@ -48,6 +48,7 @@ from daimon.core.teams_graph import (
     message_text,
 )
 from daimon.core.teams_threads import is_group_chat
+from daimon.core.turn_hold import RequesterOrg
 from microsoft_teams.api import Account, MessageActivity
 from microsoft_teams.api.activities.utils import StripMentionsTextOptions, strip_mentions_text
 from microsoft_teams.api.models.channel_data import ChannelData
@@ -105,9 +106,17 @@ class TeamsInbound:
     `sender_id` is the sender's Bot Framework id (`29:…`), which a reply only
     they see is addressed to; Graph-read messages have none. `is_targeted`
     marks a channel message only the bot sees (a slash command, say): it is
-    answered privately and never enters the thread's session. `is_foreign`
-    marks a sender from another organisation (`foreign_tenant`): Teams opens no
-    1:1 chat with them, and `home_tenant_id` is the tenant the activity names for them.
+    answered privately and never enters the thread's session.
+
+    `requester_org` is which organisation the sender belongs to, read from the
+    evidence the activity carries (`classify_requester`) and, for a sender it could
+    not place, from a member lookup at admission. It defaults to UNKNOWN so a stored
+    message written before the field existed replays fail-closed. `home_tenant_id` is
+    the tenant named for an OTHER sender. `is_foreign` is true for OTHER only: Teams
+    opens no 1:1 chat with them. An UNKNOWN sender is usually one of ours whose lookup
+    failed, so wording that promises "another organisation" never applies to them.
+    `channel_shared` is whether the channel is shared with another organisation
+    (None: the activity does not say).
     """
 
     kind: Literal["dm", "channel", "group"]
@@ -134,8 +143,14 @@ class TeamsInbound:
     from_form: bool = False
     sender_id: str | None = None
     is_targeted: bool = False
-    is_foreign: bool = False
+    requester_org: RequesterOrg = RequesterOrg.UNKNOWN
     home_tenant_id: str | None = None
+    channel_shared: bool | None = None
+
+    @property
+    def is_foreign(self) -> bool:
+        """The sender is verified as from another organisation (not merely unplaced)."""
+        return self.requester_org is RequesterOrg.OTHER
 
     @property
     def thread_id(self) -> str:
@@ -172,6 +187,76 @@ def foreign_tenant(sender: Account, channel_data: ChannelData | None, *, ours: s
         if isinstance(candidate, str) and candidate.strip() and canonical_uuid(candidate) != ours:
             return canonical_uuid(candidate) or candidate.strip()
     return None
+
+
+# Channel types that cannot hold a member from another organisation (direct connect
+# adds people only to shared channels).
+_UNSHARED_TYPES = frozenset({"standard", "private"})
+
+
+def channel_shared_of(channel_type: str | None) -> bool | None:
+    """Whether a channel type says the channel is shared; None when it does not say.
+
+    Only an explicit type decides: an absent or unrecognised one is not assumed standard.
+    """
+    kind = (channel_type or "").strip().lower()
+    if kind == "shared":
+        return True
+    return False if kind in _UNSHARED_TYPES else None
+
+
+def classify_requester(
+    tenant_evidence: Iterable[object],
+    *,
+    ours: str,
+    channel_type: str | None,
+    direct_chat: bool = False,
+) -> tuple[RequesterOrg, str | None]:
+    """Which organisation a sender belongs to from the evidence one message carries.
+
+    Fail-closed. Any tenant field that names a tenant other than `ours` is OTHER,
+    with that tenant as the home (a value that is not a UUID is not ours either).
+    HOST needs positive evidence and no dissent: a tenant field that is ours, in a
+    channel whose type is explicitly standard or private (neither can hold a direct
+    connect member) or in a 1:1 chat (Teams opens none across organisations).
+    Anything else, including no tenant field, an absent or shared channel type and a
+    value that cannot be read, is UNKNOWN, which a member lookup may settle.
+    """
+    present: list[str] = []
+    unreadable = False
+    for value in tenant_evidence:
+        if value is None:
+            continue
+        if not isinstance(value, str):
+            unreadable = True
+        elif value.strip():
+            present.append(value.strip())
+    for value in present:
+        if canonical_uuid(value) != ours:
+            return RequesterOrg.OTHER, canonical_uuid(value) or value
+    placed = direct_chat or channel_shared_of(channel_type) is False
+    if present and placed and not unreadable:
+        return RequesterOrg.HOST, None
+    return RequesterOrg.UNKNOWN, None
+
+
+def classify_sender(
+    sender: Account, channel_data: ChannelData | None, *, ours: str, direct_chat: bool
+) -> tuple[RequesterOrg, str | None]:
+    """`classify_requester` over the fields an activity carries for its sender.
+
+    The tenant evidence is `channelData.tenant.id`, `from.tenantId` and
+    `from.properties.tenantId`; the channel type is `channelData.channel.type`.
+    """
+    tenant = channel_data.tenant if channel_data is not None else None
+    channel = channel_data.channel if channel_data is not None else None
+    properties = sender.properties or {}
+    return classify_requester(
+        (tenant.id if tenant else None, sender.tenant_id, properties.get("tenantId")),
+        ours=ours,
+        channel_type=channel.type if channel is not None else None,
+        direct_chat=direct_chat,
+    )
 
 
 def channel_thread_id(conversation_id: str, activity_id: str) -> str:
@@ -353,6 +438,12 @@ def parse_inbound(
         channel_tenant = channel_data.tenant.id
     user_id = canonical_uuid(activity.from_.aad_object_id)
     home = foreign_tenant(activity.from_, channel_data, ours=tenant) if tenant else None
+    channel = channel_data.channel if channel_data is not None else None
+    org, home_id = (
+        classify_sender(activity.from_, channel_data, ours=tenant, direct_chat=kind == "personal")
+        if tenant
+        else (RequesterOrg.UNKNOWN, None)
+    )
     # The conversation is always the host's; Teams opens no 1:1 chat across organisations.
     sender_verified = kind != "personal" or (
         canonical_uuid(channel_tenant) == tenant and home is None
@@ -380,7 +471,6 @@ def parse_inbound(
     text = render_quotes(text, quotes).strip()
     files = parse_attachments(activity.attachments or [], personal=kind == "personal")
     team = channel_data.team if channel_data is not None else None
-    channel = channel_data.channel if channel_data is not None else None
     if kind == "personal":
         conversation_id = channel_id = conversation.id
         team = channel = None
@@ -419,8 +509,9 @@ def parse_inbound(
         team_name=team.name if team is not None else None,
         sender_id=activity.from_.id or None,
         is_targeted=targeted,
-        is_foreign=home is not None,
-        home_tenant_id=home,
+        requester_org=org,
+        home_tenant_id=home_id,
+        channel_shared=channel_shared_of(channel.type if channel is not None else None),
     )
     return _admitted(inbound, addressed=addressed)
 
@@ -572,7 +663,9 @@ def parse_graph_message(
     quoted = "".join(
         describe_quote(_display_name(ref.message_sender), ref.message_preview) for ref in references
     )
-    home = (user.tenant_id or "").strip()
+    org, home_id = classify_requester(
+        (user.tenant_id,), ours=tenant, channel_type=source.channel_type
+    )
     inbound = TeamsInbound(
         kind=source.kind,
         entra_tenant_id=tenant,
@@ -593,8 +686,9 @@ def parse_graph_message(
         channel_name=_channel_name(source.channel_id, source.team_id, source.channel_name),
         channel_type=source.channel_type,
         team_name=source.team_name,
-        is_foreign=bool(home) and canonical_uuid(home) != tenant,
-        home_tenant_id=home or None,
+        requester_org=org,
+        home_tenant_id=home_id,
+        channel_shared=channel_shared_of(source.channel_type),
     )
     return _admitted(inbound, addressed=addressed)
 

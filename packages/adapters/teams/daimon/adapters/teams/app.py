@@ -89,6 +89,7 @@ from daimon.adapters.teams.private_replies import SENDER_ONLY, PrivateReplies, r
 from daimon.adapters.teams.provider_actions import TeamsProviderActions
 from daimon.adapters.teams.provisioning import provision_configured_tenant
 from daimon.adapters.teams.reactions import React, TeamsReactions
+from daimon.adapters.teams.requester_org import RequesterOrgResolver
 from daimon.adapters.teams.restart_catch_up import RestartCatchUp
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.setup_conversation import route_to_setup
@@ -258,21 +259,6 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
 }
 
 
-def _requester_org(inbound: TeamsInbound) -> tuple[RequesterOrg, str | None]:
-    """Which organisation the sender belongs to, from what the activity names.
-
-    A foreign sender with a home tenant id is verified as another organisation.
-    A foreign sender with no id is restricted without being recorded. Fail-closed
-    detection of the sender's organisation comes later; today a sender the
-    activity does not mark foreign counts as a member.
-    """
-    if not inbound.is_foreign:
-        return RequesterOrg.HOST, None
-    if inbound.home_tenant_id:
-        return RequesterOrg.OTHER, inbound.home_tenant_id
-    return RequesterOrg.UNKNOWN, None
-
-
 _NO_CONTEXT = (
     "I couldn't read this conversation, so there's nothing for me to go on. "
     "Write your question after the mention. If this keeps happening, ask a team owner "
@@ -385,6 +371,9 @@ class TeamsApp:
             raise ValueError("TeamsApp requires Teams settings")
         self.runtime = runtime = with_budget_notifier(runtime, direct)
         self._teams = teams
+        self._orgs = runtime.requester_orgs or RequesterOrgResolver(
+            None, ours=canonical_uuid(teams.tenant_id) or teams.tenant_id
+        )
         # Known before any read, so `_may_post` can gate every post.
         self._tenant_id = derive_tenant_uuid(platform="teams", workspace_id=teams.tenant_id)
         # With Graph subscriptions, a channel send refused as not in the roster drops the
@@ -837,6 +826,19 @@ class TeamsApp:
 
     async def _role(self, inbound: TeamsInbound) -> Role | None:  # None: owners unknown
         return await inbound_role(self.runtime, self._teams, inbound)
+
+    async def _placed(self, inbound: TeamsInbound) -> TeamsInbound:
+        """`inbound` with the sender's organisation settled where the activity could not.
+
+        An UNKNOWN sender is looked up in the channel's roster. A lookup that cannot say
+        leaves them UNKNOWN, which core holds to the one channel for this turn only.
+        """
+        if inbound.requester_org is not RequesterOrg.UNKNOWN:
+            return inbound
+        org, home_id = await self._orgs.resolve(inbound.channel_id, inbound.user_id)
+        if org is RequesterOrg.UNKNOWN:
+            return inbound
+        return dataclasses.replace(inbound, requester_org=org, home_tenant_id=home_id)
 
     def _first_delivery(self, conversation_id: str, activity_id: str) -> bool:
         key = (conversation_id, activity_id)
@@ -1415,8 +1417,8 @@ class TeamsApp:
         the person (nothing, in a protected channel), so the dispatcher can
         settle or re-queue the work.
         """
+        inbound = await self._placed(inbound)
         deps, role = self.runtime.turn_deps, await self._role(inbound)
-        org, home_id = _requester_org(inbound)
         try:
             admission = await admit(
                 deps,
@@ -1428,8 +1430,9 @@ class TeamsApp:
                 role=role,
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
-                requester_org=org,
-                requester_home_id=home_id,
+                requester_org=inbound.requester_org,
+                requester_home_id=inbound.home_tenant_id,
+                channel_shared=inbound.channel_shared,
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
             refusal = _admission_refusal(
@@ -2056,8 +2059,9 @@ class TeamsApp:
             )
 
         conversation = conversation_of(row.thread_id)
+        kind = kind_of(conversation, row.parent_channel_id)
         inbound = TeamsInbound(
-            kind=kind_of(conversation, row.parent_channel_id),
+            kind=kind,
             entra_tenant_id=self._teams.tenant_id,
             user_id=row.requester_external_user_id,
             conversation_id=conversation,
@@ -2066,6 +2070,9 @@ class TeamsApp:
             activity_id=str(row.id),
             text=seed,
             service_url=service_url,
+            # A 1:1 chat is never opened across organisations (`parse_inbound` refuses one),
+            # so a queued 1:1 turn is ours. Anywhere else the roster says, in `_placed`.
+            requester_org=RequesterOrg.HOST if kind == "dm" else RequesterOrg.UNKNOWN,
         )
         await self._run_turn(inbound, tenant_id, handoff=handoff, reraise=True, continuation=row)
 

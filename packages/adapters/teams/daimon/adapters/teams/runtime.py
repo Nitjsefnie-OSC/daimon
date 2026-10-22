@@ -7,6 +7,7 @@ from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
 from dataclasses import dataclass, field
 from secrets import randbits
+from typing import TYPE_CHECKING
 
 import httpx
 import structlog
@@ -32,6 +33,9 @@ from sqlalchemy import text
 from sqlalchemy.exc import SQLAlchemyError
 from sqlalchemy.ext.asyncio import AsyncConnection, AsyncEngine, AsyncSession, async_sessionmaker
 
+if TYPE_CHECKING:
+    from daimon.adapters.teams.requester_org import RequesterOrgResolver
+
 log = structlog.get_logger()
 
 
@@ -55,6 +59,9 @@ class TeamsRuntime:
     # by team. Production wires `fetch_team_owner_ids`.
     team_owners: GroupMembers | None = None
     group_members: GroupMembersCache = field(default_factory=GroupMembersCache)
+    # Settles which organisation a sender belongs to by member lookup; None (no Bot
+    # Framework client) leaves every sender the activity cannot place UNKNOWN.
+    requester_orgs: RequesterOrgResolver | None = None
     # This process's message admissions; `hold_owner_key` makes it read as alive.
     owner_key: int = field(default_factory=lambda: randbits(63))
 

@@ -38,6 +38,7 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing import (
     build_fake_anthropic,
     ma_session,
@@ -134,11 +135,18 @@ def make_message_activity(
     mention_bot: bool = False,
     service_url: str = SERVICE_URL,
     targeted: bool = False,
+    from_tenant_id: str | None = None,
+    user_role: str | None = None,
+    channel_type: str | None = None,
 ) -> dict[str, object]:
     """An inbound Bot Framework `message` activity, camelCase as Teams posts it.
 
     `mention_bot` prefixes an `<at>` mention of the bot, as a channel post has;
-    `targeted` sends it to the bot alone, as a slash command does.
+    `targeted` sends it to the bot alone, as a slash command does. `from_tenant_id`
+    puts `from.tenantId` on the sender, `user_role` `from.userRole`, and `channel_type`
+    `channelData.channel.type` (`standard`, `private` or `shared`) on a channel.
+
+    Synthetic: shaped from the documented fields, not captured from a real tenant.
     """
     conversation: dict[str, object] = {
         "id": conversation_id,
@@ -152,11 +160,17 @@ def make_message_activity(
     from_: dict[str, object] = {"id": f"29:{aad_object_id or 'unknown'}"}
     if aad_object_id is not None:
         from_["aadObjectId"] = aad_object_id
+    if from_tenant_id is not None:
+        from_["tenantId"] = from_tenant_id
+    if user_role is not None:
+        from_["userRole"] = user_role
     channel_data: dict[str, object] = {}
     if channel_tenant_id is not None:
         channel_data["tenant"] = {"id": channel_tenant_id}
     if conversation_type == "channel":
         channel_data["channel"] = {"id": conversation_id.split(";", 1)[0]}
+        if channel_type is not None:
+            cast(dict[str, object], channel_data["channel"])["type"] = channel_type
         channel_data["team"] = {"id": "19:team@thread.tacv2"}
     entities: list[dict[str, object]] = []
     if mention_bot:
@@ -204,29 +218,58 @@ def make_channel_activity(**kwargs: Any) -> dict[str, object]:
 
 
 def make_invoke(
-    name: str, value: dict[str, object], *, user: str = AAD_OBJECT_ID, chat: str = CONVERSATION_ID
+    name: str,
+    value: dict[str, object],
+    *,
+    user: str = AAD_OBJECT_ID,
+    chat: str = CONVERSATION_ID,
+    conversation_type: str = "personal",
+    from_tenant_id: str | None = None,
+    channel_type: str | None = None,
 ) -> dict[str, object]:
-    """An inbound invoke from a personal chat, sent from the card message `m-7`."""
+    """An inbound invoke from a personal chat (or `conversation_type`), from card message `m-7`.
+
+    `from_tenant_id` and `channel_type` are the clicker's `from.tenantId` and the
+    channel's `channelData.channel.type`. Synthetic, not a captured payload.
+    """
+    sender: dict[str, object] = {"id": f"29:{user}", "aadObjectId": user, "name": USER_NAME}
+    if from_tenant_id is not None:
+        sender["tenantId"] = from_tenant_id
+    channel_data: dict[str, object] = {}
+    if channel_type is not None:
+        channel_data["channel"] = {"id": chat.split(";", 1)[0], "type": channel_type}
     return {
         "type": "invoke",
         "name": name,
         "id": f"invoke-{uuid.uuid4()}",
         "channelId": "msteams",
         "serviceUrl": SERVICE_URL,
-        "from": {"id": f"29:{user}", "aadObjectId": user, "name": USER_NAME},
+        "from": sender,
         "recipient": {"id": BOT_ACCOUNT_ID, "name": "daimon"},
-        "conversation": {"id": chat, "conversationType": "personal", "tenantId": ENTRA_TENANT_ID},
+        "conversation": {
+            "id": chat,
+            "conversationType": conversation_type,
+            "tenantId": ENTRA_TENANT_ID,
+        },
+        "channelData": channel_data,
         "replyToId": "m-7",
         "value": value,
     }
 
 
 def make_card_action(
-    verb: str, op: str, *, user: str = AAD_OBJECT_ID, **data: object
+    verb: str,
+    op: str,
+    *,
+    user: str = AAD_OBJECT_ID,
+    invoke: dict[str, Any] | None = None,
+    **data: object,
 ) -> dict[str, object]:
-    """A click on an `Action.Execute` button routed to `verb`."""
+    """A click on an `Action.Execute` button routed to `verb`; `invoke` sets where it came from."""
     action = {"type": "Action.Execute", "verb": verb, "data": {"action": verb, "op": op} | data}
-    return make_invoke("adaptiveCard/action", {"action": action, "trigger": "manual"}, user=user)
+    return make_invoke(
+        "adaptiveCard/action", {"action": action, "trigger": "manual"}, user=user, **(invoke or {})
+    )
 
 
 def make_inbound(
@@ -247,6 +290,8 @@ def make_inbound(
         text=text,
         service_url=SERVICE_URL,
         setup_thread_id=setup_thread_id,
+        # A person of ours, as a test's sender is unless it says otherwise.
+        requester_org=RequesterOrg.HOST,
     )
 
 
@@ -291,6 +336,14 @@ class TeamsApiFake:
     """Roster names by Entra object id; a member lookup answers with the person's name."""
     absent: set[str] = dataclasses.field(default_factory=set[str])
     """Entra object ids no roster has: a member lookup answers 404."""
+    foreign_members: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
+    """Entra object ids a member lookup places in another tenant (direct connect), by tenant."""
+    tenantless: set[str] = dataclasses.field(default_factory=set[str])
+    """Entra object ids whose member lookup names no tenant."""
+    roles: dict[str, str] = dataclasses.field(default_factory=dict[str, str])
+    """`userRole` a member lookup answers with, by Entra object id (default `user`)."""
+    failing_members: set[str] = dataclasses.field(default_factory=set[str])
+    """Entra object ids whose member lookup fails with a 500."""
 
     async def send(
         self,
@@ -335,13 +388,17 @@ class TeamsApiFake:
             aad_object_id = httpx.URL(context.url).path.rsplit("/", 1)[-1]
             if aad_object_id in self.absent:
                 return httpx.Response(404, json={}, request=request)
-            # As Teams answers for one of our own members.
+            if aad_object_id in self.failing_members:
+                return httpx.Response(500, json={}, request=request)
+            # As Teams answers for one of our own members, unless a test places it elsewhere.
             member = {
                 "id": "29:member",
                 "aadObjectId": aad_object_id,
-                "tenantId": ENTRA_TENANT_ID,
-                "userRole": "user",
+                "tenantId": self.foreign_members.get(aad_object_id, ENTRA_TENANT_ID),
+                "userRole": self.roles.get(aad_object_id, "user"),
             }
+            if aad_object_id in self.tenantless:
+                del member["tenantId"]
             if aad_object_id in self.names:
                 member["name"] = self.names[aad_object_id]
             return httpx.Response(200, json=member, request=request)

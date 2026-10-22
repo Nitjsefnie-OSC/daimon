@@ -191,12 +191,13 @@ class RestartCatchUp:
             names: dict[str, str | None] = {team.team_id: None}
             names.update(await self._standard_channels(team.team_id))
             for channel_id in (wanted & names.keys()) - sources.keys():
+                # No channel type: the listing is not an explicit one, and an absent
+                # type is never read as standard (a shared channel would pass for ours).
                 sources[channel_id] = GraphSource(
                     kind="channel",
                     channel_id=channel_id,
                     team_id=team.team_id,
                     group_id=team.group_id,
-                    channel_type="standard",
                     channel_name=names[channel_id],
                     team_name=team.name,
                     service_url=self._service_url,

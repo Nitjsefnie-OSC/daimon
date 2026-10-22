@@ -29,6 +29,7 @@ from daimon.adapters.teams import (
     setup_card,
 )
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
+from daimon.adapters.teams.external_clicks import EXTERNAL_REFUSAL
 from daimon.adapters.teams.thread_handoff import VERB as HANDOFF_VERB
 from daimon.adapters.teams.tool_confirmation import VERB as TOOL_CONFIRM_VERB
 from daimon.core.config import SupportSettings
@@ -498,6 +499,11 @@ async def test_thread_handoff_persona_matrix(
             ),
             default=runtime.deployment_default,
         )
+    if persona.name == "external":
+        # Someone from another organisation presses only requester-bound controls.
+        assert EXTERNAL_REFUSAL in json.dumps(answer), answer
+        assert route.responder_ma_agent_id != "ag_research", "the handoff did not happen"
+        return
     assert route.responder_ma_agent_id == "ag_research", answer
     assert "handed this conversation over" in json.dumps(answer)
 

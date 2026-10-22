@@ -9,6 +9,7 @@ from datetime import UTC, datetime, timedelta
 
 import httpx
 import pytest
+from daimon.adapters.teams.external_clicks import EXTERNAL_REFUSAL
 from daimon.adapters.teams.provider_actions import VERB as PROVIDER_VERB
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.adapters.teams.wizard import VERB as WIZARD_VERB
@@ -137,6 +138,11 @@ async def test_wizard_requester_persona_matrix(
     async with db_session_factory() as session:
         row = await get_wizard_session(session, short_id=short_id)
     assert "someone else" in json.dumps(wrong).lower(), wrong
+    if requester.name == "external":
+        # Someone from another organisation presses only requester-bound controls.
+        assert EXTERNAL_REFUSAL in json.dumps(right), right
+        assert row is not None and row.answers == {}, "nothing was saved"
+        return
     assert row is not None and row.answers == {"color": ["red"]}, right
     assert "Pick a color" in json.dumps(right) or "Order form" in json.dumps(right)
 
@@ -209,6 +215,11 @@ async def test_provider_action_requester_persona_matrix(
             service,
             _click(PROVIDER_VERB, "0", "token", token, requester, channel=channel),
         )
+        if requester.name == "external":
+            assert EXTERNAL_REFUSAL in json.dumps(right), right
+            assert not waiting.done(), "the refused click answered nothing"
+            waiting.cancel()
+            return
         result = await asyncio.wait_for(waiting, timeout=5)
     assert "Only" in json.dumps(wrong) or "requester" in json.dumps(wrong), wrong
     assert "Response recorded." in json.dumps(right), right

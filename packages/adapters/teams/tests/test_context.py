@@ -23,6 +23,7 @@ from daimon.adapters.teams.context import (
 )
 from daimon.core.teams_graph import GraphMessage, GraphPage, html_to_text
 from daimon.core.thread_participation import ClassifierMessage
+from daimon.core.turn_hold import RequesterOrg
 
 from .conftest import make_inbound
 
@@ -336,7 +337,8 @@ def test_a_group_chat_files_hint_for_a_guest_says_no_one_to_one_chat_can_be_open
         foreign: render_user_message(
             "<controls/>",
             dataclasses.replace(
-                make_inbound("hi", conversation=chat, kind="group"), is_foreign=foreign
+                make_inbound("hi", conversation=chat, kind="group"),
+                requester_org=RequesterOrg.OTHER if foreign else RequesterOrg.HOST,
             ),
             is_admin=False,
             keys="",

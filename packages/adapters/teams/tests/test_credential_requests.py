@@ -19,6 +19,7 @@ import pytest
 import structlog
 from cryptography.fernet import Fernet
 from daimon.adapters.teams import credential_requests as module
+from daimon.adapters.teams.external_clicks import EXTERNAL_REFUSAL
 from daimon.adapters.teams.http_service import TeamsHttpService
 from daimon.adapters.teams.runtime import TeamsRuntime
 from daimon.core import credential_submit
@@ -953,7 +954,7 @@ def _from_another_organisation(
     return payload
 
 
-async def test_someone_from_another_organisation_opens_a_request_like_anyone(
+async def test_someone_from_another_organisation_cannot_open_a_request(
     db_session_factory: async_sessionmaker[AsyncSession], account_id: uuid.UUID
 ) -> None:
     env = await _request(db_session_factory, account_id)
@@ -961,4 +962,5 @@ async def test_someone_from_another_organisation_opens_a_request_like_anyone(
         theirs = await post_activity(service, _from_another_organisation(_open(env.token)))
         await service.turns.drain(5)
 
-    assert "value" not in _field(theirs), "a channel click from another tenant gets the form"
+    text = theirs["task"]["value"]["card"]["content"]["body"][0]["text"]
+    assert text == EXTERNAL_REFUSAL, "a channel click from another tenant is refused"

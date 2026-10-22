@@ -28,6 +28,7 @@ from daimon.core.stores.teams_channel_subscriptions import insert_teams_channel_
 from daimon.core.stores.teams_message_admissions import forget_teams_messages_for_user
 from daimon.core.stores.tenants import set_plain_text_mentions
 from daimon.core.teams_graph import GraphClient, GraphMessage
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from microsoft_teams.api import MessageActivity
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
@@ -285,9 +286,10 @@ async def test_a_mention_and_a_thread_reply_from_the_gap_are_delivered_once(
     assert mention.conversation_id == f"{CHANNEL_ID};messageid=1700000000010"
     assert (mention.team_group_id, mention.channel_type, mention.channel_name) == (
         TEAM_GROUP_ID,
-        "standard",
+        None,
         "Ops",
-    ), "the channel's team comes from the team's record"
+    ), "the channel's team comes from the team's record; its type is never assumed standard"
+    assert mention.requester_org is RequesterOrg.UNKNOWN, "no type, so a lookup settles the sender"
     assert not mention.unprompted and mention.service_url == SERVICE_URL
 
     successor = Boot(db_session_factory, graph)

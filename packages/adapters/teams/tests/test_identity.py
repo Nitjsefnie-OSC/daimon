@@ -25,6 +25,7 @@ from daimon.adapters.teams.identity import (
 from daimon.core.defaults.provisioning import provision_tenant
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.tenants import set_provision_status
+from daimon.core.turn_hold import RequesterOrg
 from microsoft_teams.api import Account, MessageActivity
 from microsoft_teams.api.models.channel_data import ChannelData
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -64,6 +65,7 @@ def test_personal_message_is_a_dm_keyed_on_the_chat() -> None:
         text="hello there",
         service_url=SERVICE_URL,
         sender_id=f"29:{AAD_OBJECT_ID}",
+        requester_org=RequesterOrg.HOST,
     )
 
 
@@ -537,10 +539,11 @@ def test_a_channel_sender_from_another_tenant_is_accepted() -> None:
     assert inbound.is_foreign, "commands must not point them to a 1:1 chat"
 
 
-def test_a_channel_without_a_channel_data_tenant_is_accepted_as_ours() -> None:
+def test_a_channel_without_a_channel_data_tenant_is_accepted_but_not_taken_as_ours() -> None:
     inbound = _parse(make_channel_activity(channel_tenant_id=None))
     assert isinstance(inbound, TeamsInbound), "the conversation tenant is the check"
-    assert not inbound.is_foreign, "ours"
+    assert inbound.requester_org is RequesterOrg.UNKNOWN, "no evidence the sender is ours"
+    assert not inbound.is_foreign, "unplaced is not another organisation"
 
 
 def test_a_channel_in_another_tenant_is_still_denied() -> None:

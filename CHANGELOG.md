@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Teams: people from another organisation are held to the channel they asked in and cannot use DMs.
+- Teams: people from another organisation, people Teams cannot place, and everyone in a channel shared with another organisation are held to that channel, and the others' button clicks there are limited to Stop, Approve, Deny and feedback on their own turn.
 
 - Slack: an external (Slack Connect) member's role is never taken from their own workspace, a mention from one is refused before anything is stored, and their queued follow-ups no longer run.
 

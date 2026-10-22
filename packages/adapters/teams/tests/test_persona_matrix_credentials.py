@@ -12,6 +12,7 @@ import httpx
 import pytest
 from cryptography.fernet import Fernet
 from daimon.adapters.teams.credential_requests import SUBMIT
+from daimon.adapters.teams.external_clicks import EXTERNAL_REFUSAL
 from daimon.core.config import McpSettings
 from daimon.core.credential_requests import CredentialRequestKind, build_skill_repo_target
 from daimon.core.defaults.provisioning import provision_tenant
@@ -171,6 +172,11 @@ async def test_credential_request_persona_matrix(
     assert stored is not None
     assert wrong["task"]["type"] == "continue", wrong
     assert "someone else" in json.dumps(wrong).lower(), wrong
+    if requester.name == "external":
+        # Someone from another organisation presses only requester-bound controls.
+        assert EXTERNAL_REFUSAL in json.dumps(opened), opened
+        assert stored.used_at is None
+        return
     if kind == "mcp_oauth":
         assert opened["task"]["type"] == "continue", opened
         assert "https://daimon.example.com/" in json.dumps(opened), opened

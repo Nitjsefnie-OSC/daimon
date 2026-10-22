@@ -28,6 +28,7 @@ from daimon.adapters.teams import (
 from daimon.adapters.teams.activity_feed import ActivityFeed, ChannelHomes
 from daimon.adapters.teams.app import DRAIN_GRACE_S, TeamsApp
 from daimon.adapters.teams.billing_panel import BillingPanel
+from daimon.adapters.teams.card_actions import dialog_message, dialog_notice, toast
 from daimon.adapters.teams.channel_files import ChannelFiles
 from daimon.adapters.teams.channel_settings import ChannelSettingsDialog
 from daimon.adapters.teams.channel_settings_card import CHANNEL_DIALOG
@@ -40,15 +41,17 @@ from daimon.adapters.teams.channel_subscriptions import (
 from daimon.adapters.teams.commands import CommandHandler
 from daimon.adapters.teams.deployment_admins import demoting_owner_reads
 from daimon.adapters.teams.direct_chats import SdkDirectChats
-from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, TeamsFeedback
+from daimon.adapters.teams.external_clicks import host_only, own_thread_only
+from daimon.adapters.teams.feedback import FEEDBACK_DIALOG, VOTE_TITLE, TeamsFeedback
 from daimon.adapters.teams.help import send_help
 from daimon.adapters.teams.here import show_here
-from daimon.adapters.teams.identity import GraphSource
+from daimon.adapters.teams.identity import GraphSource, canonical_uuid
 from daimon.adapters.teams.installations import TeamInstalls
 from daimon.adapters.teams.lifecycle import TEAMS_SEND_ERRORS, TimedSender
 from daimon.adapters.teams.memory import show_memory
 from daimon.adapters.teams.privacy_panel import PrivacyPanel
 from daimon.adapters.teams.reactions import ReactionTarget
+from daimon.adapters.teams.requester_org import RequesterOrgResolver, SdkMemberRead
 from daimon.adapters.teams.restart_catch_up import RestartCatchUp
 from daimon.adapters.teams.routine_delivery import make_teams_routine_poster
 from daimon.adapters.teams.routines_panel import RoutinesPanel
@@ -272,7 +275,14 @@ def create_teams_http_service(
         # `spawn` is bound below, before any read: the drain waits for a demotion.
         in_background=lambda coro: spawn(coro, name="teams.admin_demotion"),
     )
-    runtime = dataclasses.replace(runtime, team_owners=owner_reads)
+    runtime = dataclasses.replace(
+        runtime,
+        team_owners=owner_reads,
+        requester_orgs=runtime.requester_orgs
+        or RequesterOrgResolver(
+            SdkMemberRead(teams_app), ours=canonical_uuid(settings.tenant_id) or settings.tenant_id
+        ),
+    )
 
     async def channel_type(team_id: str, channel_id: str) -> str | None:
         api = teams_app.api.from_service_url(SERVICE_URL)
@@ -419,42 +429,65 @@ def create_teams_http_service(
             )
             fastapi_app.add_api_route(path, route, methods=["POST"])
     teams_app.on_install_remove(installs.on_uninstall)
+    # A person from another organisation, in a shared channel, may press only the
+    # requester-bound controls: Stop, Approve and Deny, and feedback in a thread they
+    # asked in. Every other handler refuses them (`external_clicks`).
+    action = functools.partial(host_only, runtime, refuse=toast)
+    dialog_info = functools.partial(
+        host_only, runtime, refuse=lambda text: dialog_notice("Daimon", text)
+    )
+    dialog_done = functools.partial(host_only, runtime, refuse=dialog_message)
+    silent = functools.partial(host_only, runtime, refuse=lambda _text: None)
     teams_app.on_card_action_execute(card.CANCEL_VERB, turns.handle_cancel)
-    teams_app.on_card_action_execute(routines_card.VERB, routines.on_action)
-    teams_app.on_card_action_execute(privacy_card.VERB, privacy.on_action)
-    teams_app.on_card_action_execute(billing_panel.VERB, billing.on_action)
+    teams_app.on_card_action_execute(routines_card.VERB, action(routines.on_action))
+    teams_app.on_card_action_execute(privacy_card.VERB, action(privacy.on_action))
+    teams_app.on_card_action_execute(billing_panel.VERB, action(billing.on_action))
     teams_app.on_card_action_execute(tool_confirmation.VERB, turns.confirmations.on_action)
-    teams_app.on_card_action_execute(provider_actions.VERB, turns.provider_actions.on_action)
-    teams_app.on_card_action_execute(thread_handoff.VERB, TeamsThreadHandoff(runtime).on_action)
-    teams_app.on_dialog_open(routines_card.CREATE_DIALOG, routines.on_dialog_open)
-    teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, routines.on_dialog_submit)
-    teams_app.on_card_action_execute(setup_card.VERB, setup.on_action)
+    teams_app.on_card_action_execute(
+        provider_actions.VERB, action(turns.provider_actions.on_action)
+    )
+    teams_app.on_card_action_execute(
+        thread_handoff.VERB, action(TeamsThreadHandoff(runtime).on_action)
+    )
+    teams_app.on_dialog_open(routines_card.CREATE_DIALOG, dialog_info(routines.on_dialog_open))
+    teams_app.on_dialog_submit(routines_card.CREATE_DIALOG, dialog_done(routines.on_dialog_submit))
+    teams_app.on_card_action_execute(setup_card.VERB, action(setup.on_action))
     wizards = TeamsWizards(
         runtime, start_turn=turns.start_wizard_turn, draining=lambda: turns.draining
     )
-    teams_app.on_card_action_execute(wizard.VERB, wizards.on_action)
+    teams_app.on_card_action_execute(wizard.VERB, action(wizards.on_action))
     if support is not None:
-        teams_app.on_card_action_execute(SUPPORT_VERB, support.on_action)
-        teams_app.on_dialog_open(card.ASK_HUMAN_DIALOG, support.on_ask_open)
-        teams_app.on_dialog_submit(card.ASK_HUMAN_DIALOG, support.on_ask_submit)
-    teams_app.on_dialog_open(setup_card.CREATE_DIALOG, setup.on_create_open)
-    teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, setup.on_create_submit)
-    teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, setup.on_token_open)
-    teams_app.on_dialog_submit(setup_card.TOKEN_DIALOG, setup.on_token_submit)
-    teams_app.on_dialog_open(setup_card.OPERATOR_DIALOG, setup.on_operator_open)
-    teams_app.on_dialog_submit(setup_card.OPERATOR_DIALOG, setup.on_operator_submit)
-    teams_app.on_dialog_open(setup_card.SKILL_DIALOG, setup.on_skill_open)
-    teams_app.on_dialog_submit(setup_card.SKILL_DIALOG, setup.on_skill_submit)
-    teams_app.on_dialog_open(CHANNEL_DIALOG, channel_settings.on_open)
-    teams_app.on_dialog_submit(CHANNEL_DIALOG, channel_settings.on_submit)
-    teams_app.on_dialog_open(CREDENTIAL_DIALOG, turns.credentials.on_dialog_open)
-    teams_app.on_dialog_submit(credential_requests.SUBMIT, turns.credentials.on_dialog_submit)
-    teams_app.on_dialog_open(card.VOTE_UP_DIALOG, feedback.on_up)
-    teams_app.on_dialog_open(card.VOTE_DOWN_DIALOG, feedback.on_down)
-    teams_app.on_message_fetch_task(feedback.on_fetch)
-    teams_app.on_dialog_submit(FEEDBACK_DIALOG, feedback.on_submit)
-    teams_app.on_message_submit_feedback(feedback.on_builtin)
-    teams_app.on_file_consent(turns.outputs.handle_consent)
+        teams_app.on_card_action_execute(SUPPORT_VERB, action(support.on_action))
+        teams_app.on_dialog_open(card.ASK_HUMAN_DIALOG, dialog_info(support.on_ask_open))
+        teams_app.on_dialog_submit(card.ASK_HUMAN_DIALOG, dialog_done(support.on_ask_submit))
+    teams_app.on_dialog_open(setup_card.CREATE_DIALOG, dialog_info(setup.on_create_open))
+    teams_app.on_dialog_submit(setup_card.CREATE_DIALOG, dialog_done(setup.on_create_submit))
+    teams_app.on_dialog_open(setup_card.TOKEN_DIALOG, dialog_info(setup.on_token_open))
+    teams_app.on_dialog_submit(setup_card.TOKEN_DIALOG, dialog_done(setup.on_token_submit))
+    teams_app.on_dialog_open(setup_card.OPERATOR_DIALOG, dialog_info(setup.on_operator_open))
+    teams_app.on_dialog_submit(setup_card.OPERATOR_DIALOG, dialog_done(setup.on_operator_submit))
+    teams_app.on_dialog_open(setup_card.SKILL_DIALOG, dialog_info(setup.on_skill_open))
+    teams_app.on_dialog_submit(setup_card.SKILL_DIALOG, dialog_done(setup.on_skill_submit))
+    teams_app.on_dialog_open(CHANNEL_DIALOG, dialog_info(channel_settings.on_open))
+    teams_app.on_dialog_submit(CHANNEL_DIALOG, dialog_done(channel_settings.on_submit))
+    teams_app.on_dialog_open(CREDENTIAL_DIALOG, dialog_info(turns.credentials.on_dialog_open))
+    teams_app.on_dialog_submit(
+        credential_requests.SUBMIT, dialog_done(turns.credentials.on_dialog_submit)
+    )
+    vote_info = functools.partial(
+        own_thread_only, runtime, refuse=lambda text: dialog_notice(VOTE_TITLE, text)
+    )
+    teams_app.on_dialog_open(card.VOTE_UP_DIALOG, vote_info(feedback.on_up))
+    teams_app.on_dialog_open(card.VOTE_DOWN_DIALOG, vote_info(feedback.on_down))
+    teams_app.on_message_fetch_task(vote_info(feedback.on_fetch))
+    teams_app.on_dialog_submit(
+        FEEDBACK_DIALOG,
+        own_thread_only(runtime, feedback.on_submit, lambda text: dialog_message(text)),
+    )
+    teams_app.on_message_submit_feedback(
+        own_thread_only(runtime, feedback.on_builtin, lambda _text: None)
+    )
+    teams_app.on_file_consent(silent(turns.outputs.handle_consent))
     return TeamsHttpService(
         app=fastapi_app,
         teams_app=teams_app,
