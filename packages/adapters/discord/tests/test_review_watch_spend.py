@@ -7,7 +7,7 @@ import json
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import httpx
@@ -140,8 +140,12 @@ async def test_review_spend_rechecked_after_admission(db_session_factory, mode, 
     guild.id = 710000099
     thread = _make_thread(guild=guild)
     thread.permissions_for.return_value = discord.Permissions(
-        view_channel=True, send_messages_in_threads=True
+        view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
+    parent = MagicMock(spec=discord.TextChannel)
+    parent.permissions_for.return_value = thread.permissions_for.return_value
+    guild.fetch_channel = AsyncMock(return_value=parent)
+    thread.type = discord.ChannelType.public_thread
     bot.get_channel = MagicMock(return_value=thread)
 
     bound = []

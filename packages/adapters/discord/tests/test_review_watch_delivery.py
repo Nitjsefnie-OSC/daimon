@@ -6,7 +6,7 @@ import asyncio
 import json
 from dataclasses import replace
 from datetime import UTC, datetime
-from unittest.mock import MagicMock
+from unittest.mock import AsyncMock, MagicMock
 
 import discord
 import httpx
@@ -35,7 +35,9 @@ from .watch_fixtures import (
 
 
 @pytest.mark.fresh_schema
-@pytest.mark.parametrize("mode", ["revoked_during_turn"])
+@pytest.mark.parametrize(
+    "mode", ["revoked_during_turn", "private_removed_during_turn", "history_revoked_during_turn"]
+)
 async def test_review_revocation_before_final_delivery(db_session_factory, mode, monkeypatch):
     db_session_factory, now, tenant, principal, mapping, watch, key = await enrolled_page_watch(
         db_session_factory, monkeypatch
@@ -101,8 +103,15 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
                 ]
             ).content
             await asyncio.sleep(0.1)
-            async with db_session_factory.begin() as db:
-                await watches.revoke_capabilities(db, watch.id, now=datetime.now(UTC))
+            if mode == "private_removed_during_turn":
+                thread.fetch_member.side_effect = discord.NotFound(
+                    MagicMock(status=404, reason="gone"), "Unknown Member"
+                )
+            elif mode == "history_revoked_during_turn":
+                parent.permissions_for.return_value.read_message_history = False
+            else:
+                async with db_session_factory.begin() as db:
+                    await watches.revoke_capabilities(db, watch.id, now=datetime.now(UTC))
             thread.send.reset_mock()
             thread.send.return_value.edit.reset_mock()
             yield sse_response(
@@ -148,8 +157,13 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
     guild.id = 710000099
     thread = _make_thread(guild=guild)
     thread.permissions_for.return_value = discord.Permissions(
-        view_channel=True, send_messages_in_threads=True
+        view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
+    parent = MagicMock(spec=discord.TextChannel)
+    parent.permissions_for.return_value = thread.permissions_for.return_value
+    guild.fetch_channel = AsyncMock(return_value=parent)
+    thread.type = discord.ChannelType.private_thread
+    thread.fetch_member = AsyncMock(return_value=MagicMock())
     bot.get_channel = MagicMock(return_value=thread)
 
     bound = []
@@ -183,6 +197,10 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
     async with db_session_factory() as db:
         wake = await get_continuation(db, idempotency_key=key)
         assert len(await watches.list_evidence(db, watch.id)) == 1
+        current_watch = await watches.get_watch(db, watch.id)
+        if mode != "revoked_during_turn":
+            assert current_watch.status == "paused"
+            assert current_watch.source_state["reason"].startswith("Watch paused:")
     assert wake is not None
     outgoing = str(thread.send.await_args_list) + str(thread.send.return_value.mock_calls)
     assert "The upload is ready." not in outgoing, outgoing

@@ -99,6 +99,7 @@ from daimon.adapters.discord.vision import (
     download_as_image_blocks,
     is_vision_image_attachment,
 )
+from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.agent_identity import AgentIdentity, identity_enabled_for, resolve_agent_identity
 from daimon.core.agent_pins import agent_pin_names
 from daimon.core.anthropic_spend import spend_limit_error
@@ -3880,13 +3881,7 @@ class DaimonBot(commands.Bot):
                 or row.parent_channel_id != str(thread.parent_id)
             ):
                 raise AdmissionDenied(reason="invoker_not_allowed")
-            try:
-                member = await thread.guild.fetch_member(int(row.requester_external_user_id))
-            except (discord.HTTPException, ValueError) as exc:
-                raise AdmissionDenied(reason="invoker_not_allowed") from exc
-            permissions = thread.permissions_for(member)
-            if not permissions.view_channel or not permissions.send_messages_in_threads:
-                raise AdmissionDenied(reason="writers_none")
+            member = await require_watch_thread_access(self.runtime.sessionmaker, row, thread)
             role = (
                 Role.ADMIN
                 if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
@@ -4076,10 +4071,7 @@ class DaimonBot(commands.Bot):
                 seed = await watch_seed(db, row, now=datetime.now(UTC))
             if seed is None:
                 raise AdmissionDenied(reason="runs_elsewhere")
-            try:
-                member = await thread.guild.fetch_member(int(row.requester_external_user_id))
-            except (discord.HTTPException, ValueError) as exc:
-                raise AdmissionDenied(reason="invoker_not_allowed") from exc
+            member = await require_watch_thread_access(self.runtime.sessionmaker, row, thread)
             live_role = (
                 Role.ADMIN
                 if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
@@ -4087,9 +4079,6 @@ class DaimonBot(commands.Bot):
             )
             if live_role is not role or set(member_role_ids(member)) != set(_role_ids):
                 raise AdmissionDenied(reason="invoker_not_allowed")
-            permissions = thread.permissions_for(member)
-            if not permissions.view_channel or not permissions.send_messages_in_threads:
-                raise AdmissionDenied(reason="writers_none")
 
         async def completion_root() -> None:
             if prepared.session_account_id != prepared.admission.account_id:
