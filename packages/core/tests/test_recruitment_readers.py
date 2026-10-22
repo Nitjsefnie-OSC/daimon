@@ -360,3 +360,16 @@ async def test_actual_partial_messageable_refuses_before_gateway_or_naming():
     )
     await DaimonBot._handle_mention(bot, message, "101", uuid4())
     bot._orchestrate.assert_not_awaited()
+
+
+def test_empty_settings_never_inspect_unresolved_metadata():
+    from daimon.adapters.discord.recruitment_guard import protected
+    from daimon.adapters.mcp.tools.discord._recruitment import protected as mcp_protected
+
+    class Unavailable:
+        def __getattr__(self, name):
+            raise AssertionError("disabled boundary inspected metadata")
+
+    assert not protected(RecruitmentSettings(), Unavailable(), "101")
+    runtime = SimpleNamespace(settings=SimpleNamespace(recruitment=RecruitmentSettings()))
+    assert not mcp_protected(runtime, "101", Unavailable())

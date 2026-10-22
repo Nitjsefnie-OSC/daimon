@@ -2,6 +2,7 @@
 
 from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
+from uuid import uuid4
 
 import discord
 import pytest
@@ -100,3 +101,54 @@ def test_turn_driver_requires_explicit_source_authority():
 
     assert inspect.signature(run_turn).parameters["privacy"].default is inspect.Parameter.empty
     assert inspect.signature(headless).parameters["privacy"].default is inspect.Parameter.empty
+
+
+async def test_routine_creation_refuses_reserved_source_before_agent_or_row(monkeypatch):
+    from contextlib import asynccontextmanager
+
+    from daimon.adapters.mcp.tools import routines
+    from fastmcp.exceptions import ToolError
+
+    @asynccontextmanager
+    async def session():
+        yield MagicMock()
+
+    origin = SimpleNamespace(thread_id="20", parent_channel_id="2")
+    monkeypatch.setattr(routines, "_load_policy_for_save", AsyncMock(return_value=MagicMock()))
+    monkeypatch.setattr(routines, "origin_budget_channel", AsyncMock(return_value="2"))
+    monkeypatch.setattr(routines, "get_verified_origin", AsyncMock(return_value=origin))
+    agent = AsyncMock(side_effect=AssertionError("agent/provider lookup"))
+    monkeypatch.setattr(routines, "find_agent_by_daimon_tag", agent)
+    runtime = SimpleNamespace(
+        settings=SimpleNamespace(
+            recruitment=policy(), mcp=SimpleNamespace(require_routine_destination=False)
+        ),
+        session_factory=session,
+    )
+    auth = SimpleNamespace(
+        tenant_id=uuid4(), platform="discord", external_id="101", platform_user_id="7"
+    )
+    with pytest.raises(ToolError, match="Source unavailable"):
+        await routines._create_routine_impl(
+            runtime,
+            auth,
+            agent_name="a",
+            cron_expr="* * * * *",
+            timezone="UTC",
+            trigger_message="synthetic candidate",
+        )
+    agent.assert_not_awaited()
+
+
+def test_driver_source_policy_keeps_default_off_and_tenant_isolation():
+    TurnPrivacy("discord", RecruitmentSettings()).check()
+    TurnPrivacy(
+        "discord", policy(), derive_tenant_uuid(platform="discord", workspace_id="202"), "2", None
+    ).check()
+    TurnPrivacy(
+        "discord", policy(), derive_tenant_uuid(platform="discord", workspace_id="101"), "30", "3"
+    ).check()
+    with pytest.raises(AdmissionDenied):
+        TurnPrivacy("discord", policy(), None, "20", None).check()
+    with pytest.raises(AdmissionDenied):
+        TurnPrivacy("discord").check()

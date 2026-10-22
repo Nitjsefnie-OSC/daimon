@@ -6,11 +6,15 @@ from fastmcp.exceptions import ToolError
 
 
 def protected(runtime: McpRuntime, guild_id: str, channel: object) -> bool:
-    return runtime.settings.recruitment.is_recruitment_channel(
+    settings = runtime.settings.recruitment
+    if not settings.tenants:
+        return False
+    parent = getattr(channel, "parent_id", None)
+    return settings.is_recruitment_channel(
         guild_id,
         str(getattr(channel, "id", "")),
-        str(channel.parent_id)
-        if isinstance(channel, discord.Thread) and channel.parent_id
+        str(parent)
+        if isinstance(channel, discord.Thread) and parent
         else ""
         if isinstance(channel, discord.abc.GuildChannel)
         else None,

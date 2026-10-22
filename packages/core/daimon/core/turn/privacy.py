@@ -25,7 +25,11 @@ class TurnPrivacy:
     def check(self) -> None:
         if self.platform != "discord":
             return
-        if self.recruitment is None or self.tenant_id is None:
+        if self.recruitment is None:
+            raise AdmissionDenied(reason="writers_none")
+        if not self.recruitment.tenants:
+            return
+        if self.tenant_id is None:
             raise AdmissionDenied(reason="writers_none")
         for guild_id in self.recruitment.tenants:
             if derive_tenant_uuid(
