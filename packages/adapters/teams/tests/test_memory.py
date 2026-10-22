@@ -362,7 +362,7 @@ def _channel_asker(**changes: object) -> TeamsInbound:
     import dataclasses
 
     base = make_inbound("memory", conversation=CHANNEL_ID, kind="channel")
-    return dataclasses.replace(base, **({"member_verified": True} | changes))  # type: ignore[arg-type]
+    return dataclasses.replace(base, **changes)  # type: ignore[arg-type]
 
 
 async def _bind_channel_store(
@@ -387,30 +387,6 @@ async def _bind_channel_store(
             channel_id=CHANNEL_ID,
             memory_store_id=store.id,
         )
-
-
-@pytest.mark.parametrize(
-    "unproven",
-    [
-        {"member_verified": False},
-        {"is_foreign": True, "home_tenant_id": "other-tenant"},
-        {"is_foreign": True, "home_tenant_id": None},
-        {"channel_type": "shared"},
-    ],
-    ids=["no-tenant-evidence", "other-organisation", "foreign-unnamed", "shared-channel-type"],
-)
-async def test_memory_for_a_sender_the_activity_does_not_prove_a_member_shows_the_channel_store(
-    db_session_factory: async_sessionmaker[AsyncSession], unproven: dict[str, object]
-) -> None:
-    """No marker or registry row exists, so the activity alone decides."""
-    anthropic = await _anthropic(db_session_factory, {"/wide.md": "internal"})
-    await _bind_channel_store(db_session_factory, anthropic)
-
-    held = await _run_memory(db_session_factory, anthropic, _channel_asker(**unproven))
-    proven = await _run_memory(db_session_factory, anthropic, _channel_asker())
-
-    assert "/channel.md" in held and "/wide.md" not in held
-    assert "/wide.md" in proven and "/channel.md" not in proven
 
 
 async def test_memory_in_a_held_channel_is_never_carried_to_the_1_1_chat(

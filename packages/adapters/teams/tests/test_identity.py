@@ -64,25 +64,7 @@ def test_personal_message_is_a_dm_keyed_on_the_chat() -> None:
         text="hello there",
         service_url=SERVICE_URL,
         sender_id=f"29:{AAD_OBJECT_ID}",
-        member_verified=True,
     )
-
-
-@pytest.mark.parametrize(
-    ("changes", "verified"),
-    [
-        ({}, True),
-        ({"channel_tenant_id": None}, False),
-        ({"channel_tenant_id": "11111111-1111-4111-8111-111111111111"}, False),
-    ],
-    ids=["ours-named", "no-evidence", "another-tenant-named"],
-)
-def test_a_sender_is_a_verified_member_only_when_the_activity_names_our_tenant(
-    changes: dict[str, object], verified: bool
-) -> None:
-    inbound = _parse(make_channel_activity(**changes))
-    assert isinstance(inbound, TeamsInbound)
-    assert inbound.member_verified is verified
 
 
 def test_channel_mention_keys_on_the_thread_and_strips_the_bot_mention() -> None:

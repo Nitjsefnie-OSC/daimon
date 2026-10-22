@@ -69,20 +69,19 @@ def _card(title: str, text: str | None = None, hint: str | None = None) -> Adapt
 
 
 def _requester_org(asked: TeamsInbound) -> RequesterOrg:
-    """Which organisation the sender is from, as far as the activity alone proves.
+    """Teams keeps its existing behaviour for now: the asker is passed as a member.
 
-    HOST needs the activity to name this workspace's tenant for the sender
-    (`member_verified`); a sender the activity marks foreign is OTHER; anything
-    else, no tenant evidence included, is UNKNOWN and reads as held.
+    Teams turns are not held yet, so /memory decides a held place from what was
+    recorded (a foreign principal or a shared channel), as admission does.
     """
-    if asked.is_foreign:
-        return RequesterOrg.OTHER if asked.home_tenant_id else RequesterOrg.UNKNOWN
-    return RequesterOrg.HOST if asked.member_verified else RequesterOrg.UNKNOWN
+    del asked
+    return RequesterOrg.HOST
 
 
 def _channel_shared(asked: TeamsInbound) -> bool | None:
-    """Teams' own word: a shared channel names its type; anything else is no signal."""
-    return True if asked.channel_type == "shared" else None
+    """No live signal: only the shared-channel registry holds a Teams place for now."""
+    del asked
+    return None
 
 
 async def _place_is_held(context: CommandContext, asked: TeamsInbound) -> bool:

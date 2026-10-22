@@ -136,9 +136,6 @@ class TeamsInbound:
     is_targeted: bool = False
     is_foreign: bool = False
     home_tenant_id: str | None = None
-    # The activity itself names this workspace's tenant for the sender and nothing
-    # names another: positive evidence of a member. False is "not proven", not foreign.
-    member_verified: bool = False
 
     @property
     def thread_id(self) -> str:
@@ -175,20 +172,6 @@ def foreign_tenant(sender: Account, channel_data: ChannelData | None, *, ours: s
         if isinstance(candidate, str) and candidate.strip() and canonical_uuid(candidate) != ours:
             return canonical_uuid(candidate) or candidate.strip()
     return None
-
-
-def _names_our_tenant(sender: Account, channel_data: ChannelData | None, *, ours: str) -> bool:
-    """Whether the activity names `ours` for its sender (`foreign_tenant` finds no other)."""
-    tenant = channel_data.tenant if channel_data is not None else None
-    properties = sender.properties or {}
-    return any(
-        isinstance(candidate, str) and canonical_uuid(candidate) == ours
-        for candidate in (
-            tenant.id if tenant else None,
-            sender.tenant_id,
-            properties.get("tenantId"),
-        )
-    )
 
 
 def channel_thread_id(conversation_id: str, activity_id: str) -> str:
@@ -438,8 +421,6 @@ def parse_inbound(
         is_targeted=targeted,
         is_foreign=home is not None,
         home_tenant_id=home,
-        member_verified=home is None
-        and _names_our_tenant(activity.from_, channel_data, ours=tenant),
     )
     return _admitted(inbound, addressed=addressed)
 
@@ -614,7 +595,6 @@ def parse_graph_message(
         team_name=source.team_name,
         is_foreign=bool(home) and canonical_uuid(home) != tenant,
         home_tenant_id=home or None,
-        member_verified=bool(home) and canonical_uuid(home) == tenant,
     )
     return _admitted(inbound, addressed=addressed)
 
