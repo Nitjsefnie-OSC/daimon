@@ -39,6 +39,7 @@ from daimon.core.turn.gemini_state import SQLiteFlashAccounting, SQLiteGeminiSto
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtimes import build_channel_runtime
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.factories import make_tenant
 from daimon.testing.isolated_sdk import build_gemini_client
@@ -420,6 +421,7 @@ def provider(request: pytest.FixtureRequest) -> Literal["openai", "gemini"]:
         "drift",
         "sealed",
         "publish",
+        "held",
         "identity",
         "revision",
         "tenant",
@@ -590,6 +592,14 @@ async def test_worker_native_readback_checks_stripped_tools_mounts_and_protected
                 request = replace(
                     request,
                     admission=replace(request.admission, origin_seal_ids=frozenset({UUID(int=1)})),
+                )
+            elif preparation == "held":
+                request = replace(
+                    request,
+                    admission=replace(
+                        request.admission,
+                        hold=TurnHold(platform="slack", channel_id="C-SYN-1", client=True),
+                    ),
                 )
             elif preparation == "publish":
                 request = replace(

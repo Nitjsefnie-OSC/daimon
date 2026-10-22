@@ -357,6 +357,7 @@ async def prepare_controlled_root(
         (request.deps.turn_path or load_turn_settings().path) != "mux"
         or grant is None
         or request.admission.shared_owner is not None
+        or request.admission.hold is not None
         or request.session_account_id != request.admission.account_id
         or get_profile(profile).support.get("session_spend_control") != "native"
         or not any(
@@ -617,6 +618,7 @@ async def freeze_prepared_root(
     if (
         not deps.fleet_enabled
         or prepared.admission.shared_owner is not None
+        or prepared.admission.hold is not None
         or binding.native_refs.get("session") != prepared.ma_session_id
         or prepared.admission.account_id != UUID(scope.account_id)
         or source.resource_scope != scope
@@ -817,6 +819,7 @@ async def resume_prepared_root(
     )
     for failed, reason in (
         (prepared.admission.shared_owner is not None, "shared_owner"),
+        (prepared.admission.hold is not None, "held_turn"),
         (expected_scope != persistence.scope, "prepared_scope"),
         (source.resource_scope != persistence.scope, "source_scope"),
         (row.tenant_id != UUID(persistence.scope.tenant_id), "tenant"),
@@ -1393,6 +1396,7 @@ async def capture_preparation_source(
         agent_github_app=request.deps.agent_github_app,
         hide_personal_for=request.admission.shared_owner,
         slack_turn_context_id=request.admission.slack_turn_context_id,
+        hold=None if request.admission.shared_owner is not None else request.admission.hold,
         private_dm_id=request.admission.private_dm_id,
         origin_seal_ids=request.admission.origin_seal_ids,
     )

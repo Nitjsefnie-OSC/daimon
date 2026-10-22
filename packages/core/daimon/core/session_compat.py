@@ -54,6 +54,7 @@ type ChangeReason = Literal[
     "memory_access",
     "personal_memory_store",
     "vault",
+    "credential_hold",
     "tools",
     "mcp_servers",
     "env_file",
@@ -204,6 +205,9 @@ def identity_change_reasons(
             "personal_memory_store",
         ),
         (recorded.vault_id != desired.vault_id, "vault"),
+        # The vault id above is carried over, never re-derived, so only this
+        # sees a held turn arrive at an unheld session or the reverse.
+        (recorded.mcp_hold != desired.mcp_hold, "credential_hold"),
     )
     return tuple(reason for differs, reason in checks if differs)
 

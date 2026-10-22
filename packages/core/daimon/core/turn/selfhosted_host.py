@@ -209,6 +209,7 @@ async def _prepare_selfhosted(request: ProviderPreparationRequest) -> PreparedTu
         or request.worker is not None
         or request.native_budget_usd is not None
         or request.admission.shared_owner is not None
+        or request.admission.hold is not None
         or request.admission.backend_revision_origin != "channel"
         or revision.thread_mode != "per_caller"
         or request.transfer is not None

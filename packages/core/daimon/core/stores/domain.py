@@ -94,6 +94,9 @@ class AccountIdentityRow(BaseModel):
     )  # platform_principals.external_id (LEFT JOIN on tenant's platform; null when none)
     # accounts.platform_role_ids as of the account's last chat turn.
     platform_role_ids: tuple[str, ...] = ()
+    # platform_principals.foreign_home_id: the principal was verified to belong to another
+    # organisation (sticky), so it is a client on every call, even with no running turn.
+    foreign_home_id: str | None = None
 
 
 class ChannelSkillRow(BaseModel):

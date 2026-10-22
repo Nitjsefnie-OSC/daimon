@@ -48,6 +48,7 @@ from daimon.core.confirmation import confirmed_tools_for_turn
 from daimon.core.defaults.metadata import MA_METADATA_KEY_BUDGET_CHANNEL
 from daimon.core.errors import DaimonError
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_hold import hold_key
 from daimon.core.model_presets import model_choice_id
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import legacy_call
@@ -884,6 +885,7 @@ async def _prepare_session_for_turn_locked(
                 recorded is None
                 and not fresh_start
                 and not admission.memory_read_only
+                and admission.hold is None
                 and row.budget_channel_id in ("", admission.budget_channel_id)
             ):
                 # No readable configuration to compare: the session is gone or
@@ -933,6 +935,8 @@ async def _prepare_session_for_turn_locked(
             daimon_rule_tools=admission.daimon_rule_tools,
             channel_skills=admission.channel_skills,
             system_override=system_for_platform(admission.agent.system, platform),
+            # A shared thread's session mounts no caller credential, so no hold.
+            mcp_hold=hold_key(admission.hold) if admission.shared_owner is None else None,
         )
         if fresh_start:
             decision = ReplaceSession(reasons=())

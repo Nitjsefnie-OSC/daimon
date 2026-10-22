@@ -89,7 +89,7 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_fresh_session,
 )
-from daimon.core.turn_hold import RequesterOrg
+from daimon.core.turn_hold import RequesterOrg, TurnHold
 from daimon.core.usage_sweep import settle_stamped_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
@@ -550,6 +550,38 @@ async def test_a_foreign_daimon_server_is_healed_at_the_bind_and_in_the_update(
     ] == [_PUBLIC_URL], "the update pushes the healed server"
     fourth = await prepare(changed)
     assert fourth.continuity == ContinuityOutcome(), "and that reads as current after"
+
+
+@pytest.mark.parametrize("first_held", [False, True])
+async def test_a_held_turn_never_shares_a_session_with_an_unheld_one(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    first_held: bool,
+) -> None:
+    """The session mounts a Daimon credential bound to one hold, so a turn whose
+    hold differs (held after unheld, unheld after held) gets a new session; the same
+    hold reuses it."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    hold = TurnHold(platform="slack", channel_id="C-SYN-1", client=True)
+    plain = _admission(account=account)
+    held = replace(plain, hold=hold)
+    before, after = (held, plain) if first_held else (plain, held)
+
+    first = await _prepare(deps, before, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    same = await _prepare(deps, before, tenant=tenant, account=account)
+    assert isinstance(same, PreparedTurn) and same.ma_session_id == first.ma_session_id
+
+    other = await _prepare(deps, after, tenant=tenant, account=account)
+
+    assert isinstance(other, PreparedTurn)
+    assert other.ma_session_id != first.ma_session_id
+    assert other.continuity.state == "replaced"
+    assert other.continuity.applied == ("credential_hold",)
 
 
 async def test_a_compatible_session_is_reused_without_touching_ma(

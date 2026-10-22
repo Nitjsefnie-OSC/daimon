@@ -74,6 +74,7 @@ from daimon.core.github_app_session import (
     revoke_app_access,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_hold import hold_key
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
@@ -122,6 +123,7 @@ from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
 from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE, agent_record
@@ -258,6 +260,7 @@ async def project_session_resources(
     requester_is_headless: bool = False,
     app_session_unmapped: bool = False,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
     private_dm_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
     extra_resources: Sequence[Resource] = (),
@@ -356,6 +359,8 @@ async def project_session_resources(
         reference = f"caller-mcp:{tenant_id}:{account_id}:{agent_uuid}"
         if slack_turn_context_id is not None:
             reference += f":slack-turn:{slack_turn_context_id}"
+        if hold is not None:
+            reference += f":hold:{hold_key(hold)}"
         requirements.append(
             ResourceBinding(id=reference, kind="credential", credential_ref=reference)
         )
@@ -377,6 +382,7 @@ async def project_session_resources(
     if (
         extra_resources
         or slack_turn_context_id is not None
+        or (hold is not None and caller_vault)
         or private_dm_id is not None
         or app_session_unmapped
         or (requester_is_headless and app_mode)
@@ -513,6 +519,7 @@ async def create_session(
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
     private_dm_id: str | None = None,
     budget_channel_id: str | None = None,
     origin_channel_id: str | None = None,
@@ -545,6 +552,11 @@ async def create_session(
 
     ``slack_turn_context_id`` selects an isolated execution credential for private
     Slack turns. It is absent for channel, headless and MCP-created sessions.
+
+    ``hold`` makes the session a held turn's: it mounts that hold's own Daimon
+    credential vault (`ensure_agent_mcp_vault`), and the GitHub-token vault, which
+    carries a Daimon credential too, gets the same hold. Without a caller
+    account (a shared thread) there is no Daimon credential and so no hold to carry.
 
     ``origin_channel_id``/``origin_thread_id``/``origin_seal_ids`` name the channel
     turn a session is opened for; they are stamped on it so the transcript tools
@@ -760,6 +772,7 @@ async def create_session(
                         if mcp_settings is not None and mcp_settings.jwt_secret is not None
                         else None
                     ),
+                    hold=hold,
                 )
             if caller_vault:
                 assert account_id is not None and session_factory is not None
@@ -777,6 +790,7 @@ async def create_session(
                     now=dt.datetime.now(dt.UTC),
                     session_factory=session_factory,
                     slack_turn_context_id=slack_turn_context_id,
+                    hold=hold,
                     scope=scope,
                 )
         elif caller_vault:
@@ -806,6 +820,7 @@ async def create_session(
                 now=dt.datetime.now(dt.UTC),
                 session_factory=session_factory,
                 slack_turn_context_id=slack_turn_context_id,
+                hold=hold,
                 scope=scope,
             )
 
@@ -1266,6 +1281,7 @@ async def create_session(
                     requester_is_headless=requester_is_headless,
                     app_session_unmapped=app_session_unmapped,
                     slack_turn_context_id=slack_turn_context_id,
+                    hold=hold,
                     private_dm_id=private_dm_id,
                     origin_seal_ids=origin_seal_ids,
                     extra_resources=extra_resources,
@@ -1296,6 +1312,7 @@ async def create_session(
                         vault_id=vault_id,
                         sent_skills=session_skills(agent, channel_skills),
                         github_mode="app",
+                        mcp_hold=hold_key(hold) if account_id is not None else None,
                     )
                     if app_session_unmapped
                     else None

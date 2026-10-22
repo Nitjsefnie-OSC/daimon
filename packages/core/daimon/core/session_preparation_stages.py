@@ -291,6 +291,7 @@ async def desired_snapshot_for(
     daimon_rule_tools: frozenset[str] = frozenset(),
     channel_skills: Sequence[MaSkill] = (),
     system_override: str | None = None,
+    mcp_hold: str | None = None,
 ) -> SessionSnapshot:
     """What a session created right now, for this caller, would freeze.
 
@@ -310,6 +311,9 @@ async def desired_snapshot_for(
     - `vault_id` — the per-(account, agent) vault is get-or-created at session
       create and stays that caller's vault; re-reading it would cost a
       `vaults.list()` on every turn to detect a change no daimon path makes.
+      The one change that does happen, a turn becoming held or ceasing to be,
+      is `mcp_hold`'s: the caller passes the hold key the turn needs, and a
+      session mounting a different one is replaced.
     - `repo_token_issued_at` — an age, not a configuration; the compatibility
       decision reads it off the recorded snapshot to time rotation.
 
@@ -387,6 +391,7 @@ async def desired_snapshot_for(
         ),
         channel_skills=channel_skills,
         system_override=system_override,
+        mcp_hold=mcp_hold,
         tool_safety=tool_safety,
         public_url=public_url,
     )
