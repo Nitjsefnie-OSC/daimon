@@ -1317,9 +1317,13 @@ types from the module that defines them (`mux.contracts.ports`,
 errors from `mux.errors`, and driver names from the driver package
 (`from mux.drivers.anthropic import AnthropicManagedAgents`), never from a
 driver submodule. The root import-linter contract "Daimon product code imports
-provider drivers through their packages" holds this for Daimon. The selfhosted
-driver is not covered yet. The exceptions are openai `KEY` and `reserved` and
-gemini `credential` (generic names), and the two documented second paths
+provider drivers through their packages" holds this for Daimon, selfhosted
+included (`from mux.drivers.selfhosted import SelfHostedDriver, HarnessConfig`).
+`mux.drivers.selfhosted.wire` is the one public driver submodule: it is the
+`daimon-harness/0` wire format that the host, the harness and the conformance kit
+share, and it declares its own `__all__`. The exceptions are openai `KEY` and
+`reserved`, gemini `credential` and selfhosted `segment` and `usage` (generic
+names), and the two documented second paths
 `mux.errors` / `mux.contracts.errors` and `RequiredAction` in
 `mux.contracts.events` / `mux.contracts.actions`.
 
