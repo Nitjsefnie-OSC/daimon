@@ -1,10 +1,12 @@
 """Saved routine content follows current settings, including after a restart."""
 
+from dataclasses import replace
 from io import StringIO
 from types import SimpleNamespace
+from unittest.mock import AsyncMock, MagicMock
 from uuid import uuid4
-from unittest.mock import AsyncMock
 
+import discord
 import httpx
 import pytest
 from daimon.core.config import RecruitmentSettings
@@ -25,23 +27,34 @@ from rich.console import Console
         "destination_thread",
         "legacy",
         "unknown_parent",
+        "unknown_parent_is_thread",
     ],
 )
-async def test_stored_content_readers_follow_settings_restart(db_session_factory, placement, monkeypatch):
+async def test_stored_content_readers_follow_settings_restart(
+    db_session_factory, placement, monkeypatch
+):
     from daimon.adapters.cli.commands.routines import run_sandbox_tools
+    from daimon.adapters.discord.routines_panel.panel import RoutinesPanelView
     from daimon.adapters.discord.routines_panel.read import load_guild_routines
+    from daimon.adapters.discord.routines_panel.state import RoutinesPanelState
     from daimon.adapters.mcp.auth.resolver import AuthIdentity
     from daimon.adapters.mcp.tools import routines as mcp
-    from daimon.core.stores.domain import Role
     from daimon.core.authz import Subject
+    from daimon.core.stores.domain import Role
 
     source_parent = "2" if placement.startswith("source") else "3"
     source_thread = "20" if placement == "source_thread" else None
-    kind = "thread" if placement in {"destination_thread", "unknown_parent"} else "channel"
+    kind = (
+        "thread"
+        if placement in {"destination_thread", "unknown_parent", "unknown_parent_is_thread"}
+        else "channel"
+    )
     destination = "20" if kind == "thread" else "2" if placement == "destination_parent" else "3"
     budget = (
         None if placement == "unknown_parent" else "2" if placement == "destination_thread" else "3"
     )
+    if placement == "unknown_parent_is_thread":
+        budget = destination
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, platform="discord", workspace_id="101")
         row = await create_routine(
@@ -87,11 +100,24 @@ async def test_stored_content_readers_follow_settings_restart(db_session_factory
     assert (
         await mcp._get_routine_impl(before, auth, routine_id=row.id)
     ).trigger_message == row.trigger_message
+    async with db_session_factory() as session:
+        previous_entries, _, _ = await load_guild_routines(
+            session,
+            client,
+            tenant_id=tenant.id,
+            viewer_user_id="7",
+            recruitment=before.settings.recruitment,
+        )
+    assert len(previous_entries) == 1
     # Construct a new runtime; no origin is in R and no Discord metadata is fetched.
     after = runtime(
         RecruitmentSettings(tenants={"101": {"channel_ids": ["2"], "recruiter_user_ids": ["7"]}})
     )
     assert await mcp._list_routines_impl(after, auth) == []
+    admin = replace(auth, is_admin=True, platform_user_id="8")
+    assert await mcp._list_routines_impl(after, admin) == []
+    with pytest.raises(ToolError, match="^routine not found$"):
+        await mcp._get_routine_impl(after, admin, routine_id=row.id)
     with pytest.raises(ToolError, match="^routine not found$"):
         await mcp._get_routine_impl(after, auth, routine_id=row.id)
     with pytest.raises(ToolError, match="^routine not found$"):
@@ -112,6 +138,23 @@ async def test_stored_content_readers_follow_settings_restart(db_session_factory
         )
         assert entries == [] and count == 0
         assert (await get_routine(session, row.id, tenant_id=tenant.id)).enabled
+    # A saved output control must re-read through the same policy, rather than
+    # serialize the old entry kept by its view.
+    view = RoutinesPanelView(
+        RoutinesPanelState.initial(rows=previous_entries, over_cap_count=0, agent_name_map={}),
+        runtime=after,
+        allowed_user_id=7,
+    )
+    button = next(
+        item
+        for item in view.walk_children()
+        if getattr(item, "label", None) == "📜 View last output"
+    )
+    tap = MagicMock(spec=discord.Interaction)
+    tap.user.id = 7
+    tap.response.send_message = AsyncMock()
+    await button.callback(tap)
+    tap.response.send_message.assert_awaited_once_with("Routine not found.", ephemeral=True)
     output = StringIO()
     with pytest.raises(UserFacingError, match="No routine in this tenant"):
         await run_sandbox_tools(

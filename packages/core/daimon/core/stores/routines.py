@@ -145,8 +145,9 @@ async def get_routine(
 ) -> RoutineRow | None:
     """Read internally, or project for a surface using its current recruitment settings.
 
-    Every content-bearing adapter reader must pass settings; omitting them is
-    reserved for internal scheduler/recruitment bookkeeping, never serialization.
+    Discord and cross-platform content readers must pass service settings. Raw
+    reads are for internal bookkeeping; Slack/Teams panels use disjoint platform
+    tenant IDs. Never serialize a raw Discord row on an ordinary surface.
     """
     orm = (
         await session.execute(

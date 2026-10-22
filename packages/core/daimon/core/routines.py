@@ -103,6 +103,8 @@ def recruitment_withholds_routine(settings: RecruitmentSettings, row: RoutineRow
             return settings.is_recruitment_channel(
                 guild_id,
                 row.destination_id or "",
-                row.channel_id if row.destination_kind == "thread" else "",
+                (row.channel_id if row.channel_id != row.destination_id else None)
+                if row.destination_kind == "thread"
+                else "",
             )
     return False
