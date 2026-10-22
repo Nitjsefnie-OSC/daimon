@@ -59,7 +59,6 @@ from daimon.adapters.mcp.tools import (
 )
 from daimon.adapters.mcp.tools.agent_removal import register_agent_removal_tools
 from daimon.adapters.mcp.tools.agent_tool_rules import register_agent_tool_rule_tools
-from daimon.adapters.mcp.tools.channel_backends import register_channel_backend_tools
 from daimon.adapters.mcp.tools.channel_budgets import register_channel_budget_tools
 from daimon.adapters.mcp.tools.channel_copies import register_channel_copy_tools
 from daimon.adapters.mcp.tools.channel_environments import register_channel_environment_tools
@@ -482,7 +481,6 @@ def create_mcp_app(
         microsoft=microsoft,
     )
     agents.register_agent_tools(mcp, runtime)
-    register_channel_backend_tools(mcp, runtime)
     register_agent_removal_tools(mcp, runtime)
     environments.register_environment_tools(mcp, runtime)
     vault.register_vault_tools(mcp, runtime)

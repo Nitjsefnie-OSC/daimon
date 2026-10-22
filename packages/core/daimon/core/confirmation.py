@@ -46,9 +46,8 @@ from pydantic import BaseModel, ConfigDict, Field, TypeAdapter, field_validator,
 if TYPE_CHECKING:
     from anthropic import AsyncAnthropic
     from daimon.core.channel_backend import AgentBackendService
-    from daimon.core.channel_backend_switch import ChannelBackendPreview
     from daimon.core.neutral_resources import NeutralResourceHost
-    from daimon.core.stores.domain import AccountIdentityRow, BackendAgent, CompatibilityPreview
+    from daimon.core.stores.domain import BackendAgent, CompatibilityPreview
     from daimon.core.turn.deps import TurnDeps
     from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -60,7 +59,6 @@ __all__ = [
     "ConfirmationHook",
     "ConfirmationPrompt",
     "BackendSwitchReference",
-    "ChannelBackendSwitchReference",
     "ToolRuleCardReference",
     "PendingConfirmations",
     "no_confirmation_surface",
@@ -119,18 +117,6 @@ class BackendSwitchReference(BaseModel):
         ).validate_python(value)
 
 
-class ChannelBackendSwitchReference(BaseModel):
-    """Untrusted channel-switch reference; hosts reload the bound server-side preview."""
-
-    model_config = ConfigDict(frozen=True, extra="forbid")
-
-    channel_id: str = Field(min_length=1)
-    target_backend: Provider
-    model: str | None = Field(default=None, min_length=1)
-    expected_revision: int = Field(ge=0, strict=True)
-    preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
-
-
 class ToolRuleCardReference(BaseModel):
     """The endpoint and rule-key revisions a posted approval card captured."""
 
@@ -166,9 +152,6 @@ class ConfirmationPrompt(BaseModel):
     # Opt-in only: legacy prompts and their rendered cards stay unchanged.
     admin: bool = Field(default=False, exclude_if=lambda value: not value)
     backend_switch: BackendSwitchReference | None = Field(
-        default=None, exclude_if=lambda value: value is None
-    )
-    channel_backend_switch: ChannelBackendSwitchReference | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
     tool_rule: ToolRuleCardReference | None = Field(
@@ -387,24 +370,6 @@ def prompt_for_tool_call(
             admin=True,
             backend_switch=reference,
         )
-    if call.tool_name == "request_channel_backend_switch" and server == DAIMON_SERVER_NAME:
-        channel_reference = ChannelBackendSwitchReference.model_validate(
-            {
-                "channel_id": data.get("channel_id"),
-                "target_backend": data.get("target_backend"),
-                "model": data.get("model"),
-                "expected_revision": data.get("expected_revision"),
-                "preview_digest": data.get("preview_digest"),
-            }
-        )
-        # Like the agent switch: the host hook reloads and verifies the preview.
-        return ConfirmationPrompt(
-            title="Switch this channel's model provider?",
-            requester_platform_user_id=requester_platform_user_id,
-            expires_at=now + timeout,
-            admin=True,
-            channel_backend_switch=channel_reference,
-        )
     if call.tool_name == "create_notebook_upload_url" and publishing:
         action = f"Publish {notebook}"
         title = f"{action}?"
@@ -599,73 +564,7 @@ def backend_switch_callbacks(
             raise ValueError("This permission changed. Preview and confirm again.")
         return agent, preview
 
-    async def current_identity(prompt: ConfirmationPrompt, clicker: str) -> AccountIdentityRow:
-        if not prompt.admin or clicker != prompt.requester_platform_user_id:
-            raise ValueError("This confirmation is unavailable. Preview again.")
-        async with sessionmaker() as session:
-            identity = await get_account_with_tenant(session, account_id=account_id)
-        if (
-            identity is None
-            or identity.tenant_id != tenant_id
-            or identity.platform_user_id != clicker
-        ):
-            raise ValueError("This confirmation is unavailable. Preview again.")
-        return identity
-
-    async def verified_channel(prompt: ConfirmationPrompt, clicker: str) -> ChannelBackendPreview:
-        from daimon.core.channel_backend_switch import preview_channel_backend_switch
-
-        reference = prompt.channel_backend_switch
-        if reference is None:
-            raise ValueError("This confirmation is unavailable. Preview again.")
-        identity = await current_identity(prompt, clicker)
-        preview = await preview_channel_backend_switch(
-            sessionmaker,
-            tenant_id=tenant_id,
-            platform=identity.platform,
-            channel_id=reference.channel_id,
-            target_backend=reference.target_backend,
-            model=reference.model,
-        )
-        if (
-            not preview.allowed
-            or preview.expected_revision != reference.expected_revision
-            or preview.digest != reference.preview_digest
-        ):
-            raise ValueError("This preview changed. Preview and confirm again.")
-        subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
-        if not may_set_channel_skills(subject, reference.channel_id):
-            raise ValueError("This change needs a current workspace admin.")
-        async with sessionmaker() as session:
-            current = await get_account_with_tenant(session, account_id=account_id)
-        if current != identity:
-            raise ValueError("This permission changed. Preview and confirm again.")
-        return preview
-
-    async def prepare_channel(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
-        preview = await verified_channel(prompt, prompt.requester_platform_user_id)
-        action = f"Switch this channel to {preview.target_label}"
-        return prompt.model_copy(
-            update={
-                "title": action + "?",
-                "action": action,
-                "denied_action": "Channel's model provider unchanged",
-                "detail_lines": (
-                    f"Channel: {preview.channel_id}",
-                    f"Now: {preview.current_backend}"
-                    + (f" ({preview.current_model})" if preview.current_model else ""),
-                    preview.cost_line,
-                ),
-                "consequence": (
-                    "New conversations in this channel use it; existing threads keep their "
-                    "provider.\n" + preview.carries_over_line
-                ),
-            }
-        )
-
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
-        if prompt.channel_backend_switch is not None:
-            return await prepare_channel(prompt)
         agent, preview = await verified(prompt, prompt.requester_platform_user_id)
         details = (
             "Unsupported skills: " + (", ".join(preview.unsupported_skills) or "None"),
@@ -700,10 +599,7 @@ def backend_switch_callbacks(
 
     async def check(prompt: ConfirmationPrompt, clicker: str) -> str | None:
         try:
-            if prompt.channel_backend_switch is not None:
-                await verified_channel(prompt, clicker)
-            else:
-                await verified(prompt, clicker)
+            await verified(prompt, clicker)
         except ValueError:
             return "This preview or your permission changed. Preview and confirm again."
         return None
