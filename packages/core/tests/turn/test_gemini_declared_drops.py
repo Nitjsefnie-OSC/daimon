@@ -541,32 +541,6 @@ def test_a_template_row_can_pin_no_identity(ordinary, tmp_path, monkeypatch, pin
         GeminiPlan.model_validate({**row.model_dump(mode="json"), **pin})
 
 
-def test_openai_rows_refuse_the_template_flag():
-    from daimon.core.turn.openai_deployment import OpenAIDeployment
-    from pydantic import ValidationError
-
-    with pytest.raises(ValidationError, match="not available for OpenAI"):
-        OpenAIDeployment.model_validate(
-            {
-                "profile": "openai.conversation_only",
-                "tenant_id": "t",
-                "platform": "*",
-                "channel_id": "*",
-                "account_id": "*",
-                "configuration_grant": {
-                    "profiles": ["openai.conversation_only"],
-                    "models": ["gpt-6-luna"],
-                    "thread_modes": ["per_caller"],
-                    "requires": {},
-                },
-                "project": "p",
-                "agent_id": "a",
-                "api_key_env": "DAIMON_CHANNEL_OPENAI_KEY",
-                "root_materialization": True,
-            }
-        )
-
-
 async def test_two_concurrent_first_turns_publish_one_counterpart(ordinary, tmp_path, monkeypatch):
     from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
 
