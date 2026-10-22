@@ -81,6 +81,7 @@ from mux.profiles import (
     backend_selection,
     get_profile,
     runnable_selection,
+    selectable_models,
     shared_threads_available,
     tariff_gated,
     worker_selection_allowed,
@@ -480,12 +481,15 @@ def _revision_digest(
     backend: Provider | None,
     fleet_grant: JsonValue | None,
     drop_consent: JsonValue | None = None,
+    model: str | None = None,
 ) -> str:
     facts: dict[str, object] = {
         "tenant_id": agent.tenant_id,
         "agent_id": agent.agent_id,
         "backend": backend,
     }
+    if model is not None:
+        facts["model"] = model
     if fleet_grant is not None:
         facts["fleet_grant"] = fleet_grant
     if drop_consent is not None:
@@ -535,13 +539,14 @@ def compatibility_preview(
     *,
     setting_revision: int = 0,
     cost_line: str = "Cost preview pending",
+    model: str | None = None,
 ) -> CompatibilityPreview:
     """Pure preview from host-resolved agent facts and declared profile metadata."""
     if agent.tenant_id != tenant.tenant_id:
         raise AgentBackendRefused("tenant_mismatch")
     if target_backend == "selfhosted":
         raise AgentBackendRefused("selfhosted_requires_channel_configuration")
-    selection = backend_selection(target_backend)
+    selection = agent_selection(target_backend, model)
     profile = get_profile(selection.profile)
 
     preview = CompatibilityPreview(
@@ -573,6 +578,7 @@ def compatibility_preview(
         else (),
         cost_line=cost_line,
         allowed=backend_is_enabled(target_backend, tenant.enabled_backends),
+        target_model=model if model != backend_selection(target_backend).model else None,
     )
     digest = _digest(
         {
@@ -594,7 +600,7 @@ def resolve_agent_backend(
             channel.model_dump(include=set(ResolvedBackend.model_fields))
         )
     if agent is not None and agent.backend is not None:
-        return backend_selection(agent.backend)
+        return agent_selection(agent.backend, agent.model)
     return resolve_default(None)
 
 
@@ -665,7 +671,11 @@ class AgentBackendService:
             )
 
     async def _preview(
-        self, session: AsyncSession, agent: BackendAgent, target: Provider | None
+        self,
+        session: AsyncSession,
+        agent: BackendAgent,
+        target: Provider | None,
+        model: str | None = None,
     ) -> CompatibilityPreview:
         capture = self._capture_source if target is not None else None
         target = target or DEFAULT_BACKEND
@@ -682,14 +692,17 @@ class AgentBackendService:
             target,
             await self._policy(session, agent.tenant_id),
             setting_revision=current.local if current else 0,
-            cost_line=self._cost_line(agent, target),
+            cost_line=self._cost_line(agent, target)
+            if model is None
+            else _default_cost(agent, target, model=model),
+            model=model,
         )
 
         if capture is None:
             return preview
         from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
 
-        selection = backend_selection(target)
+        selection = agent_selection(target, model)
         try:
             proposed = preview_source_drops(
                 agent, ModelRef(provider=selection.backend, id=selection.model or agent.model or "")
@@ -716,11 +729,15 @@ class AgentBackendService:
         )
 
     async def preview(
-        self, agent: BackendAgent, target_backend: Provider | None = None
+        self,
+        agent: BackendAgent,
+        target_backend: Provider | None = None,
+        model: str | None = None,
     ) -> CompatibilityPreview:
         self._require_enabled()
+        model = picked_model(target_backend, model)
         async with self._sessions() as session:
-            return await self._preview(session, agent, target_backend)
+            return await self._preview(session, agent, target_backend, model)
 
     async def read_selection(
         self,
@@ -765,6 +782,7 @@ class AgentBackendService:
         fleet_grant: AgentFleetGrant | None = None,
         accepted_drops: tuple[str, ...] | None = None,
         now: datetime | None = None,
+        model: str | None = None,
     ) -> AgentBackendRevision:
         self._check_actor(agent.tenant_id, actor)
         async with policy_store.policy_write_transaction(
@@ -789,16 +807,18 @@ class AgentBackendService:
                 if current.previous_local is not None and previous is None:
                     raise AgentBackendRefused("no_previous_revision")
                 backend = previous.backend if previous else None
+                model = previous.model if previous else None
             grant_operation = operation in ("fleet_grant_set", "fleet_grant_revoke")
             if grant_operation:
                 if now is None:
                     raise AgentBackendRefused("invalid_fleet_grant")
                 preview = await self._fleet_preview(session, agent, fleet_grant, now=now)
                 backend = current.backend if current else None
+                model = current.model if current else None
                 previous_local = current.previous_local if current else None
                 retained_grant = preview.fleet_grant
             else:
-                preview = await self._preview(session, agent, backend)
+                preview = await self._preview(session, agent, backend, model)
                 if not preview.allowed:
                     raise AgentBackendRefused("backend_not_allowed")
                 previous_local = local or None
@@ -847,7 +867,7 @@ class AgentBackendService:
                             tenant_id=str(agent.tenant_id), platform="cli", channel_id=agent.name
                         ),
                         1,
-                        backend_selection(preview.target_backend),
+                        agent_selection(preview.target_backend, model),
                     )
                 )
             try:
@@ -859,10 +879,11 @@ class AgentBackendService:
                     local=local + 1,
                     backend=backend,
                     previous_local=previous_local,
-                    digest=_revision_digest(agent, backend, retained_grant, consent_json),
+                    digest=_revision_digest(agent, backend, retained_grant, consent_json, model),
                     preview_digest=preview.digest,
                     fleet_grant=retained_grant,
                     drop_consent=consent_json,
+                    model=model,
                 )
             except IntegrityError:
                 raise AgentBackendRefused("stale_revision") from None
@@ -1021,7 +1042,9 @@ class AgentBackendService:
         *,
         expected_preview_digest: str | None = None,
         accepted_drops: tuple[str, ...] | None = None,
+        model: str | None = None,
     ) -> AgentBackendRevision:
+        model = picked_model(target_backend, model)
         return await self._change(
             agent,
             target_backend,
@@ -1030,6 +1053,7 @@ class AgentBackendService:
             "set",
             expected_preview_digest,
             accepted_drops=accepted_drops,
+            model=model,
         )
 
     async def clear_backend(
@@ -1204,7 +1228,7 @@ async def resolve_turn_backend(
         setting = await agent_backends.current(session, tenant_id, agent.agent_id)
         if setting is None or setting.backend is None:
             return None, ever_shared, "default"
-        selection = backend_selection(setting.backend)
+        selection = agent_selection(setting.backend, setting.model)
     else:
         fleet = worker.permissions.fleet
         if (
@@ -1372,9 +1396,40 @@ def backend_is_enabled(backend: Provider, enabled_backends: tuple[Provider, ...]
     return backend in enabled_backends
 
 
+def agent_selection(backend: Provider, model: str | None = None) -> ResolvedBackend:
+    """An agent's provider selection, with an admin-picked model or the provider default."""
+    selection = backend_selection(backend)
+    if model is None or model == selection.model:
+        return selection
+    if backend == DEFAULT_BACKEND or model not in selectable_models(backend):
+        raise AgentBackendRefused("model_not_selectable")
+    return selection.model_copy(update={"model": model})
+
+
+def picked_model(backend: Provider | None, model: str | None) -> str | None:
+    """`model` if it is a selectable non-default; None for the provider default.
+
+    The default is stored and previewed as no model, as before models could be
+    picked, so naming it changes no digest.
+    """
+    if model is None or backend is None:
+        return None
+    return (
+        model if agent_selection(backend, model).model != backend_selection(backend).model else None
+    )
+
+
 def _default_cost(
-    agent: BackendAgent, target: Provider, *, prices: Mapping[str, ProviderPrice] | None = None
+    agent: BackendAgent,
+    target: Provider,
+    *,
+    prices: Mapping[str, ProviderPrice] | None = None,
+    model: str | None = None,
 ) -> str:
+    if model is not None:
+        # An admin-picked model is priced from the provider tariff it runs on.
+        tariff = provider_prices(agent_selection(target, model).profile).get((target, model))
+        return list_price_preview(model, tariff or MODEL_PRICING.get(model))
     model = backend_selection(target).model or agent.model
     if model is None:
         return "List price unavailable: agent model unknown. Worst case per reply: unknown."

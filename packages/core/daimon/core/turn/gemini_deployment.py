@@ -67,6 +67,7 @@ from mux.drivers.gemini.skill_deployment import (
 )
 from mux.drivers.gemini.storage import Storage
 from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.profiles import selectable_models
 from mux.profiles.gemini import (
     ARGON_MODEL,
     INLINE_REUSE,
@@ -174,8 +175,8 @@ class GeminiPlan(BaseModel):
                 or self.max_output_tokens is not None
                 or self.mcp_credential_file is None
                 or not self.mcp_credential_file.is_absolute()
-                or self.source_capabilities.model
-                != ModelRef(provider=INLINE_REUSE.provider, id=FLASH_PRIMARY)
+                or self.source_capabilities.model.provider != INLINE_REUSE.provider
+                or self.source_capabilities.model.id not in selectable_models(INLINE_REUSE.provider)
                 or tuple(item.target.id for item in self.source_capabilities.skills)
                 != self.skill_ids
                 or self.gcs_credential_file is None
@@ -320,8 +321,12 @@ class GeminiPlan(BaseModel):
             or self.worker_materialization
             or self.max_output_tokens is not None
             or revision.profile != self.profile
-            or revision.model != FLASH_PRIMARY
-            or target.model != ModelRef(provider=INLINE_REUSE.provider, id=FLASH_PRIMARY)
+            or revision.model not in selectable_models(INLINE_REUSE.provider)
+            or target.model != ModelRef(provider=INLINE_REUSE.provider, id=revision.model)
+            or (
+                self.source_capabilities is not None
+                and self.source_capabilities.model.id != revision.model
+            )
             or "memory" not in target.declared_drops
             or target.name != source.effective_spec.name
             or not source_instructions_preserved(source.effective_spec.system, target.system)
@@ -423,7 +428,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         not in (
             (FLASH_PRIMARY, WORKER_MODEL)
             if request.worker is not None
-            else (FLASH_PRIMARY, ARGON_MODEL)
+            else selectable_models(INLINE_REUSE.provider)
         )
         # Argon has no checked-in price after its intro tariff; never run it unpriced.
         or (

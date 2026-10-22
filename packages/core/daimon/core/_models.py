@@ -3843,6 +3843,8 @@ class AgentBackendRevisionRecord(Base):
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()
     )
+    # The admin-picked model; null is the provider's default (0118, so last).
+    model: Mapped[str | None] = mapped_column(Text)
 
 
 class FleetRun(Base):

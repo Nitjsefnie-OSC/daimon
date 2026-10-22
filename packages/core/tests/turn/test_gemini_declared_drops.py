@@ -385,3 +385,29 @@ async def test_unconfirmed_or_foreign_source_refuses_before_factory(ordinary, mo
     with pytest.raises(AdmissionDenied):
         await read_preparation_counterpart(scope_channel_runtimes(request)[0])
     assert constructed == calls == posts == []
+
+
+@pytest.mark.parametrize("model", ["gemini-4-argon"])
+def test_ordinary_compiler_runs_a_picked_model_only_when_target_and_admission_agree(
+    ordinary, model
+):
+    request, plan, canonical, _, calls, posts, *_ = ordinary
+    revision = canonical.admission.backend_revision
+    assert revision is not None
+    picked = replace(
+        canonical,
+        admission=replace(
+            canonical.admission, backend_revision=revision.model_copy(update={"model": model})
+        ),
+        target_spec=canonical.target_spec.model_copy(
+            update={"model": canonical.target_spec.model.model_copy(update={"id": model})}
+        ),
+    )
+    deployment = plan.deployment(picked)
+    assert deployment.agent.model.id == model
+    # A target on another model than the admitted one never compiles.
+    with pytest.raises(AdmissionDenied):
+        plan.deployment(replace(picked, target_spec=canonical.target_spec))
+    with pytest.raises(AdmissionDenied):
+        plan.deployment(replace(canonical, admission=picked.admission))
+    assert calls == posts == []

@@ -1223,6 +1223,7 @@ class AgentBackendRevision(_BackendConsentFacts):
     agent_id: uuid.UUID
     local: int = Field(ge=1)
     backend: Provider | None
+    model: str | None = None
     agent_name: str
     preview_digest: str
     digest: str
@@ -1266,4 +1267,6 @@ class CompatibilityPreview(_BackendConsentFacts):
     cost_line: str
     allowed: bool
     digest: str
+    # Set only when an admin picked a model other than the provider default.
+    target_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
     fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
