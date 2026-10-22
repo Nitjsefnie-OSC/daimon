@@ -15,55 +15,55 @@ def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute(
         """CREATE TABLE recruitment_configs (
-    tenant_id UUID NOT NULL, 
-    config JSONB NOT NULL, 
-    PRIMARY KEY (tenant_id), 
+    tenant_id UUID NOT NULL,
+    config JSONB NOT NULL,
+    PRIMARY KEY (tenant_id),
     FOREIGN KEY(tenant_id) REFERENCES tenants (id) ON DELETE CASCADE
 )"""
     )
     op.execute(
         """CREATE TABLE recruitment_threads (
-    tenant_id UUID NOT NULL, 
-    thread_id TEXT NOT NULL, 
-    parent_id TEXT NOT NULL, 
+    tenant_id UUID NOT NULL,
+    thread_id TEXT NOT NULL,
+    parent_id TEXT NOT NULL,
     card_id TEXT,
     claim_token TEXT,
-    phase TEXT NOT NULL, 
-    revision TEXT NOT NULL, 
-    encrypted_state BYTEA, 
-    raw_expires_at TIMESTAMP WITH TIME ZONE NOT NULL, 
-    expires_at TIMESTAMP WITH TIME ZONE NOT NULL, 
-    PRIMARY KEY (tenant_id, thread_id), 
+    phase TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    encrypted_state BYTEA,
+    raw_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
+    PRIMARY KEY (tenant_id, thread_id),
     FOREIGN KEY(tenant_id) REFERENCES tenants (id) ON DELETE CASCADE
 )"""
     )
     op.execute(
         """CREATE TABLE recruitment_messages (
-    tenant_id UUID NOT NULL, 
-    thread_id TEXT NOT NULL, 
-    message_id TEXT NOT NULL, 
+    tenant_id UUID NOT NULL,
+    thread_id TEXT NOT NULL,
+    message_id TEXT NOT NULL,
     raw_expires_at TIMESTAMP WITH TIME ZONE NOT NULL,
     processed_revision TEXT,
-    revision TEXT NOT NULL, 
-    encrypted_source BYTEA, 
-    PRIMARY KEY (tenant_id, thread_id, message_id), 
+    revision TEXT NOT NULL,
+    encrypted_source BYTEA,
+    PRIMARY KEY (tenant_id, thread_id, message_id),
     FOREIGN KEY(tenant_id, thread_id) REFERENCES recruitment_threads (tenant_id, thread_id)
         ON DELETE CASCADE
 )"""
     )
     op.execute(
         """CREATE TABLE recruitment_outbox (
-    tenant_id UUID NOT NULL, 
-    id TEXT NOT NULL, 
-    thread_id TEXT NOT NULL, 
-    revision TEXT NOT NULL, 
-    stable_key TEXT NOT NULL, 
-    state TEXT NOT NULL, 
-    encrypted_request BYTEA, 
-    PRIMARY KEY (tenant_id, id), 
+    tenant_id UUID NOT NULL,
+    id TEXT NOT NULL,
+    thread_id TEXT NOT NULL,
+    revision TEXT NOT NULL,
+    stable_key TEXT NOT NULL,
+    state TEXT NOT NULL,
+    encrypted_request BYTEA,
+    PRIMARY KEY (tenant_id, id),
     FOREIGN KEY(tenant_id, thread_id) REFERENCES recruitment_threads (tenant_id, thread_id)
-        ON DELETE CASCADE, 
-    CONSTRAINT uq_recruitment_key UNIQUE (tenant_id, stable_key), 
+        ON DELETE CASCADE,
+    CONSTRAINT uq_recruitment_key UNIQUE (tenant_id, stable_key),
     CONSTRAINT uq_recruitment_revision UNIQUE (tenant_id, thread_id, revision)
 )"""
     )

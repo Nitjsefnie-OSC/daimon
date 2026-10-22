@@ -91,3 +91,12 @@ async def test_synthetic_runtime_extracts_updates_without_provider_calls() -> No
         assert extraction.changes[0].value == "555-0100"
         assert extraction.changes[0].source_message_id == "10"
         model.messages.parse.assert_not_awaited()
+
+
+def test_recruitment_migration_has_no_diff_whitespace_errors() -> None:
+    from pathlib import Path
+
+    migration = Path(__file__).parents[1] / "alembic/versions/0122_recruitment.py"
+    assert [
+        i for i, line in enumerate(migration.read_text().splitlines(), 1) if line.rstrip() != line
+    ] == []
