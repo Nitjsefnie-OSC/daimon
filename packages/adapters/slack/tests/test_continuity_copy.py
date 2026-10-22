@@ -59,7 +59,9 @@ from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_origin import turn_origin as real_turn_origin
-from daimon.testing import build_fake_anthropic, ma_agent, ma_environment, resolved_agent_env_router
+from daimon.testing.ma import resolved_agent_env_router
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from yarl import URL

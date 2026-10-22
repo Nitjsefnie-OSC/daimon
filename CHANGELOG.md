@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Agent edits now reach an open self-hosted conversation at its next message: changed instructions, model, tools, skills or MCP servers apply on the same session, so workspace files stay. A turn already running finishes on its old configuration and its usage is metered at the model and tariff it used. Environment changes and archived agents still require a fresh session.
 
+- Ship mux's offline test doubles and conformance kits as `mux.testing` inside `daimon-mux` (moved from `daimon.testing`), and run the mux tests in CI against an environment with only `daimon-mux` installed.
+
 - Fleet: whenever a worker is cancelled, the host logs why (`fleet.worker_cancel`, with a reason such as `shutdown`, `budget`, `usage_unavailable`, `run_deadline` or `terminal`), so a worker interrupted at send is no longer left without a cause.
 - Gemini agents need no per-agent setup: one tenant-wide template row in the provider runtime manifest (`"root_materialization": true`) serves every agent switched to Gemini. Each agent version's counterpart is published on its first turn and reused after that. Channel and agent rows now serve only their own kind of turn.
 

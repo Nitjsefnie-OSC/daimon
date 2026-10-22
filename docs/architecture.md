@@ -185,7 +185,8 @@ and CI:
 | CLI admin commands and run must not import each other | `daimon.adapters.cli.commands` ⟂ `daimon.adapters.cli.run` |
 | Mux must not import daimon | `mux` → `daimon` |
 | Mux contracts and profiles import no provider SDK or driver | `mux.contracts`, `mux.profiles`, `mux.errors` → a provider SDK or `mux.drivers` |
-| Only mux.drivers.anthropic / openai / gemini imports its SDK (three contracts) | `mux` → `anthropic`, `openai` or `google`, except from that provider's driver |
+| Only mux.drivers.anthropic / openai / gemini imports its SDK (three contracts) | `mux` → `anthropic`, `openai` or `google`, except from that provider's driver and its test doubles under `mux.testing.drivers` |
+| Product code must not import test harnesses | `daimon.core`, `daimon.adapters`, `mux` (except `mux.testing`) → `mux.testing`, `daimon.testing` |
 | notebook-host must not import daimon | `notebook_host` → `daimon` |
 | report-host must not import daimon | `report_host` → `daimon` |
 | harness must not import daimon | `daimon_harness` → `daimon` |

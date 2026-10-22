@@ -37,8 +37,8 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic, make_fake_ma_handler
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

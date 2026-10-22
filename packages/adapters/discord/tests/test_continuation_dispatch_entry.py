@@ -46,8 +46,8 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState
-from daimon.testing import ma_agent, ma_environment
 from daimon.testing.factories import make_account, make_tenant
+from daimon.testing.ma_models import ma_agent, ma_environment
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .harness import make_bot

@@ -27,9 +27,9 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.notebooks._rate_limit import RateLimiter
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.tenants import get_tenant_liveness, set_provision_status
-from daimon.testing import ma_agent
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.exc import OperationalError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

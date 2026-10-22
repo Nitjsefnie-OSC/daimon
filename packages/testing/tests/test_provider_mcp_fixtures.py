@@ -13,8 +13,6 @@ from typing import Protocol, cast
 
 import httpx
 import pytest
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from daimon.testing.outcome_oracle import RunEvidence, TerminalEvidence, TurnEvidence, evaluate
 from daimon.testing.provider_fixtures import (
     BackendFixture,
@@ -44,6 +42,8 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import MemoryStorage
+from mux.testing.isolated_sdk import AmbientSDKConfigurationError, build_async_openai
 from openai import AsyncOpenAI
 from pydantic import TypeAdapter, ValidationError
 

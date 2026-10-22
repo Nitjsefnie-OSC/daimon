@@ -15,8 +15,9 @@ from daimon.core import headless_runner
 from daimon.core.config import TurnSettings
 from daimon.core.turn import driver
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from pydantic import ValidationError
 
 from .headless_output import HeadlessOutput, capture_headless_return

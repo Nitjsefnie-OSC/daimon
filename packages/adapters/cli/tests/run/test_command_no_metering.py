@@ -30,7 +30,12 @@ from daimon.core.config import Settings
 from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import usage_events
-from daimon.testing.ma import MARouter, build_fake_anthropic, send_events_response, sse_response
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    send_events_response,
+    sse_response,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 
