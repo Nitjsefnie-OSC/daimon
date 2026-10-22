@@ -41,7 +41,7 @@ from mux.contracts.ids import PageRequest, ResourceRef, Scope
 from mux.contracts.ports import ManagedAgents
 from mux.contracts.receipts import CancelReceipt, OperationStatus, SendReceipt, StopObservation
 from mux.contracts.usage import UsageObservation
-from mux.drivers.selfhosted.usage import SelfHostedUsage
+from mux.drivers.selfhosted import SelfHostedUsage
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from pydantic import BaseModel, JsonValue, TypeAdapter
 

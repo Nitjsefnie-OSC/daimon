@@ -9,7 +9,6 @@ from typing import cast
 import pytest
 from anthropic import AsyncAnthropic
 from anthropic.types import RawMessageStreamEvent
-from daimon.core.turn import run_turn
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TextBlock, TurnState
@@ -22,6 +21,7 @@ from daimon.testing.turn_fakes import (
     RaiseStreamDrop,
     RecordingLifecycle,
     YieldEvent,
+    run_turn_on_leg,
 )
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
@@ -63,7 +63,7 @@ async def test_driver_calls_on_sse_event_for_each_upstream_event() -> None:
     ]
     lc = RecordingLifecycle()
 
-    await run_turn(
+    await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -90,7 +90,7 @@ async def test_driver_does_not_forward_redelivered_event_to_lifecycle() -> None:
     fa.beta.sessions.events.replay_events = [message]
     lifecycle = RecordingLifecycle()
 
-    final = await run_turn(
+    final = await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -123,7 +123,7 @@ async def test_driver_calls_on_reconnect_on_connection_drop() -> None:
     fa.beta.sessions.events.replay_events = [pre, mid]
     lc = RecordingLifecycle()
 
-    await run_turn(
+    await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -159,7 +159,7 @@ async def test_driver_reconnects_when_sse_body_drops_mid_stream() -> None:
     fa.beta.sessions.events.replay_events = [pre, mid]
     lc = RecordingLifecycle()
 
-    await run_turn(
+    await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -183,7 +183,7 @@ async def test_driver_calls_on_rate_limited_with_until_before_sleep() -> None:
     fa.beta.sessions.events.stream_scripts = [[RaiseRateLimit(retry_after_seconds=30.0)]]
     lc = RecordingLifecycle()
 
-    await run_turn(
+    await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -218,7 +218,7 @@ async def test_driver_calls_on_interrupt_sent_when_sigint() -> None:
 
     async with asyncio.TaskGroup() as tg:
         tg.create_task(_cancel_soon())
-        await run_turn(
+        await run_turn_on_leg(
             anthropic=_cast(fa),
             session_id="sess_1",
             user_message="hi",
@@ -315,7 +315,7 @@ async def test_render_failure_survives_and_retries_same_delta() -> None:
     ]
     lc = _RaisingRenderLifecycle(fail_count=3)
 
-    await run_turn(
+    await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -355,7 +355,7 @@ async def test_render_failure_on_every_call_still_completes_the_turn() -> None:
     ]
     lc = _RaisingRenderLifecycle(fail_count=None)
 
-    state = await run_turn(
+    state = await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -383,7 +383,7 @@ async def test_terminal_render_failure_does_not_block_terminal_failure_hook() ->
     fa.beta.sessions.events.stream_scripts = [[RaiseRateLimit(retry_after_seconds=1.0)]]
     lc = _RaisingRenderLifecycle(fail_count=None)
 
-    state = await run_turn(
+    state = await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
@@ -421,7 +421,7 @@ async def test_cancelled_error_from_on_render_is_not_swallowed() -> None:
     ]
     lc = _RaisingRenderLifecycle(fail_count=1, exc_factory=asyncio.CancelledError)
 
-    state = await run_turn(
+    state = await run_turn_on_leg(
         anthropic=_cast(fa),
         session_id="sess_1",
         user_message="hi",
