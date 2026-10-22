@@ -249,11 +249,7 @@ class HostFleetToolService:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id
         )
-        from daimon.core.neutral_resources import (
-            default_worker_limits,
-            task_worker_spec,
-            worker_runtime_ceiling,
-        )
+        from daimon.core.neutral_resources import task_worker_spec, worker_runtime_ceiling
 
         if agent is None and clone is None and task is not None:
             agent = task_worker_spec(parent, role=role, task=task, model=model)
@@ -266,12 +262,21 @@ class HostFleetToolService:
             if overrides is not None and overrides.model is not None
             else parent.spec.model.provider
         )
-        run, workers = (
-            await self._orchestrator.read_snapshot(parent, policy, parent.fleet.run_id)
-            if budget_usd is None
-            else (None, ())
-        )
         now = datetime.now(UTC)
+        limits = await self._orchestrator.spawn_limits(
+            parent,
+            policy,
+            operation_key=operation_key,
+            provider=provider,
+            now=now,
+            budget_usd=budget_usd,
+            deadline=deadline,
+            max_turns=max_turns,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
+            planned_workers=planned_workers,
+            max_runtime_s=worker_runtime_ceiling(parent, provider, backend),
+        )
         return await self._orchestrator.spawn(
             parent,
             policy,
@@ -280,20 +285,7 @@ class HostFleetToolService:
             operation_key=operation_key,
             role=role,
             backend=backend,
-            limits=default_worker_limits(
-                parent.limits,
-                run,
-                workers,
-                provider=provider,
-                budget_usd=budget_usd,
-                deadline=deadline,
-                max_turns=max_turns,
-                max_input_tokens=max_input_tokens,
-                max_output_tokens=max_output_tokens,
-                planned_workers=planned_workers,
-                now=now,
-                max_runtime_s=worker_runtime_ceiling(parent, provider, backend),
-            ),
+            limits=limits,
             agent=agent,
             clone=clone,
             clone_revision=clone_revision,
