@@ -25,7 +25,7 @@ async def load_guild_routines(
     *,
     tenant_id: uuid.UUID,
     viewer_user_id: str | None = None,
-    recruitment: RecruitmentSettings | None = None,
+    recruitment: RecruitmentSettings,
 ) -> tuple[list[RoutineEntry], int, dict[str, str]]:
     """Fetch routines + tenant agents; sort, cap, and decorate per entry.
 
