@@ -754,7 +754,32 @@ async def run_turn(
             return final_cell[0]
 
     # Native usage reconciliation remains inside the admitted binding lease.
-    pump = _pump_metered if isinstance(billing, ObservationBilled) else _pump_unwedging
+    pumped = _pump_metered if isinstance(billing, ObservationBilled) else _pump_unwedging
+
+    async def abandon_native() -> None:
+        # Looked up at failure time: recovery may have swapped `io`.
+        hook = getattr(io, "abandon_native", None)
+        if hook is not None:
+            await hook()
+
+    async def pump() -> TurnState:
+        # A provider codec that runs work natively (Gemini) stops it when the
+        # host ends the turn as a failure, including a cancelled or timed-out
+        # pump. Codecs without the optional hook are unaffected.
+        try:
+            state = await pumped()
+        except BaseException:
+            await abandon_native()
+            raise
+        # A rate-limited provider cannot take another call to stop it.
+        if (
+            state.termination is not None
+            and state.termination.is_failure
+            and state.termination != TerminationReason.RATE_LIMITED
+        ):
+            await abandon_native()
+        return state
+
     pump_coro = pump() if persistence is None else persistence.run(pump)
     if deadline is None:
         return await pump_coro
@@ -1974,12 +1999,17 @@ async def _finalize_upstream(
         ),
     )
     await render_once(state_cell[0])
+    provider = err if isinstance(err, ProviderError) else None
     log.warning(
         "turn.failed",
         session_id=session_id,
         turn_error_kind="upstream",
         error=str(err),
         renders_failed=renders_failed,
+        # Redacted provider detail: which check or HTTP status ended the turn.
+        provider_category=provider.category if provider else None,
+        provider_native_code=provider.native_code if provider else None,
+        provider_http_status=provider.native_error_code if provider else None,
     )
     if rate_limit_until is not None:
         log.warning(

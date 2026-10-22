@@ -146,18 +146,22 @@ async def turn_origin(
     responder_ma_agent_id: str,
     responder_name: str,
     role: Role,
+    sender_foreign: bool,
+    shared_channel: bool,
     configuration_target_ma_agent_id: str | None = None,
     configuration_target_name: str | None = None,
     is_setup: bool = False,
-    sender_foreign: bool = False,
     message_text: str | None = None,
     queued_message: bool = False,
     keep_fleet_root: bool = False,
 ) -> AsyncIterator[TurnOriginRow]:
     """Commit a distinct origin for this execution and remove it after execution.
 
-    `sender_foreign` marks a sender from another organisation, who has no 1:1 chat with
-    Daimon (Teams); tools and the per-turn words read it from the origin.
+    `sender_foreign` marks a client turn: the sender is from another organisation (or the
+    platform could not say), who has no 1:1 chat with Daimon. `shared_channel` marks an
+    origin channel shared with another organisation. Both come from the turn's admission
+    (`admission.hold`, `admission.shared_channel`), never from an adapter's own guess;
+    tools and the per-turn words read them from the origin.
     `message_text` is the person's own message that started this turn, as the
     adapter received it; it settles their open skill-add previews in this
     thread (`resolve_pending_skill_adds`). None for a turn no message started.
@@ -182,6 +186,7 @@ async def turn_origin(
             now=now,
             is_setup=is_setup,
             sender_foreign=sender_foreign,
+            shared_channel=shared_channel,
         )
         if message_text is not None:
             if not queued_message:

@@ -25,6 +25,7 @@ from daimon.core.stores.direct_messages import DirectMessageBusy
 from daimon.core.thread_handoff import ThreadHandoffRefused
 from daimon.core.turn.errors import SessionAgentMismatch
 from daimon.core.turn.notices import short_ref
+from mux.errors import ProviderError
 from ulid import ULID
 
 import discord
@@ -127,6 +128,13 @@ def _cause_lines(exc: BaseException) -> tuple[str, str]:
     if isinstance(exc, anthropic.APIError):
         # Connection failures, timeouts and errors with no status.
         return _AI_UNREACHABLE
+    if isinstance(exc, ProviderError):
+        # Any provider behind the neutral driver layer (Gemini, OpenAI...).
+        if exc.category in {"rate_limited", "overloaded"}:
+            return _AI_BUSY
+        if exc.category == "transient_network" or (exc.category == "upstream" and exc.retryable):
+            return _AI_UNREACHABLE
+        return _AI_REFUSED
     if isinstance(exc, discord.HTTPException):
         return _PLATFORM_REFUSED
     return _OUR_SIDE

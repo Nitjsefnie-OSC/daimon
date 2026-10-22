@@ -84,6 +84,7 @@ type FleetConflictReason = Literal[
     "recovery_reconciliation_required",
     "retained_revision_changed",
     "result_not_successful",
+    "wake_pending",
 ]
 
 
@@ -201,6 +202,23 @@ def spawn_operation_key(run_id: uuid.UUID, ordinal: int) -> str:
 def result_source_key(worker_id: uuid.UUID) -> str:
     """The journal source key of a worker's result entry (deduplicated per worker)."""
     return f"fleet:{worker_id}:result"
+
+
+def holds_slot(worker: FleetWorker) -> bool:
+    """Whether a worker counts against its run's `max_workers`.
+
+    A cancelled worker that never bound, ran, held money or produced a result (a
+    spawn refused at admission) frees its slot; its row stays as evidence. The
+    store also keeps any worker with a claim stamp, which this view cannot see.
+    """
+    return not (
+        worker.status == "cancelled"
+        and worker.binding_id is None
+        and worker.attempts == 0
+        and worker.turns_used == 0
+        and worker.reserved_usd == 0
+        and worker.result is None
+    )
 
 
 def run_settled(run: FleetRun, workers: Sequence[FleetWorker]) -> bool:

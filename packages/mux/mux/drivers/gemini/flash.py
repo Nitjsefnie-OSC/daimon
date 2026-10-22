@@ -18,10 +18,12 @@ from mux.drivers.gemini.transport import (
     string,
 )
 from mux.errors import ProviderError
-from mux.profiles.gemini import WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, WORKER_MODEL
 
 FLASH_PRIMARY = "gemini-3.8-flash"
 FLASH_MODELS = (FLASH_PRIMARY, "gemini-flash-latest", "gemini-3.5-flash-lite")
+# Every model an attempt may name. Argon is only ever its own single attempt.
+ATTEMPT_MODELS = (*FLASH_MODELS, ARGON_MODEL)
 
 
 @dataclass(frozen=True)
@@ -36,12 +38,31 @@ class FlashAttempt:
 class FlashAccounting(Protocol):
     """Caller persists a hold before each dispatch, and preserves its outcome.
 
-    A failed accounting operation stops the chain. This policy cannot waive a
-    budget or infer a free call from a refusal. Actuals arrive via scoped Usage.
+    A failed accounting operation stops the chain. Actuals arrive via scoped
+    Usage. The only free call this policy reports is a definite refusal: an
+    HTTP 4xx that rejected the request itself (`refused` with a 4xx status), so
+    no interaction exists. Anything Google may have accepted stays `unknown`.
     """
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None: ...
     async def after_attempt(self, *, receipt: FlashAttempt) -> None: ...
+
+
+_DEFINITE = ("invalid_request", "auth", "permission", "not_found")
+
+
+def definite_rejection(error: ProviderError) -> int | None:
+    """The 4xx status of a create Google rejected outright, else None.
+
+    Needs the provider's own HTTP status: a local refusal (no status), e.g. a
+    response check after a 200, may follow an accepted request. Timeouts, 429,
+    5xx and network failures may have been accepted too.
+    """
+    code = error.native_error_code or ""
+    if error.category not in _DEFINITE or not code.startswith("http_4"):
+        return None
+    status = code.removeprefix("http_")
+    return int(status) if status.isdigit() else None
 
 
 class FlashTransport:
@@ -52,7 +73,11 @@ class FlashTransport:
         *,
         native_agent: Agent | None = None,
         bounded_worker: bool = False,
+        primary: str = FLASH_PRIMARY,
     ) -> None:
+        if primary not in (FLASH_PRIMARY, ARGON_MODEL):
+            raise ValueError("an explicit Flash or Argon primary is required")
+        self._primary = primary
         self._bounded_worker = bounded_worker
         self._native_agent = native_agent
         self.source, self.accounting = source, accounting
@@ -73,16 +98,19 @@ class FlashTransport:
         capped = model_request(dict(request))
         original = {} if capped else object_value(request["agent_config"])
         required = (
-            self._native_agent.spec.model.id if self._native_agent is not None else FLASH_PRIMARY
+            self._native_agent.spec.model.id if self._native_agent is not None else self._primary
         )
         if (
-            required not in (FLASH_PRIMARY, WORKER_MODEL)
+            required not in (FLASH_PRIMARY, WORKER_MODEL, ARGON_MODEL)
             or (request.get("model") if capped else original.get("model")) != required
         ):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="flash_primary_required"
             )
         models = (FLASH_PRIMARY,) if self._bounded_worker else FLASH_MODELS
+        if required == ARGON_MODEL:
+            # A 503 on Argon is the turn's answer, never a silent switch to Flash.
+            models = (ARGON_MODEL,)
         if self._bounded_worker and (not capped or required != FLASH_PRIMARY):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="worker_model_required"
@@ -114,14 +142,16 @@ class FlashTransport:
                 reply = await self.source.create(bounded)
             except ProviderError as error:
                 refused = error.category == "overloaded" and error.native_code == "503"
+                rejected = definite_rejection(error)
                 await self.accounting.after_attempt(
                     receipt=FlashAttempt(
                         model=model,
                         attempt=index + 1,
-                        outcome="refused" if refused else "unknown",
-                        http_status=503 if refused else None,
+                        outcome="refused" if refused or rejected is not None else "unknown",
+                        http_status=503 if refused else rejected,
                     )
                 )
+                # Only a 503 moves down the chain; a rejected request is the answer.
                 if not refused or index + 1 == len(models):
                     raise
                 continue

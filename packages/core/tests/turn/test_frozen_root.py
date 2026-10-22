@@ -36,6 +36,7 @@ from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.runtime_manifest import freeze_prepared_root, read_frozen_root
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_origin import turn_origin
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
@@ -254,6 +255,8 @@ async def root_turn(
             responder_ma_agent_id=native.id,
             responder_name="root",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             root = replace(
                 root,
@@ -621,6 +624,8 @@ async def test_same_intent_cannot_be_reassigned_to_another_execution(root_turn):
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name="root",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as other:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=other.id))
         with pytest.raises(OperationConflict):
@@ -895,6 +900,8 @@ async def another_account_root(value):
             responder_ma_agent_id=actual.id,
             responder_name="root",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             root = replace(
                 grants[0],
@@ -1112,6 +1119,8 @@ async def wake_frame(value):
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as current:
         yield intent, current
 
@@ -1128,6 +1137,8 @@ async def test_started_completion_carries_original_run_across_two_real_turn_fram
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -1227,6 +1238,8 @@ async def test_completion_bound_without_a_prepared_scope_resumes_the_original_ro
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -1340,6 +1353,8 @@ async def test_retained_root_readers_follow_later_run_transitions(root_turn, sta
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -1420,6 +1435,8 @@ async def test_original_context_and_card_are_not_retained_for_a_closed_run(root_
         responder_ma_agent_id=prepared.admission.agent.id,
         responder_name=prepared.admission.agent.name,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         keep_fleet_root=True,
     ) as origin:
         grants[0] = replace(grants[0], fleet=replace(grants[0].fleet, origin_id=origin.id))
@@ -1747,6 +1764,7 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
         admission = await admit(
             deps,
             tenant_id=tenant_id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="requester",
             channel_id=channel_id,
@@ -1789,6 +1807,8 @@ async def test_real_fresh_mention_default_freezes_from_admission_to_checked_send
             responder_ma_agent_id=native.id,
             responder_name="root",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             prepared = await bind_session_impl(
                 deps,
@@ -2198,6 +2218,7 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
         admission = await admit(
             deps,
             tenant_id=tenant_id,
+            requester_org=RequesterOrg.HOST,
             platform=channel.platform,
             external_user_id="requester",
             channel_id=channel.channel_id,
@@ -2227,6 +2248,8 @@ async def test_fresh_explicit_channel_mention_runs_without_fleet_origin_synthesi
             responder_ma_agent_id=native.id,
             responder_name="root",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ):
             prepared = await bind_session_impl(
                 deps,

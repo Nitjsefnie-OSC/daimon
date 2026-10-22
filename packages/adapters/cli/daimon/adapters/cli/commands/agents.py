@@ -60,6 +60,7 @@ from daimon.core.stores import agent_tool_rules as tool_rules_store
 from daimon.core.stores.agent_google_binding import upsert_agent_google_binding
 from daimon.core.stores.identity import get_or_create_cli_principal
 from daimon.core.stores.tenants import list_tenants_by_platform
+from mux.profiles import selectable_models
 from pydantic import BaseModel, TypeAdapter, ValidationError
 from rich.console import Console
 from typer.core import TyperGroup
@@ -692,6 +693,10 @@ def agents_backend_set_command(
     as_json: Annotated[bool, JSON_OPTION] = False,
     accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="One of the backend's selectable models; default if unset."),
+    ] = None,
 ) -> None:
     """Preview and set an enabled backend for new threads using this agent."""
     settings = load_settings()
@@ -709,6 +714,7 @@ def agents_backend_set_command(
                 selector=ctx.obj,
                 accept_drops=accept_drops,
                 dry_run=dry_run,
+                model=model,
             )
 
     run_cli(work(), console=console)
@@ -783,6 +789,7 @@ async def agents_backend_change(
     accept_drops: str | None = None,
     dry_run: bool = False,
     revert: bool = False,
+    model: str | None = None,
 ) -> None:
     from mux.contracts.config import BackendConfig
 
@@ -792,6 +799,15 @@ async def agents_backend_change(
         target = BackendConfig.model_validate({"backend": backend}).backend
     except ValidationError as exc:
         raise typer.BadParameter("Choose a backend supported by this deployment.") from exc
+    if model is not None:
+        if revert or target is None:
+            raise typer.BadParameter(
+                "--model applies to set with a backend; clear and revert take none."
+            )
+        if model not in selectable_models(target):
+            raise typer.BadParameter(
+                f"--model must be one of: {', '.join(selectable_models(target)) or 'none here'}."
+            )
     if as_json and not yes and not dry_run:
         raise typer.BadParameter("Use --yes with --json after reviewing the backend preview.")
     async with rt.sessionmaker.begin() as session:
@@ -848,15 +864,21 @@ async def agents_backend_change(
         if current_revision is None:
             raise channel_backend.AgentBackendRefused("no_previous_revision")
         target = None
+        model = None
         if current_revision.previous_local is not None:
             previous = await service.revision(agent, current_revision.previous_local)
             if previous is None:
                 raise channel_backend.AgentBackendRefused("no_previous_revision")
-            target = previous.backend
-    preview = await service.preview(agent, target)
+            # Revert restores the previous model too; its preview must say so.
+            target, model = previous.backend, previous.model
+    preview = await service.preview(agent, target, model)
     preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
     if not as_json:
-        console.print(f"Model backend: {preview.target_backend}", markup=False)
+        console.print(
+            f"Model backend: {preview.target_backend}"
+            + (f" ({preview.target_model})" if preview.target_model else ""),
+            markup=False,
+        )
         for label, items in (
             ("Unsupported skills", preview.unsupported_skills),
             ("Unsupported MCPs", preview.unsupported_mcps),
@@ -925,6 +947,7 @@ async def agents_backend_change(
             preview.setting_revision,
             actor,
             expected_preview_digest=preview.digest,
+            model=preview.target_model,
             **({"accepted_drops": accepted} if accepted is not None else {}),
         )
     if as_json:
@@ -933,6 +956,7 @@ async def agents_backend_change(
                 {
                     "agent": name,
                     "backend": revision.backend,
+                    "model": revision.model,
                     "revision": revision.local,
                     "preview": json.loads(preview_json),
                 }

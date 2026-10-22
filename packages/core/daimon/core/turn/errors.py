@@ -23,6 +23,9 @@ AdmissionDenialReason = Literal[
     "writers_none",
     "runs_elsewhere",
     "own_agents_only",
+    # The requester is from another organisation: Daimon answers them only in the
+    # channel they share, never in a private conversation.
+    "client_requester",
     # The channel's backend configuration (`daimon.core.channel_backend`) names
     # a profile that cannot meet it, or one this release cannot run yet.
     "backend_unsupported",

@@ -40,6 +40,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_sessions import create_thread_session, get_live_thread_session
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnQueue
 from daimon.testing import build_turn_router
 from daimon.testing.db import build_test_engine
@@ -195,6 +196,7 @@ async def _setup(
     )
     admission = await admit(
         deps,
+        requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform=platform,
         external_user_id="42",
@@ -1110,6 +1112,7 @@ async def test_dm_from_a_sealed_source_is_refused_before_any_dm_exists(
         )
     admission = await admit(
         deps,
+        requester_org=RequesterOrg.HOST,
         tenant_id=tenant.id,
         platform="discord",
         external_user_id="42",
