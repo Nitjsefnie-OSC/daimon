@@ -1111,6 +1111,10 @@ def default_worker_limits(
     if budget_usd is None:
         if run is None:
             raise WorkerSpecRefused("budget", "unbound")
+        from daimon.core.fleet import holds_slot
+
+        # Spawns refused at admission free their slot and hold no money.
+        workers = tuple(worker for worker in workers if holds_slot(worker))
         slots = run.max_workers - len(workers)
         if slots <= 0:
             raise WorkerSpecRefused("budget", "exhausted")

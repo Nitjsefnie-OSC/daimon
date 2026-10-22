@@ -19,7 +19,7 @@ import structlog
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.adapters.discord.views import finish_control
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.fleet import TERMINAL, FleetRun, FleetWorker
+from daimon.core.fleet import TERMINAL, FleetRun, FleetWorker, holds_slot
 from daimon.core.fleet_orchestration import Control, FleetOrchestrator, FleetRefused
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerPermissions, WorkerSpecRefused
@@ -77,7 +77,8 @@ def build_fleet_view(
     if (
         run.platform != "discord"
         or len({worker.id for worker in workers}) != len(workers)
-        or len(workers) > run.max_workers
+        or len(workers) > 2 * run.max_workers
+        or sum(1 for worker in workers if holds_slot(worker)) > run.max_workers
         or any(worker.run_id != run.id or worker.tenant_id != run.tenant_id for worker in workers)
     ):
         raise FleetRefused("foreign_worker")

@@ -204,6 +204,23 @@ def result_source_key(worker_id: uuid.UUID) -> str:
     return f"fleet:{worker_id}:result"
 
 
+def holds_slot(worker: FleetWorker) -> bool:
+    """Whether a worker counts against its run's `max_workers`.
+
+    A cancelled worker that never bound, ran, held money or produced a result (a
+    spawn refused at admission) frees its slot; its row stays as evidence. The
+    store also keeps any worker with a claim stamp, which this view cannot see.
+    """
+    return not (
+        worker.status == "cancelled"
+        and worker.binding_id is None
+        and worker.attempts == 0
+        and worker.turns_used == 0
+        and worker.reserved_usd == 0
+        and worker.result is None
+    )
+
+
 def run_settled(run: FleetRun, workers: Sequence[FleetWorker]) -> bool:
     """Whether the orchestrator should be woken: every worker done, or its quorum."""
     done = sum(1 for worker in workers if worker.status in TERMINAL)

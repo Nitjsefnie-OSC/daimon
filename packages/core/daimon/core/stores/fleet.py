@@ -38,6 +38,7 @@ from daimon.core.fleet import (
     RunStatus,
     WorkerStatus,
     check_result,
+    holds_slot,
     worker_slot,
 )
 from daimon.core.stores import mux_state, read_persisted_columns, task_continuations, tenant_ledger
@@ -236,8 +237,10 @@ async def add_worker(
 ) -> FleetWorker:
     """A pending worker at `ordinal`, or the same one again; any other input there conflicts.
 
-    The run must be running, the ordinal below its `max_workers`, and the worker's
-    deadline no later than the run's.
+    The run must be running, fewer than `max_workers` of its workers may hold a slot
+    (a spawn refused at admission frees its slot, see `holds_slot`), the ordinal is
+    below twice `max_workers` so refusals stay bounded, and the worker's deadline is
+    no later than the run's.
     """
     intent: dict[str, Any] = {
         "role": role,
@@ -274,7 +277,15 @@ async def add_worker(
             return _worker(existing)
         if run.status != "running":
             raise FleetConflict(f"run {run_id} is {run.status}")
-        if not 0 <= ordinal < run.max_workers:
+        if not 0 <= ordinal < 2 * run.max_workers:
+            raise FleetConflict(f"run {run_id} allows {run.max_workers} workers")
+        rows = (
+            await session.scalars(select(FleetWorkerRow).where(FleetWorkerRow.run_id == run_id))
+        ).all()
+        if (
+            sum(1 for other in rows if other.started_at is not None or holds_slot(_worker(other)))
+            >= run.max_workers
+        ):
             raise FleetConflict(f"run {run_id} allows {run.max_workers} workers")
         if deadline_at > run.deadline_at:
             raise FleetConflict("a worker's deadline cannot outlast its run")
