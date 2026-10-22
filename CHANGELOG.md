@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Configure an agent's fleet from chat: choose worker agents by name, worker and spending limits, and an expiry, then confirm the exact settings. Owners or admins can change the fleet; only admins can change the server's provider allowlist. Natural model names such as “opus 5.5” and “luna” work when configuring an agent's model. Edits preserve every omitted limit and the saved expiry; confirmation cards name removed caps. Ambiguous model-name typos ask for a choice.
+
 - Agent edits now reach an open self-hosted conversation at its next message: changed instructions, model, tools, skills or MCP servers apply on the same session, so workspace files stay. A turn already running finishes on its old configuration and its usage is metered at the model and tariff it used. Environment changes and archived agents still require a fresh session.
 
 - Anthropic backend configurations that require `steer`, `native_event_replay`, `environments_fork` or `native_schedules` are now refused at admission; the Anthropic driver never supported them. The self-hosted profile now declares native settlement over model-request usage (`native_requests`) instead of native totals; recorded self-hosted usage and billing are unchanged. A new CI test checks every capability a profile declares against its driver.

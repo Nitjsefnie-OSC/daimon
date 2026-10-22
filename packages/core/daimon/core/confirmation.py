@@ -31,6 +31,13 @@ from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
 from urllib.parse import unquote
 
+from daimon.core.fleet_configuration import (
+    ConfigurationReference,
+    complete_fleet_config,
+    configured_fleet_grant,
+    fleet_detail_lines,
+    provider_preview_digest,
+)
 from daimon.core.microsoft_write_paths import write_kind
 from daimon.core.tool_safety import (
     DAIMON_SERVER_NAME,
@@ -161,6 +168,9 @@ class ConfirmationPrompt(BaseModel):
     # Opt-in only: legacy prompts and their rendered cards stay unchanged.
     admin: bool = Field(default=False, exclude_if=lambda value: not value)
     backend_switch: BackendSwitchReference | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+    configuration: ConfigurationReference | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
     tool_rule: ToolRuleCardReference | None = Field(
@@ -360,6 +370,38 @@ def prompt_for_tool_call(
     denied_action: str
     consequence: str | None = None
     detail_lines: tuple[str, ...]
+    if (
+        call.tool_name in {"request_fleet_config", "request_provider_allowlist"}
+        and server == DAIMON_SERVER_NAME
+    ):
+        if call.tool_name == "request_fleet_config":
+            reference = ConfigurationReference.model_validate(
+                {
+                    "operation": "fleet_revoke" if data.get("revoke") else "fleet_set",
+                    "agent_name": data.get("agent_name"),
+                    "config": data.get("config"),
+                    "expected_revision": data.get("expected_revision"),
+                    "preview_digest": data.get("preview_digest"),
+                }
+            )
+        else:
+            reference = ConfigurationReference.model_validate(
+                {
+                    "operation": "provider_allowlist",
+                    "providers": data.get("providers"),
+                    "expected_revision": data.get("expected_revision"),
+                    "preview_digest": data.get("preview_digest"),
+                }
+            )
+        return ConfirmationPrompt(
+            title="Change fleet settings?"
+            if call.tool_name == "request_fleet_config"
+            else "Change allowed providers?",
+            requester_platform_user_id=requester_platform_user_id,
+            expires_at=now + timeout,
+            admin=True,
+            configuration=reference,
+        )
     if call.tool_name == "request_agent_backend_switch" and server == DAIMON_SERVER_NAME:
         reference = BackendSwitchReference.model_validate(
             {
@@ -616,7 +658,116 @@ def backend_switch_callbacks(
             raise ValueError("This permission changed. Preview and confirm again.")
         return agent, preview
 
+    async def verified_configuration(
+        prompt: ConfirmationPrompt, clicker: str
+    ) -> tuple[str, tuple[str, ...]]:
+        from daimon.core.channel_backend import AgentBackendRefused, BackendActor
+
+        reference = prompt.configuration
+        if not prompt.admin or reference is None or clicker != prompt.requester_platform_user_id:
+            raise ValueError("This confirmation is unavailable. Preview again.")
+        async with sessionmaker() as session:
+            identity = await get_account_with_tenant(session, account_id=account_id)
+        if (
+            identity is None
+            or identity.tenant_id != tenant_id
+            or identity.platform_user_id != clicker
+        ):
+            raise ValueError("This confirmation is unavailable. Preview again.")
+        subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
+        if reference.operation == "provider_allowlist" and not subject.is_admin:
+            raise ValueError("This change needs a current workspace admin.")
+        actor = BackendActor(tenant_id=tenant_id, account_id=account_id, subject=subject)
+        try:
+            if reference.operation == "provider_allowlist":
+                assert reference.providers is not None
+                policy = await service.tenant_policy(tenant_id)
+                if (
+                    policy.revision != reference.expected_revision
+                    or provider_preview_digest(policy, reference.providers)
+                    != reference.preview_digest
+                ):
+                    raise ValueError("This preview changed. Preview and confirm again.")
+                await service.set_tenant_allowlist(
+                    tenant_id, reference.providers, policy.revision, actor, dry_run=True
+                )
+                action = "Change allowed providers"
+                details = (
+                    "Allowed providers: " + (", ".join(reference.providers) or "none"),
+                    "Applies to this server. Provider keys do not enable providers automatically.",
+                )
+            else:
+                assert reference.agent_name is not None
+                agent = await load_backend_agent(
+                    anthropic,
+                    sessionmaker,
+                    tenant_id=tenant_id,
+                    agent_name=reference.agent_name,
+                    resource_host=resource_host,
+                )
+                if not await service.may_edit(agent, actor):
+                    raise ValueError("This change needs the agent's owner or a current admin.")
+                previous = await service.read_fleet_grant(
+                    tenant_id, agent.agent_id, now=datetime.now(prompt.expires_at.tzinfo)
+                )
+                complete = (
+                    await complete_fleet_config(
+                        reference.config, previous, anthropic, tenant_id=tenant_id
+                    )
+                    if reference.config
+                    else None
+                )
+                preview = await service.preview_fleet_grant(
+                    agent,
+                    await configured_fleet_grant(
+                        complete,
+                        service,
+                        anthropic,
+                        sessionmaker,
+                        agent,
+                        now=datetime.now(prompt.expires_at.tzinfo),
+                    )
+                    if complete
+                    else None,
+                    now=datetime.now(prompt.expires_at.tzinfo),
+                )
+                if (
+                    preview.setting_revision != reference.expected_revision
+                    or preview.digest != reference.preview_digest
+                ):
+                    raise ValueError("This preview changed. Preview and confirm again.")
+                action = (
+                    "Turn off fleet for "
+                    if reference.operation == "fleet_revoke"
+                    else "Configure fleet for "
+                ) + agent.name
+                details = fleet_detail_lines(
+                    preview,
+                    worker_names=complete.worker_agents if complete else None,
+                    previous=previous,
+                )
+        except AgentBackendRefused as exc:
+            raise ValueError("This preview changed. Preview and confirm again.") from exc
+        async with sessionmaker() as session:
+            current = await get_account_with_tenant(session, account_id=account_id)
+        if current != identity:
+            raise ValueError("This permission changed. Preview and confirm again.")
+        return action, details
+
     async def prepare(prompt: ConfirmationPrompt) -> ConfirmationPrompt:
+        if prompt.configuration is not None:
+            action, details = await verified_configuration(
+                prompt, prompt.requester_platform_user_id
+            )
+            return prompt.model_copy(
+                update={
+                    "title": action + "?",
+                    "action": action,
+                    "denied_action": "Settings unchanged",
+                    "detail_lines": details,
+                    "consequence": "\n".join(details),
+                }
+            )
         agent, preview = await verified(prompt, prompt.requester_platform_user_id)
         details = (
             *(
@@ -664,7 +815,10 @@ def backend_switch_callbacks(
 
     async def check(prompt: ConfirmationPrompt, clicker: str) -> str | None:
         try:
-            await verified(prompt, clicker)
+            if prompt.configuration is not None:
+                await verified_configuration(prompt, clicker)
+            else:
+                await verified(prompt, clicker)
         except ValueError:
             return "This preview or your permission changed. Preview and confirm again."
         return None

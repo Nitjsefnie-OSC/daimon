@@ -1,0 +1,153 @@
+"""Natural model names over the priced, runnable agent catalog; no authority writes."""
+
+from __future__ import annotations
+
+import difflib
+import re
+from collections.abc import Sequence
+from dataclasses import dataclass
+
+from daimon.core.pricing import AGENT_MODEL_PRICING, provider_prices
+from mux.contracts.ids import PROVIDERS, ModelRef
+from mux.profiles import (
+    MANAGED_AGENTS,
+    PROFILES,
+    backend_selection,
+    runnable_selection,
+    selectable_models,
+)
+
+
+def model_name(model: ModelRef) -> str:
+    return (
+        model.id.replace("claude-", "Claude ")
+        .replace("gemini-", "Gemini ")
+        .replace("gpt-", "GPT ")
+        .replace("-", " ")
+    )
+
+
+@dataclass(frozen=True)
+class AgentModel:
+    model: ModelRef
+    price: str
+
+
+def agent_catalog() -> tuple[AgentModel, ...]:
+    """Derive availability from runtime selection AND current prices, including B2 additions."""
+    entries = [
+        AgentModel(
+            ModelRef(provider=MANAGED_AGENTS.provider, id=name),
+            f"~${rates.input:g} input / ${rates.output:g} output per million tokens",
+        )
+        for name, rates in AGENT_MODEL_PRICING.items()
+        if not name.endswith("-fast")
+    ]
+    for provider in PROVIDERS:
+        if provider == MANAGED_AGENTS.provider or not any(
+            profile.provider == provider for profile in PROFILES.values()
+        ):
+            continue
+        selection = backend_selection(provider)
+        for (_, name), rates in provider_prices(selection.profile).items():
+            candidate = selection.model_copy(update={"model": name})
+            if runnable_selection(candidate) and name in selectable_models(provider):
+                entries.append(
+                    AgentModel(
+                        ModelRef(provider=provider, id=name),
+                        f"~${rates.input} input / ${rates.output} output per million tokens",
+                    )
+                )
+    return tuple(entries)
+
+
+def _key(value: str) -> str:
+    return " ".join(re.findall(r"[a-z]+|\d+", value.casefold()))
+
+
+def _aliases(model: ModelRef) -> set[str]:
+    name = _key(model.id)
+    family = " ".join(
+        token
+        for token in name.split()
+        if not token.isdigit() and token not in {"claude", model.provider, "gpt"}
+    )
+    return {
+        name,
+        family,
+        " ".join(token for token in name.split() if not token.isdigit()),
+        name.removeprefix("claude ").removeprefix(model.provider + " ").removeprefix("gpt "),
+    }
+
+
+def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) -> ModelRef:
+    """Resolve names, preserving ambiguity; never silently choose a different provider."""
+    models = (
+        tuple(entry.model for entry in agent_catalog()) if available is None else tuple(available)
+    )
+    key = _key(value)
+    exact = [model for model in models if key in _aliases(model)]
+    if len(exact) == 1:
+        return exact[0]
+    tokens = set(key.split())
+    matches = exact or [
+        model for model in models if tokens and tokens <= set(_key(model.id).split())
+    ]
+    # Family shorthand means the latest catalog version within that one family.
+    family = tokens - ({profile.provider for profile in PROFILES.values()} | {"claude", "gpt"})
+    if len(matches) > 1 and family in (
+        {"opus"},
+        {"sonnet"},
+        {"haiku"},
+        {"flash"},
+        {"flash", "lite"},
+    ):
+        if "lite" not in family:
+            matches = [model for model in matches if "lite" not in _key(model.id).split()]
+        if matches:
+            return max(matches, key=lambda model: tuple(map(int, re.findall(r"\d+", model.id))))
+    if not matches:
+        # A family alias may name several releases. Keep all of them; a
+        # spelling error must never select the last (possibly pricier) row.
+        aliases: dict[str, list[ModelRef]] = {}
+        for model in models:
+            for alias in _aliases(model):
+                aliases.setdefault(alias, []).append(model)
+        numeric = re.findall(r"\d+", key)
+        eligible = sorted(alias for alias in aliases if re.findall(r"\d+", alias) == numeric)
+        close = difflib.get_close_matches(key, eligible, n=max(1, len(eligible)), cutoff=0.85)
+        matches = list(
+            {
+                (model.provider, model.id): model for alias in close for model in aliases[alias]
+            }.values()
+        )
+        matches.sort(key=lambda model: (model.provider, model.id))
+    if len(matches) == 1:
+        return matches[0]
+    if matches:
+        raise ValueError(
+            f'"{value}" could mean '
+            + ", ".join(model_name(model) for model in matches)
+            + ". Choose a model by name."
+        )
+    known = {"astra", "argon", "sol", "gemini 4", "gemini 4 argon"}
+    explanation = (
+        "isn't available for agents here yet"
+        if key in known
+        else "isn't a known available agent model"
+    )
+    raise ValueError(f'"{value}" {explanation}. Ask which models are available for this agent.')
+
+
+def resolve_models(value: str) -> tuple[ModelRef, ...]:
+    """Accept a list or common requests such as '3 workers: sonnet, luna, flash'."""
+    value = re.sub(r"^\s*(?:use|compare with)\s+|^\s*\d+\s+workers?\s*:\s*", "", value, flags=re.I)
+    parts = re.split(r"\s*,\s*|\s+and\s+", value, flags=re.I)
+    return tuple(
+        {
+            (model.provider, model.id): model
+            for part in parts
+            if part.strip()
+            for model in (resolve_model(part.strip()),)
+        }.values()
+    )

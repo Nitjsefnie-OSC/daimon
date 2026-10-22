@@ -448,6 +448,24 @@ def _reject_unknown_model(model: ModelSelection) -> None:
         raise ToolError(f"Model '{choice_id}' is not available. Choose one of: {allowed}")
 
 
+def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
+    """Native agent edits share the alias resolver without changing model controls."""
+    choice = model_choice_id(model)
+    if choice in ALLOWED_MODEL_IDS or choice.startswith("claude-"):
+        return model
+    from daimon.core.agent_model_names import agent_catalog, resolve_model
+    from mux.profiles import MANAGED_AGENTS
+
+    choices = tuple(
+        entry.model for entry in agent_catalog() if entry.model.provider == MANAGED_AGENTS.provider
+    )
+    try:
+        resolved = resolve_model(choice, available=choices).id
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+    return resolved if isinstance(model, str) else {**model, "id": resolved}
+
+
 def _build_create_spec(
     *,
     name: str,
@@ -468,6 +486,7 @@ def _build_create_spec(
     ``mcp_toolset``) is reshaped into a readable ``ToolError`` rather than leaking
     raw validator output.
     """
+    model = _resolve_native_agent_model(model)
     _reject_unknown_model(model)
     try:
         return AgentSpec(
@@ -634,6 +653,7 @@ async def _update_agent_impl(
     origin_context_id: str | None = None,
 ) -> AgentInfo:
     if model is not None:
+        model = _resolve_native_agent_model(model)
         _reject_unknown_model(model)
     scalars: dict[str, Any] = {"model": model, "description": description, "system": system}
     list_fields = (tools, mcp_servers, skills)
@@ -1061,6 +1081,18 @@ async def _capture_backend_source(
     )
 
 
+def _resolve_agent_model(backend: Provider | None, model: str | None) -> str | None:
+    if model is None or backend is None or model in selectable_models(backend):
+        return model
+    from daimon.core.agent_model_names import agent_catalog, resolve_model
+
+    candidates = tuple(entry.model for entry in agent_catalog() if entry.model.provider == backend)
+    try:
+        return resolve_model(model, available=candidates).id
+    except ValueError as exc:
+        raise ToolError(str(exc)) from exc
+
+
 def _require_selectable_model(backend: Provider | None, model: str | None) -> None:
     """Name the models on offer instead of a generic refusal for an unknown one."""
     if model is None:
@@ -1095,6 +1127,7 @@ async def _set_agent_backend_impl(
     preview_only: bool = False,
     model: str | None = None,
 ) -> dict[str, JsonValue]:
+    model = _resolve_agent_model(backend, model)
     _require_selectable_model(backend, model)
     if auth.agent_id is not None:
         raise ToolError("An agent key cannot change the model provider.")
@@ -1220,6 +1253,7 @@ async def _request_agent_backend_switch_impl(
     thread_mode: ThreadMode | None = None,
     required_capabilities: tuple[Capability, ...] | None = None,
 ) -> AgentBackendSwitchInfo:
+    model = _resolve_agent_model(target_backend, model)
     _require_selectable_model(target_backend, model)
     if auth.agent_id is not None or auth.platform_user_id is None:
         raise ToolError("Request this change from your active chat conversation.")
@@ -1594,6 +1628,9 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
     from daimon.core.channel_backend import backend_selection_enabled
 
     if backend_selection_enabled(runtime.settings.turn):
+        from daimon.adapters.mcp.tools.fleet_config import register_fleet_config_tools
+
+        register_fleet_config_tools(mcp, runtime)
 
         @mcp.tool
         async def request_agent_backend_switch(  # pyright: ignore[reportUnusedFunction]
@@ -1612,9 +1649,13 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
 
             Use when an admin or the agent's owner asks to switch it to Anthropic, OpenAI
             or Gemini,
-            optionally naming a model: "switch agent to gemini-4-argon". ``model`` is one
-            of the returned ``models`` (Gemini: gemini-3.8-flash or gemini-4-argon); omit
-            it for the provider's default. The switch applies to
+            optionally naming a model naturally: "switch Researcher to argon" or
+            "switch Researcher to luna". For an Anthropic model change such as
+            "set Writer to opus 5.5", use update_agent with that natural model name.
+            ``model`` accepts natural names or one of
+            the returned ``models``; omit it for the provider's default. Never ask
+            the person for a model id. Ambiguous names return the choices.
+            The switch applies to
             new conversations wherever the agent answers; switching the default agent
             applies to every channel on this server. For "fork agent to gemini", copy the
             agent with fork_agent, then switch the copy; say plainly that the copy isn't
