@@ -244,7 +244,7 @@ from daimon.core.turn_origin import (
 )
 from daimon.core.turn_queue import TurnQueue
 from mux.contracts.ids import Scope
-from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
 from mux.profiles import get_profile
 from pydantic import SecretStr
 from sqlalchemy.exc import SQLAlchemyError
@@ -3588,7 +3588,13 @@ class DaimonBot(commands.Bot):
             _capture_turn_error(
                 exc.__cause__ or exc, rid=rid, tenant_id=tenant_id, guild_id=guild_id
             )
-        except (DaimonError, _anthropic.APIError, discord.HTTPException, SQLAlchemyError) as exc:
+        except (
+            DaimonError,
+            _anthropic.APIError,
+            ProviderError,
+            discord.HTTPException,
+            SQLAlchemyError,
+        ) as exc:
             log_anthropic_overload(
                 exc,
                 tenant_id=tenant_id,
