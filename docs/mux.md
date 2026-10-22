@@ -1436,11 +1436,16 @@ read. This is the one hard scope boundary the matcher preserves exactly: a
 row's resources can never serve a tenant other than the one it names, no
 matter how many other fields are wildcarded. Selection tries an exact match
 on every field first (unchanged from the schema above); only when no row
-matches exactly does it retry allowing `"*"` rows on those three fields, and
-the existing "exactly one candidate or refuse" rule still applies to each
-pass — an operator mixing one wildcard default with one or more narrower,
-exact rows gets the narrower row for the channels it names and the default
-for everything else, never an ambiguous refusal between them. `daimon openai
+matches exactly does it retry allowing `"*"` rows on those three fields.
+In that retry a row wins when the fields it names exactly strictly include
+every other matching row's, so a channel's own row with `"*"` accounts beats
+a deployment-wide default. Rows naming different fields (one channel's row
+and one account's row) refuse as ambiguous, as do equally specific rows.
+An operator mixing one wildcard default with narrower rows gets the narrower
+row for the channels it names and the default for everything else. A
+narrower row whose `config_digest` or `configuration_grant` doesn't match the
+channel's configuration doesn't match at all, so that channel falls back to
+the default. `daimon openai
 init` (see `docs/self-hosting.md`'s "Self-host on OpenAI") provisions the
 agent and environment and writes this row; it defaults to the wildcard form.
 

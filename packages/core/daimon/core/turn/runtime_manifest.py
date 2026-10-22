@@ -2634,6 +2634,25 @@ def _matching_rows(
     ]
 
 
+def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
+    """The one matching row strictly narrower than every other, else all of them.
+
+    A row is narrower when the scope fields it names exactly are a strict
+    superset of another's: a channel's own row with `"*"` accounts beats a
+    deployment-wide default. Rows naming different fields (a channel's row
+    and an account's row) are incomparable and all remain, so they refuse
+    as ambiguous instead of one silently shadowing the other's credentials.
+    """
+
+    def exact(row: dict[str, JsonValue]) -> frozenset[str]:
+        return frozenset(field for field in _WILDCARDABLE_FIELDS if row.get(field) != _WILDCARD)
+
+    for candidate in rows:
+        if all(exact(other) < exact(candidate) for other in rows if other is not candidate):
+            return [candidate]
+    return rows
+
+
 def select_runtime_manifest[Plan: CounterpartPlan](
     request: ProviderPreparationRequest, plan_type: type[Plan]
 ) -> Plan:
@@ -2642,8 +2661,11 @@ def select_runtime_manifest[Plan: CounterpartPlan](
     A deployment-wide default is one row with `_WILDCARD` ("*") on `platform`,
     `channel_id` and/or `account_id` — never on `tenant_id` or `profile`. An
     exact match always wins over a wildcard row (computed first, tried first);
-    wildcard rows are only consulted when no exact row matches, and the
-    existing "exactly one candidate or refuse" rule is unchanged for each pass.
+    wildcard rows are only consulted when no exact row matches. Among those,
+    a row whose exactly named scope fields strictly include every other
+    candidate's wins (a channel's own row, even with `"*"` accounts, beats a
+    deployment-wide default); otherwise the existing "exactly one candidate
+    or refuse" rule refuses them as ambiguous.
     The resolved plan always carries the request's real platform/channel_id/
     account_id — a wildcard row is a template, never a literal "*" identity.
     """
@@ -2662,7 +2684,7 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         rows = _ROWS.validate_json(raw)
         selected = _matching_rows(rows, revision, request, allow_wildcard=False)
         if not selected:
-            selected = _matching_rows(rows, revision, request, allow_wildcard=True)
+            selected = _most_specific(_matching_rows(rows, revision, request, allow_wildcard=True))
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")
         resolved = dict(selected[0])
