@@ -425,10 +425,22 @@ class FleetOrchestrator:
         ):
             markup = getattr(self._ports, "markup", None)
             markup = markup if isinstance(markup, Decimal) else Decimal(1)
+            # The agent the worker runs as: its pinned rows apply, others' don't.
+            source_id, source_version = parent.agent_id, None
+            if resolved.source_agent is not None:
+                from daimon.core.ma_identity import derive_agent_uuid
+
+                ref, version = resolved.source_agent
+                source_id = derive_agent_uuid(
+                    tenant_id=uuid.UUID(parent.fleet.scope.tenant_id), ma_agent_id=ref.id
+                )
+                source_version = version.local
             hold = manifest_hold_usd(
                 ConfigRevision.create(parent.fleet.root.channel, 1, resolved.backend),
                 tenant_id=parent.fleet.scope.tenant_id,
                 account_id=parent.fleet.scope.account_id,
+                source_agent_id=str(source_id) if source_id is not None else None,
+                source_agent_version=source_version,
             )
             tokens = bounded_gemini_worker_tokens(
                 system,

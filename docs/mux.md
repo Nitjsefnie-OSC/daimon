@@ -2326,9 +2326,15 @@ any channel: identity comes from the worker request's own admitted source
 agent (the agent the worker runs as), never from the row. `tenant_id` and
 `profile` stay exact, the configuration grant bounds the models, and the
 per-request checks are unchanged (tenant, caller and session account, the
-root's thread and run). A row pins both source fields or neither. An exact row
-pinned to a channel still wins there, and fixed channel plans never serve a
-worker. Workers still publish their per-run counterpart from the resolved
+root's thread and run). A row pins both source fields or neither, and `"*"`
+source pins are refused on any row that is not a worker row. A row pinned to a
+source agent serves only that agent at that version: another agent's worker,
+or the same agent after an edit, falls through to the template. A pinned row
+still wins over the template in its channel. Selection partitions rows by turn
+kind: a root turn considers root templates and pinned rows, a worker considers
+worker rows and pinned rows, and a channel's turn considers only fixed plans.
+So a root template and a worker template coexist in one tenant, and the
+manifest hold a fleet worker is sized for follows the same rule. Workers still publish their per-run counterpart from the resolved
 worker spec, as before.
 
 ### Output delivery pagination

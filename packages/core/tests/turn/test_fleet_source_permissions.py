@@ -1504,8 +1504,14 @@ def test_manifest_hold_is_the_row_runtime_selection_would_pick(tmp_path, monkeyp
     path = tmp_path / "runtime.json"
     monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
 
-    def hold(channel_id, account_id="acct"):
-        return manifest_hold_usd(revision(channel_id), tenant_id="tenant", account_id=account_id)
+    def hold(channel_id, account_id="acct", source="00000000-0000-0000-0000-0000000000f1"):
+        return manifest_hold_usd(
+            revision(channel_id),
+            tenant_id="tenant",
+            account_id=account_id,
+            source_agent_id=source,
+            source_agent_version=1,
+        )
 
     path.write_text(
         json.dumps(
@@ -1526,9 +1532,13 @@ def test_manifest_hold_is_the_row_runtime_selection_would_pick(tmp_path, monkeyp
     )
     assert hold("fleet-test") == Decimal("0.49")
     assert hold("elsewhere") == Decimal("0.25")
+    # Another agent's worker in #fleet-test gets the template, not the pinned row.
+    assert hold("fleet-test", source="00000000-0000-0000-0000-0000000000f2") == Decimal("0.25")
     path.write_text(json.dumps([row(), row(platform="*", channel_id="*", hold_usd="0.25")]))
     assert hold("fleet-test") == Decimal("0.49")
     assert hold("elsewhere") == Decimal("0.25")
+    # A "*" row pinned to the same agent serves only that agent.
+    assert hold("elsewhere", source="00000000-0000-0000-0000-0000000000f2") is None
     # Two rows naming different fields are ambiguous: selection refuses, so no hold.
     path.write_text(json.dumps([row(), row(channel_id="*", account_id="acct", hold_usd="0.10")]))
     assert hold("fleet-test") is None
@@ -1576,8 +1586,9 @@ async def test_fleet_r9_plain_gemini_spawn_admits_the_derived_envelope_end_to_en
                         "requires": {},
                     },
                     "hold_usd": "0.12",
-                    "source_agent_id": "00000000-0000-0000-0000-0000000000f1",
-                    "source_agent_version": 1,
+                    # A worker template: it holds for whichever agent the worker runs as.
+                    "source_agent_id": "*",
+                    "source_agent_version": "*",
                     "worker_materialization": True,
                 }
             ]

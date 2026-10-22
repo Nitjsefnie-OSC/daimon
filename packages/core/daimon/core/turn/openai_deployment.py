@@ -36,6 +36,7 @@ from daimon.core.turn.runtime_manifest import (
     read_counterpart,
     represented_source,
     select_runtime_manifest,
+    template_source,
     validate_counterpart_pins,
     validate_counterpart_request,
 )
@@ -54,7 +55,6 @@ from pydantic import (
     JsonValue,
     TypeAdapter,
     ValidationError,
-    field_validator,
     model_validator,
 )
 
@@ -95,12 +95,11 @@ class OpenAIDeployment(BaseModel):
     source_capabilities: SourceCapabilities | None = None
     mcp_credential_file: Path | None = Field(default=None, repr=False)
 
-    @field_validator("source_agent_id", "source_agent_version", mode="before")
+    @model_validator(mode="before")
     @classmethod
-    def _any_source(cls, value: object) -> object:
-        # "*" (any granted agent of the tenant, at its live version) is a template:
-        # the same as naming no source.
-        return None if value == "*" else value
+    def _any_source(cls, data: object) -> object:
+        # "*" (any granted agent of the tenant, at its live version): a worker template.
+        return template_source(data)
 
     @model_validator(mode="after")
     def _configuration_authorization(self) -> OpenAIDeployment:

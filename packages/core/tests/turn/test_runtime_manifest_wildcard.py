@@ -5,6 +5,7 @@ tenant without ever letting `tenant_id` or `profile` itself wildcard — see
 from __future__ import annotations
 
 import json
+from decimal import Decimal
 from pathlib import Path
 from types import SimpleNamespace
 
@@ -230,9 +231,14 @@ def test_wildcard_tenant_id_or_profile_refuses_at_startup_validation(
 def test_channel_and_agent_rows_serve_only_their_own_turn_origin(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
+    from uuid import UUID
+
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    tenant = UUID("00000000-0000-0000-0000-00000000000a")
     sourced = {
         **row(platform="*", channel_id="*", account_id="*", agent_id="agent-counterpart"),
-        "source_agent_id": "00000000-0000-0000-0000-000000000001",
+        "source_agent_id": str(derive_agent_uuid(tenant_id=tenant, ma_agent_id="agent_src")),
         "source_agent_version": 2,
         "counterpart_catalog_id": "catalog",
         "counterpart_catalog_revision": 1,
@@ -247,6 +253,8 @@ def test_channel_and_agent_rows_serve_only_their_own_turn_origin(
     )
     assert select_runtime_manifest(request, OpenAIDeployment).agent_id == "agent-fixed"
     request.admission.backend_revision_origin = "agent"
+    request.admission.agent = SimpleNamespace(id="agent_src", version=2)
+    request.tenant_id, request.worker = tenant, None
     assert select_runtime_manifest(request, OpenAIDeployment).agent_id == "agent-counterpart"
 
 
@@ -421,24 +429,132 @@ def test_a_worker_template_never_serves_another_tenant_or_a_channel_turn(
         select_runtime_manifest(channel_turn, GeminiPlan)
 
 
-def test_a_pinned_worker_row_still_wins_over_the_template_in_its_channel(
+def _source(native_agent):
+    from uuid import UUID
+
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    return str(derive_agent_uuid(tenant_id=UUID(TENANT_A), ma_agent_id=native_agent))
+
+
+def test_a_pinned_worker_row_serves_only_its_own_agent_and_version(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch
 ) -> None:
     from daimon.core.turn.gemini_deployment import GeminiPlan
+    from daimon.core.turn.runtime_manifest import validate_counterpart_request
 
+    channel = "1562712749321093122"
     pinned = _gemini_worker_row(
         TENANT_A,
         platform="discord",
-        channel_id="1562712749321093122",
-        source_agent_id="00000000-0000-0000-0000-0000000000f1",
+        channel_id=channel,
+        source_agent_id=_source("agent_a"),
         source_agent_version=1,
         agent_name="pinned",
     )
     write_manifest(tmp_path, monkeypatch, [_gemini_worker_row(TENANT_A), pinned])
-    _, here = _worker_request(TENANT_A, "1562712749321093122", "agent_root", 1)
-    assert select_runtime_manifest(here, GeminiPlan).agent_name == "pinned"
-    _, elsewhere = _worker_request(TENANT_A, "999000111", "agent_root", 1)
-    assert select_runtime_manifest(elsewhere, GeminiPlan).agent_name == "any-worker"
+    for here, native_agent, version, expected in (
+        (channel, "agent_a", 1, "pinned"),
+        # Another agent's worker in that channel falls through to the template.
+        (channel, "agent_b", 1, "any-worker"),
+        # So does the pinned agent once edited, and the pinned agent elsewhere.
+        (channel, "agent_a", 2, "any-worker"),
+        ("999000111", "agent_a", 1, "any-worker"),
+    ):
+        revision, request = _worker_request(TENANT_A, here, native_agent, version)
+        plan = select_runtime_manifest(request, GeminiPlan)
+        assert plan.agent_name == expected, (here, native_agent, version)
+        assert validate_counterpart_request(plan, request, worker_materialization=True) == revision
+
+
+def _gemini_root_template(tenant, **changes):
+    row = {
+        key: value
+        for key, value in _gemini_worker_row(tenant).items()
+        if key not in ("source_agent_id", "source_agent_version", "worker_materialization")
+    }
+    return (
+        row | {"root_materialization": True, "agent_name": "any-root", "hold_usd": "0.40"} | changes
+    )
+
+
+def test_root_and_worker_templates_coexist_in_one_tenant(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.turn.gemini_deployment import GeminiPlan
+    from daimon.core.turn.runtime_manifest import manifest_hold_usd
+
+    write_manifest(
+        tmp_path, monkeypatch, [_gemini_root_template(TENANT_A), _gemini_worker_row(TENANT_A)]
+    )
+    revision, worker = _worker_request(TENANT_A, "999000111", "agent_a", 3)
+    _, root = _worker_request(TENANT_A, "999000111", "agent_a", 3, worker=False)
+    assert select_runtime_manifest(root, GeminiPlan).agent_name == "any-root"
+    assert select_runtime_manifest(worker, GeminiPlan).agent_name == "any-worker"
+    account = worker.scope.account_id
+    assert manifest_hold_usd(revision, tenant_id=TENANT_A, account_id=account) == Decimal("0.25")
+
+
+def test_a_pinned_worker_hold_applies_only_to_its_agent(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from daimon.core.turn.runtime_manifest import manifest_hold_usd
+
+    channel = "1562712749321093122"
+    pinned = _gemini_worker_row(
+        TENANT_A,
+        platform="discord",
+        channel_id=channel,
+        source_agent_id=_source("agent_a"),
+        source_agent_version=1,
+        hold_usd="0.49",
+    )
+    write_manifest(tmp_path, monkeypatch, [_gemini_worker_row(TENANT_A), pinned])
+    revision, request = _worker_request(TENANT_A, channel, "agent_a", 1)
+
+    def hold(source, version=None):
+        return manifest_hold_usd(
+            revision,
+            tenant_id=TENANT_A,
+            account_id=request.scope.account_id,
+            source_agent_id=source,
+            source_agent_version=version,
+        )
+
+    assert hold(_source("agent_a"), 1) == Decimal("0.49")
+    assert hold(_source("agent_a")) == Decimal("0.49")
+    assert hold(_source("agent_b"), 1) == Decimal("0.25")
+    assert hold(None) == Decimal("0.25")
+
+
+@pytest.mark.parametrize("field", ["source_agent_id", "source_agent_version"])
+def test_any_source_is_only_a_worker_template(field) -> None:
+    from daimon.core.turn.gemini_deployment import GeminiPlan
+    from daimon.core.turn.openai_deployment import OpenAIDeployment
+    from pydantic import ValidationError
+
+    row = _gemini_root_template(TENANT_A)
+    with pytest.raises(ValidationError, match="only a worker template"):
+        GeminiPlan.model_validate(row | {field: "*"})
+    openai = {
+        "profile": "openai.conversation_only",
+        "tenant_id": TENANT_A,
+        "platform": "*",
+        "channel_id": "*",
+        "account_id": "*",
+        "configuration_grant": {
+            "profiles": ["openai.conversation_only"],
+            "models": ["gpt-6-luna"],
+            "thread_modes": ["per_caller"],
+            "requires": {},
+        },
+        "project": "p",
+        "agent_id": "a",
+        "api_key_env": "DAIMON_CHANNEL_OPENAI_KEY",
+        field: "*",
+    }
+    with pytest.raises(ValidationError, match="only a worker template"):
+        OpenAIDeployment.model_validate(openai)
 
 
 @pytest.mark.parametrize("half", [{"source_agent_id": None}, {"source_agent_version": None}])
