@@ -222,6 +222,7 @@ def _make_lifecycle(
     ma_agent_id: str | None = None,
     intent_id: uuid.UUID | None = None,
     requester_is_admin: bool = True,
+    requester_foreign: bool = False,
 ) -> tuple[SlackTurnLifecycle, asyncio.Event, dict[str, tuple[asyncio.Event, str]], list[str]]:
     """Create a SlackTurnLifecycle with recorder callables for registry operations.
 
@@ -251,6 +252,7 @@ def _make_lifecycle(
         cancel=cancel,
         author_id="U_AUTHOR",
         requester_is_admin=requester_is_admin,
+        requester_foreign=requester_foreign,
         agent_name=agent_name,
         model_id=model_id,
         register=register,
@@ -1234,6 +1236,25 @@ async def test_terminal_notice_shows_the_ref_to_admins_only(
     assert ("Ref UNDRID" in fallback) is admin
     if not admin:
         assert "Ref" not in rendered + fallback
+
+
+async def test_a_balance_notice_for_an_external_member_names_no_command_or_admin(
+    fake_slack_web_client: Any,
+) -> None:
+    """Someone from another workspace is sent to the people at the host workspace."""
+    lc, *_ = _make_lifecycle(
+        fake_slack_web_client, requester_is_admin=False, requester_foreign=True
+    )
+    await lc.post_initial()
+
+    await lc.on_terminal_failure(
+        TurnState(termination=TerminationReason.ADMISSION_BALANCE_DEPLETED), RuntimeError("x")
+    )
+
+    rendered = _block_text(_last_update_blocks(fake_slack_web_client))
+    assert "workspace that added Daimon" in rendered
+    for word in ("/billing", "/agent-setup", "an admin"):
+        assert word not in rendered
 
 
 async def test_a_lifecycle_defaults_to_no_ref_when_admin_status_is_unknown(

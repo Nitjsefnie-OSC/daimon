@@ -67,6 +67,7 @@ def _users_info_payload(*, is_admin: bool) -> dict[str, Any]:
         "user": {
             "id": _USER_ID,
             "name": "admin" if is_admin else "member",
+            "team_id": _TEAM_ID,
             "is_admin": is_admin,
             "is_owner": False,
             "is_primary_owner": False,

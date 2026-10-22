@@ -272,6 +272,7 @@ async def handle_credential_request_click(runtime: SlackRuntime, payload: dict[s
         runtime,
         client,
         tenant_id=row.tenant_id,
+        team_id=team_id,
         agent_id=row.agent_id,
         channel_id=channel_id,
         user_id=user_id,
