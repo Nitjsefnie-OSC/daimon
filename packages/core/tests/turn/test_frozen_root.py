@@ -520,6 +520,47 @@ async def test_real_run_retains_root_before_native_input(root_turn):
     assert any(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
 
 
+def with_login_tool(prepared):
+    """A source whose connected tool has its own stored login, as on internal-test (r13)."""
+    from mux.contracts.resources import ResourceBinding
+
+    login = "agent-mcp:internal-login"
+    source = prepared._source
+    return replace(
+        prepared,
+        _source=source.model_copy(
+            update={
+                "resource_requirements": (
+                    *source.resource_requirements,
+                    ResourceBinding(id=login, kind="credential", credential_ref=login),
+                )
+            }
+        ),
+    )
+
+
+async def test_an_agent_that_cant_run_a_fleet_still_answers_with_fleet_off(root_turn):
+    from daimon.core.neutral_resources import fleet_root_obstacle, fleet_root_obstacle_text
+    from daimon.core.turn.runtime_manifest import root_refusal
+
+    deps, prepared, grants, intent, origin, scope, binding, transport = root_turn
+    prepared = with_login_tool(prepared)
+    assert fleet_root_obstacle(prepared._source) == "credentials"
+    await run_root_input((deps, prepared, grants, intent, origin, scope, binding, transport))
+    # The turn reached the provider; no root or run was retained for it.
+    assert any(r.method == "POST" and r.path.endswith("/events") for r in transport.requests)
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+    with pytest.raises((WorkerSpecRefused, ScopeViolation)):
+        await read_frozen_root(deps, scope, origin_id=origin.id, now=datetime.now(UTC))
+    assert root_refusal(origin.id) == "credentials"
+    assert fleet_root_obstacle_text("credentials") == (
+        "This agent can't run a fleet yet: it uses a connected tool or repository "
+        "with its own login."
+    )
+    assert fleet_root_obstacle(root_turn[1]._source) is None  # the plain agent can
+
+
 async def test_fresh_channel_admission_reaches_root_freeze(root_turn):
     from daimon.core.authz import build_turn_place
 

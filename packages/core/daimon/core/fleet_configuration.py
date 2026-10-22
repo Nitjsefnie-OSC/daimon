@@ -436,6 +436,10 @@ def fleet_removal_lines(before: AgentFleetGrant | None, after: AgentFleetGrant) 
 
 
 def configuration_refusal(reason: str) -> str:
+    if reason.startswith("fleet_root_"):
+        from daimon.core.neutral_resources import fleet_root_obstacle_text
+
+        return fleet_root_obstacle_text(reason.removeprefix("fleet_root_"))
     return {
         "backend_not_allowed": (
             "That provider is not allowed here. Ask an admin to enable it "

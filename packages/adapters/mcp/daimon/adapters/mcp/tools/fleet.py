@@ -194,6 +194,14 @@ class HostFleetToolService:
                     drain=drain,
                 )
             except (WorkerSpecRefused, ScopeViolation):
+                from daimon.core.neutral_resources import fleet_root_obstacle_text
+                from daimon.core.turn.runtime_manifest import root_refusal
+
+                # The turn ran with fleet off because the agent's own setup can't
+                # become worker authority; say why instead of a closed code.
+                obstacle = root_refusal(origin.id)
+                if obstacle is not None:
+                    raise ToolError(fleet_root_obstacle_text(obstacle)) from None
                 raise ToolError("Fleet orchestration refused: root_unavailable.") from None
             parent = replace(parent, subject=mcp_subject(caller, is_admin=caller.is_admin))
         else:

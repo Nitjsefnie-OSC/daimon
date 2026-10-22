@@ -56,6 +56,7 @@ from packages.core.tests.turn.test_frozen_root import (
     completion_claim,
     run_root_input,
     wake_frame,
+    with_login_tool,
 )
 from packages.core.tests.turn.test_frozen_root import root_turn as root_turn
 
@@ -732,6 +733,47 @@ async def test_installed_bridge_requires_the_exact_active_origin(
         assert owner.mock_calls == []
         assert loads == (
             [(origin.id, RUN)] if fault in ("wrong_thread", "wrong_root_origin") else []
+        )
+
+
+async def test_fleet_tools_say_plainly_why_an_agent_cant_run_a_fleet(root_turn):
+    from daimon.core.turn_origin import turn_origin
+
+    deps, prepared, grants, intent, seed, scope, binding, transport = root_turn
+    prepared = with_login_tool(prepared)
+    async with turn_origin(
+        deps.sessionmaker,
+        tenant_id=seed.tenant_id,
+        account_id=seed.account_id,
+        platform="discord",
+        parent_channel_id=seed.parent_channel_id,
+        thread_id=seed.thread_id,
+        responder_ma_agent_id=prepared.admission.agent.id,
+        responder_name=prepared.admission.agent.name,
+        role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
+        keep_fleet_root=True,
+    ) as origin:
+        # The turn itself runs; only the fleet is off.
+        await run_root_input((deps, prepared, grants, intent, origin, scope, binding, transport))
+        ports = HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal(1), deps=deps)
+        bridge = HostFleetToolService(
+            FleetOrchestrator(ports),
+            runtime=replace(runtime(), session_factory=deps.sessionmaker, client=deps.anthropic),
+            deps=deps,
+        )
+        caller = replace(
+            AUTH,
+            tenant_id=origin.tenant_id,
+            account_id=origin.account_id,
+            chat_agent_id=prepared._source.agent_id,
+        )
+        with pytest.raises(ToolError) as refused:
+            await bridge.status(caller, run_id=None, origin_context_id=origin.id)
+        assert str(refused.value) == (
+            "This agent can't run a fleet yet: it uses a connected tool or repository "
+            "with its own login."
         )
 
 

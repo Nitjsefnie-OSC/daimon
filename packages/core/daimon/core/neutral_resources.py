@@ -1496,6 +1496,100 @@ def _with_root_model(
     return (*backends, selection), (*models, model)
 
 
+def _root_ceiling(
+    source: BackendAgent, *, account_id: str
+) -> tuple[AgentSpec, tuple[ResourceBinding, ...]]:
+    """The captured source's worker ceiling and the resources it carries, memory included."""
+    from daimon.core.memory_resource import memory_mount
+    from daimon.core.turn.runtime_manifest import worker_source_ceiling
+
+    actual = source.source
+    if actual is None or source.effective_spec is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    try:
+        ceiling = worker_source_ceiling(source)
+    except ValueError:
+        raise WorkerSpecRefused("tools", "unsupported") from None
+    # The complete capture remains the input to the existing obligation classifier.
+    assert ceiling.effective_spec is not None
+    resources = ceiling.resource_requirements
+    read_only = source.memory_read_only is not False
+    if source.memory_store_id is not None:
+        mount = cast(JsonValue, memory_mount(source.memory_store_id, read_only=read_only))
+        resources += (
+            ResourceBinding(
+                id=source.memory_store_id,
+                kind="native",
+                resource=actual.ref.model_copy(
+                    update={
+                        "kind": "memory_store",
+                        "id": source.memory_store_id,
+                        "account_id": account_id,
+                    }
+                ),
+                native=ExtensionConfig(
+                    namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
+                    version=1,
+                    value={"resource": mount},
+                ),
+            ),
+        )
+    return ceiling.effective_spec, resources
+
+
+#: Why an agent's own setup keeps it from running a fleet, in plain words.
+FLEET_ROOT_OBSTACLES: Mapping[str, str] = {
+    "credentials": "it uses a connected tool or repository with its own login",
+    "mcp": "it uses a connected tool that fleet workers can't reach",
+    "files": "it has stored secrets or files that fleet workers can't receive",
+    "repository": "it uses a repository with its own login",
+    "tools": "it has tools that ask before running, or that fleet workers can't use",
+    # A root's very first turn: its memory store is created by that turn's session.
+    "memory": "its memory is still being set up. Ask again and it can",
+}
+_FLEET_ROOT_OBSTACLE_DEFAULT = "its setup includes something fleet workers can't carry yet"
+
+
+def fleet_root_obstacle_text(obstacle: str) -> str:
+    """The sentence a person sees when an agent can't run a fleet."""
+    reason = FLEET_ROOT_OBSTACLES.get(obstacle, _FLEET_ROOT_OBSTACLE_DEFAULT)
+    return f"This agent can't run a fleet yet: {reason}."
+
+
+def fleet_root_obstacle(source: BackendAgent) -> str | None:
+    """What in an agent's own setup keeps its source from becoming fleet worker authority.
+
+    A projected capture's ceiling and resources, classified the way freezing the
+    root does. It checks a subset of what the freeze checks (no grant, origin or
+    backend facts), so a None here can still be refused at the turn; a value is
+    a definite obstacle. Returns an obligation name (see FLEET_ROOT_OBSTACLES).
+    """
+    from daimon.core.turn.runtime_manifest import classify_source_obligations
+
+    if source.resource_scope is None or source.environment is None:
+        return None
+    try:
+        spec, resources = _root_ceiling(source, account_id=source.resource_scope.account_id)
+    except WorkerSpecRefused as error:
+        return error.field
+    if any(tool.permission != "auto" for tool in spec.tools or ()):
+        return "tools"
+    missing = classify_source_obligations(
+        source,
+        spec,
+        environment=source.environment.spec,
+        resources=resources,
+        worker_ceiling=True,
+    )
+    if source.memory_store_id is None:
+        # An agent gets its memory store on its first session; that is no obstacle.
+        missing = missing - {"memory"}
+    for name in ("credentials", "mcp", "repository", "files", "tools"):
+        if name in missing:
+            return name
+    return sorted(missing)[0] if missing else None
+
+
 def fleet_root_permissions(
     source: BackendAgent,
     admission: AdmissionGrant,
@@ -1513,7 +1607,6 @@ def fleet_root_permissions(
     replaces those choices for an agent that runs as a worker: its own config
     decides its model, not the grant's model list.
     """
-    from daimon.core.memory_resource import memory_mount
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
     if now.utcoffset() is None:
@@ -1539,37 +1632,8 @@ def fleet_root_permissions(
         != (fleet.scope.tenant_id, fleet.scope.account_id)
     ):
         raise WorkerSpecRefused("origin", "unbound")
-    from daimon.core.turn.runtime_manifest import worker_source_ceiling
-
-    try:
-        ceiling = worker_source_ceiling(source)
-    except ValueError:
-        raise WorkerSpecRefused("tools", "unsupported") from None
-    # The complete capture remains the input to the existing obligation classifier.
-    assert ceiling.effective_spec is not None
-    spec = ceiling.effective_spec
-    resources = ceiling.resource_requirements
+    spec, resources = _root_ceiling(source, account_id=fleet.scope.account_id)
     read_only = source.memory_read_only is not False
-    if source.memory_store_id is not None:
-        mount = cast(JsonValue, memory_mount(source.memory_store_id, read_only=read_only))
-        resources += (
-            ResourceBinding(
-                id=source.memory_store_id,
-                kind="native",
-                resource=actual.ref.model_copy(
-                    update={
-                        "kind": "memory_store",
-                        "id": source.memory_store_id,
-                        "account_id": fleet.scope.account_id,
-                    }
-                ),
-                native=ExtensionConfig(
-                    namespace=f"{MANAGED_AGENTS.provider}.session_resource_create",
-                    version=1,
-                    value={"resource": mount},
-                ),
-            ),
-        )
     duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
     deadline = min(grant.expires_at, now + timedelta(seconds=duration))
     limits = grant.limits.model_copy(update={"deadline": deadline})

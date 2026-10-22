@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 from datetime import UTC, datetime
+from functools import partial
 
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
@@ -96,7 +97,16 @@ async def _request_fleet_config_impl(
     origin_context_id: str | None = None,
 ) -> FleetConfigInfo:
     await _require_chat(runtime, auth, origin_context_id, "request_fleet_config")
-    service = make_backend_service(runtime.session_factory, runtime.settings.turn)
+    from daimon.adapters.mcp.tools.agents import (
+        _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
+    )
+
+    # The source capture lets a new grant's preview refuse an agent that can't run a fleet.
+    service = make_backend_service(
+        runtime.session_factory,
+        runtime.settings.turn,
+        capture_source=partial(_capture_backend_source, runtime, auth, None),
+    )
     now = datetime.now(UTC)
     try:
         agent = await load_backend_agent(
@@ -163,7 +173,7 @@ async def _request_fleet_config_impl(
         frozen = (
             config.model_copy(update={"expires_at": value.expires_at}) if config and value else None
         )
-        preview = await service.preview_fleet_grant(agent, value, now=now)
+        preview = await service.preview_fleet_grant(agent, value, now=now, check_root=True)
         status = "preview"
         summary = (
             "Show these limits, then call request_fleet_config with this exact config, "

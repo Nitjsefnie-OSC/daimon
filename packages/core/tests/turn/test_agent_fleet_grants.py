@@ -20,6 +20,7 @@ from sqlalchemy import update
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
+from .test_fleet_source_permissions import captured as captured
 
 NOW = datetime(2026, 10, 13, 21, 0, tzinfo=UTC)
 
@@ -674,3 +675,47 @@ async def test_argon_fleet_grant_is_accepted_only_inside_its_price_window(owned,
     clock["now"] = datetime(2026, 11, 30, tzinfo=UTC)
     await set_grant(service, agent, actor, grant().model_copy(update={"choices": (argon,)}))
     assert await service.current(agent) is not None
+
+
+async def test_turning_fleet_on_refuses_an_agent_whose_setup_cant_run_one(captured, owned):
+    from daimon.core.channel_backend import AgentBackendService
+    from daimon.core.fleet_configuration import configuration_refusal
+    from mux.contracts.resources import ResourceBinding
+
+    source, _, value, _, _, _ = captured
+    _, _, _, sessions = owned
+    login = "agent-mcp:internal-login"
+    with_login = source.model_copy(
+        update={
+            "resource_requirements": (
+                *source.resource_requirements,
+                ResourceBinding(id=login, kind="credential", credential_ref=login),
+            )
+        }
+    )
+    captures = []
+
+    async def capture(agent):
+        captures.append(agent)
+        return with_login
+
+    from .test_fleet_source_permissions import NOW as now
+
+    service = AgentBackendService(sessions, enabled=True, capture_source=capture)
+    with pytest.raises(AgentBackendRefused) as refused:
+        await service.preview_fleet_grant(source, value, now=now, check_root=True)
+    assert refused.value.reason == "fleet_root_credentials"
+    assert configuration_refusal(refused.value.reason) == (
+        "This agent can't run a fleet yet: it uses a connected tool or repository "
+        "with its own login."
+    )
+    # Showing or revoking never captures; an agent that can run a fleet previews.
+    await service.preview_fleet_grant(source, value, now=now)
+    await service.preview_fleet_grant(source, None, now=now, check_root=True)
+    assert captures == [source]
+
+    async def plain(agent):
+        return source
+
+    fine = AgentBackendService(sessions, enabled=True, capture_source=plain)
+    await fine.preview_fleet_grant(source, value, now=now, check_root=True)

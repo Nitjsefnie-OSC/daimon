@@ -6,6 +6,7 @@ import asyncio
 import hashlib
 import json
 import os
+from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import replace
 from datetime import datetime
@@ -587,6 +588,24 @@ async def _reserve_root(
     return record
 
 
+#: Why the latest turns couldn't retain a fleet root, by origin. In-process and
+#: bounded: another replica, or a restart, falls back to the generic refusal.
+_ROOT_REFUSALS: OrderedDict[UUID, str] = OrderedDict()
+_ROOT_REFUSALS_MAX = 1024
+
+
+def _remember_root_refusal(origin_id: UUID, obstacle: str) -> None:
+    _ROOT_REFUSALS[origin_id] = obstacle
+    _ROOT_REFUSALS.move_to_end(origin_id)
+    while len(_ROOT_REFUSALS) > _ROOT_REFUSALS_MAX:
+        _ROOT_REFUSALS.popitem(last=False)
+
+
+def root_refusal(origin_id: UUID) -> str | None:
+    """The obstacle that kept this origin's turn from retaining a fleet root, if known."""
+    return _ROOT_REFUSALS.get(origin_id)
+
+
 async def freeze_prepared_root(
     deps: TurnDeps,
     prepared: PreparedTurn,
@@ -679,24 +698,41 @@ async def freeze_prepared_root(
         policy = await load_access_policy(db, tenant_id=grant.tenant_id)
     if deps.fleet_root_grants is not None:
         raise WorkerSpecRefused("origin", "unsupported")
-    permissions = fleet_root_permissions(
-        source,
-        grant,
-        value,
-        fleet=FleetFacts(
-            scope=scope,
-            root=binding.thread,
-            origin_id=origin_id,
-            account_id=prepared.admission.account_id,
-            run_id=uuid4(),
-            place=grant.run_place,
-            enabled=True,
-            active=True,
-        ),
-        policy=policy,
-        now=now(),
-        seal_ids=prepared.admission.origin_seal_ids,
-    )
+    try:
+        permissions = fleet_root_permissions(
+            source,
+            grant,
+            value,
+            fleet=FleetFacts(
+                scope=scope,
+                root=binding.thread,
+                origin_id=origin_id,
+                account_id=prepared.admission.account_id,
+                run_id=uuid4(),
+                place=grant.run_place,
+                enabled=True,
+                active=True,
+            ),
+            policy=policy,
+            now=now(),
+            seal_ids=prepared.admission.origin_seal_ids,
+        )
+    except WorkerSpecRefused as error:
+        # The agent's own setup can't become worker authority (e.g. a connected tool
+        # with its own login). That must not fail the turn: it runs with fleet off,
+        # nothing is retained, and the fleet tools say why in plain words.
+        from daimon.core.neutral_resources import fleet_root_obstacle
+
+        obstacle = fleet_root_obstacle(source) or error.field
+        log.warning(
+            "fleet.root_freeze_refused",
+            field=error.field,
+            reason=error.reason,
+            obstacle=obstacle,
+            origin_id=str(origin_id),
+        )
+        _remember_root_refusal(origin_id, obstacle)
+        return
     permissions = replace(
         permissions,
         limits=permissions.limits.model_copy(
