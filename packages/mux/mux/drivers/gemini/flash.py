@@ -38,12 +38,31 @@ class FlashAttempt:
 class FlashAccounting(Protocol):
     """Caller persists a hold before each dispatch, and preserves its outcome.
 
-    A failed accounting operation stops the chain. This policy cannot waive a
-    budget or infer a free call from a refusal. Actuals arrive via scoped Usage.
+    A failed accounting operation stops the chain. Actuals arrive via scoped
+    Usage. The only free call this policy reports is a definite refusal: an
+    HTTP 4xx that rejected the request itself (`refused` with a 4xx status), so
+    no interaction exists. Anything Google may have accepted stays `unknown`.
     """
 
     async def before_attempt(self, *, model: ModelRef, attempt: int) -> None: ...
     async def after_attempt(self, *, receipt: FlashAttempt) -> None: ...
+
+
+_DEFINITE = ("invalid_request", "auth", "permission", "not_found")
+
+
+def definite_rejection(error: ProviderError) -> int | None:
+    """The 4xx status of a create Google rejected outright, else None.
+
+    Needs the provider's own HTTP status: a local refusal (no status), e.g. a
+    response check after a 200, may follow an accepted request. Timeouts, 429,
+    5xx and network failures may have been accepted too.
+    """
+    code = error.native_error_code or ""
+    if error.category not in _DEFINITE or not code.startswith("http_4"):
+        return None
+    status = code.removeprefix("http_")
+    return int(status) if status.isdigit() else None
 
 
 class FlashTransport:
@@ -123,14 +142,16 @@ class FlashTransport:
                 reply = await self.source.create(bounded)
             except ProviderError as error:
                 refused = error.category == "overloaded" and error.native_code == "503"
+                rejected = definite_rejection(error)
                 await self.accounting.after_attempt(
                     receipt=FlashAttempt(
                         model=model,
                         attempt=index + 1,
-                        outcome="refused" if refused else "unknown",
-                        http_status=503 if refused else None,
+                        outcome="refused" if refused or rejected is not None else "unknown",
+                        http_status=503 if refused else rejected,
                     )
                 )
+                # Only a 503 moves down the chain; a rejected request is the answer.
                 if not refused or index + 1 == len(models):
                     raise
                 continue

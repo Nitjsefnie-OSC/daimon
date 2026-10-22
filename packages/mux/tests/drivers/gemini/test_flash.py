@@ -254,3 +254,62 @@ async def test_bounded_worker_cannot_use_argon() -> None:
             capped
         )
     assert not source.requests and not accounting.held
+
+
+def http(category: str, status: int, *, code: str | None = None) -> ProviderError:
+    """What `transport.normalize_error` yields for an HTTP status on create."""
+    return ProviderError(
+        category,  # type: ignore[arg-type]
+        retryable=status == 429 or status >= 500,
+        native_code=code,
+        native_error_code=f"http_{status}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (http("invalid_request", 400), 400),
+        (http("auth", 401), 401),
+        (http("permission", 403), 403),
+        (http("not_found", 404), 404),
+        (http("invalid_request", 422), 422),
+    ],
+)
+async def test_definite_4xx_on_create_is_a_refusal_that_never_falls_back(
+    error: ProviderError, status: int
+) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([error, {"id": "unexpected", "status": "completed"}])
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    assert len(source.requests) == len(accounting.held) == 1
+    (receipt,) = accounting.receipts
+    assert (receipt.outcome, receipt.http_status, receipt.interaction_id) == (
+        "refused",
+        status,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        http("upstream", 500),
+        http("upstream", 408),
+        http("rate_limited", 429),
+        http("conflict", 409),
+        http("overloaded", 500, code="high_demand"),
+        ProviderError("transient_network", retryable=True),
+        # A local check after a 200 (Google accepted): no provider status.
+        ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
+        ProviderError("invalid_request", retryable=False, native_code="explicit_tools_required"),
+    ],
+)
+async def test_maybe_accepted_create_failures_stay_unknown(error: ProviderError) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([error, {"id": "unexpected", "status": "completed"}])
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    assert len(source.requests) == 1
+    assert [(r.outcome, r.http_status) for r in accounting.receipts] == [("unknown", None)]
