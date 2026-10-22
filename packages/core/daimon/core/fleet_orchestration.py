@@ -1477,6 +1477,7 @@ class HostFleetPorts:
         from daimon.core.neutral_resources import worker_agent_allowed
         from daimon.core.stores import agent_backends
         from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+        from mux.profiles import MANAGED_AGENTS
 
         deps = self._deps
         if deps is None or self._preparation is None:
@@ -1493,7 +1494,7 @@ class HostFleetPorts:
             agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=native.id)
             async with self.sessions() as db:
                 setting = await agent_backends.current(db, tenant_id, agent_id)
-            backend = (setting.backend if setting is not None else None) or "anthropic"
+            backend = (setting.backend if setting is not None else None) or MANAGED_AGENTS.provider
             model = (setting.model if setting is not None else None) or (
                 native.model if isinstance(native.model, str) else native.model.id
             )
