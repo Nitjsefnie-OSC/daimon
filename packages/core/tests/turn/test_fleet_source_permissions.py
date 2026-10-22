@@ -1660,3 +1660,92 @@ async def test_fleet_r9_plain_gemini_spawn_admits_the_derived_envelope_end_to_en
     )
     worst = gemini_worker_cost_usd(flash.id, limits.max_input_tokens, limits.max_output_tokens)
     assert worst <= Decimal("0.12") <= limits.budget_usd
+
+
+@pytest.mark.parametrize("pin", ["live", "live_upper", "stale"])
+@pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
+async def test_fleet_hold_comes_from_the_root_agents_live_pinned_row(
+    captured, tmp_path, monkeypatch, pin
+):
+    """Through FleetOrchestrator.spawn: a plain worker is sized by the row its admission
+    would select, the root agent's pin at its LIVE version; a stale pin is the template's."""
+    from unittest.mock import create_autospec
+    from uuid import UUID
+
+    from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.neutral_resources import task_worker_spec
+    from daimon.core.turn import runtime_manifest
+    from mux.contracts.config import BackendConfig
+
+    source, _, grant, fleet, policy, _ = captured
+    flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
+    backend = backend_selection("gemini").model_copy(update={"model": flash.id})
+    widened = grant.model_copy(update={"choices": (*grant.choices, (backend, flash))})
+    root = compose(captured[:2] + (widened,) + captured[3:])
+    large = "Real root instructions. " * 1000
+    root = replace(root, spec=root.spec.model_copy(update={"system": large}), base_system=large)
+    ((ref, revision),) = root.source_revisions
+    source_id = str(derive_agent_uuid(tenant_id=UUID(fleet.scope.tenant_id), ma_agent_id=ref.id))
+    common = {
+        "profile": backend.profile,
+        "tenant_id": fleet.scope.tenant_id,
+        "account_id": "*",
+        "configuration_grant": {
+            "profiles": [backend.profile],
+            "models": [flash.id],
+            "thread_modes": [backend.thread_mode],
+            "requires": {},
+        },
+        "worker_materialization": True,
+    }
+    template = {
+        **common,
+        "platform": "*",
+        "channel_id": "*",
+        "hold_usd": "0.12",
+        "source_agent_id": "*",
+        "source_agent_version": "*",
+    }
+    pinned = {
+        **common,
+        "platform": root.fleet.root.channel.platform,
+        "channel_id": root.fleet.root.channel.channel_id,
+        "hold_usd": "0.11",
+        "source_agent_id": source_id.upper() if pin == "live_upper" else source_id,
+        "source_agent_version": revision.local + (1 if pin == "stale" else 0),
+    }
+    path = tmp_path / "runtime.json"
+    path.write_text(json.dumps([template, pinned]))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    holds = []
+    original = runtime_manifest.manifest_hold_usd
+
+    def spy(*args, **kwargs):
+        holds.append(original(*args, **kwargs))
+        return holds[-1]
+
+    monkeypatch.setattr(runtime_manifest, "manifest_hold_usd", spy)
+    ports = create_autospec(FleetPorts, instance=True)
+    ports.capture_source.return_value = None
+
+    class Admitted(Exception):
+        pass
+
+    async def admit(parent, resolved, **kwargs):
+        raise Admitted
+
+    ports.admit.side_effect = admit
+    with pytest.raises(Admitted):
+        await FleetOrchestrator(ports).spawn(
+            root,
+            policy,
+            now=NOW,
+            operation_key="W4",
+            role="W4",
+            backend=BackendConfig.model_validate(backend.model_dump()),
+            limits=root.limits.model_copy(update={"max_turns": 1}),
+            agent=task_worker_spec(root, role="W4", task="Compare X and Y.", model=flash.id),
+            fill_token_limits=True,
+        )
+    assert holds == [Decimal("0.12") if pin == "stale" else Decimal("0.11")]

@@ -522,8 +522,10 @@ def test_a_pinned_worker_hold_applies_only_to_its_agent(
         )
 
     assert hold(_source("agent_a"), 1) == Decimal("0.49")
-    assert hold(_source("agent_a")) == Decimal("0.49")
+    assert hold(_source("agent_a").upper(), 1) == Decimal("0.49"), "pins compare as UUIDs"
     assert hold(_source("agent_b"), 1) == Decimal("0.25")
+    # A stale pin (v1) never sizes a worker of the edited agent (v2): the template does.
+    assert hold(_source("agent_a"), 2) == Decimal("0.25")
     assert hold(None) == Decimal("0.25")
 
 

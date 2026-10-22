@@ -2674,6 +2674,14 @@ def _matching_rows(
 type TurnKind = Literal["channel", "root", "worker"]
 
 
+def _same_agent(pinned: object, actual: str | None) -> bool:
+    """Source pins are UUIDs: compare them as UUIDs, not by spelling."""
+    try:
+        return actual is not None and UUID(str(pinned)) == UUID(actual)
+    except ValueError:
+        return False
+
+
 def _pinned_source(row: dict[str, JsonValue]) -> bool:
     return row.get("source_agent_id") not in (None, _WILDCARD)
 
@@ -2707,7 +2715,7 @@ def _rows_for(
         if kind == "channel":
             return not (root or worker or pinned)
         if pinned and (
-            row.get("source_agent_id") != source_agent_id
+            not _same_agent(row.get("source_agent_id"), source_agent_id)
             or (
                 source_agent_version is not None
                 and row.get("source_agent_version") != source_agent_version
