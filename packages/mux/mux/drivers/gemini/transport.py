@@ -122,14 +122,19 @@ def normalize_error(error: Exception) -> ProviderError:
     }
     if isinstance(error, APIConnectionError | httpx.HTTPError):
         return ProviderError("transient_network", retryable=True)
+    # The HTTP status alone is safe to log and lets an unmapped status be told apart.
+    http = None if status is None else f"http_{status}"
     if status is not None and status >= 500 and status != 503 and high_demand(error):
         # Distinct from 503: the Flash fallback chain moves models only on a 503.
-        return ProviderError("overloaded", retryable=True, native_code="high_demand")
+        return ProviderError(
+            "overloaded", retryable=True, native_code="high_demand", native_error_code=http
+        )
     category = categories.get(status or 0, "upstream")
     return ProviderError(
         category,
         retryable=status == 429 or (status is not None and status >= 500),
         native_code="503" if status == 503 else None,
+        native_error_code=http,
     )
 
 

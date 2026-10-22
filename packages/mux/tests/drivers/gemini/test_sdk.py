@@ -530,3 +530,26 @@ async def test_sdk_high_demand_create_never_falls_back_to_another_model() -> Non
             )
     assert (exc.value.category, exc.value.native_code) == ("overloaded", "high_demand")
     assert len(captured) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [(500, "upstream"), (408, "upstream"), (503, "overloaded"), (400, "invalid_request")],
+)
+async def test_sdk_errors_record_the_http_status_for_logs(status: int, category: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": "SECRET", "code": status}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).get("i1")
+        assert exc.value.category == category
+        assert exc.value.native_error_code == f"http_{status}"
+        assert "SECRET" not in str(exc.value)
+        await client.aio.aclose()
