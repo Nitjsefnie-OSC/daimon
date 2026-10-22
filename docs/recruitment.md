@@ -13,31 +13,28 @@ the Discord tenant normally. Set `DAIMON_RECRUITMENT__ENABLED=true` on the Disco
 worker and scheduler. Keep recruitment backend secrets out of public MCP,
 sidecar and agent environments. These are service credentials, not user OAuth.
 
-Create a private, operator-owned JSON file (mode `0600`):
+Set `DAIMON_RECRUITMENT__TENANTS` to a JSON object keyed by guild ID. Each entry
+requires a nonempty recruitment parent-channel set and at least one recruiter:
 
 ```json
-{
-  "guild_id": "101",
-  "enabled": true,
-  "revision": 1,
-  "recruiter_user_ids": ["7"],
-  "recruiter_role_ids": ["42"],
-  "channel_ids": ["2"],
-  "raw_retention_days": 7,
-  "retention_days": 30
-}
+{"101":{"channel_ids":["2"],"recruiter_user_ids":["7"],"recruiter_role_ids":["42"],"enabled":true,"raw_retention_days":7,"retention_days":30}}
 ```
 
-Use actual Discord IDs and the tenant UUID:
+Use actual Discord IDs. Supply identical tenant settings to Discord, scheduler
+and MCP; backend credentials go only to Discord and scheduler. Restart those
+processes together when changing the channel boundary. There is no database
+configuration table or recruitment configuration CLI. Configuration revisions
+are derived from the settings to fence older approvals after a restart.
 
-```sh
-daimon recruitment configure TENANT_UUID /private/recruitment.json
-```
-
-Increment the configuration revision for changes. The guild must match the
-tenant. An empty channel list permits named staffing threads in any accessible
-channel in that guild; restrict it for normal operation. An empty recruiter
-list grants nobody approval authority. Administrator status grants no exemption.
+**Every recruitment parent channel and every thread under it is reserved for
+human recruitment.** General agent mentions, organic classifiers, DM transfers,
+Discord MCP reads, lists, search, attachment results and general posting tools
+refuse these sources regardless of thread title, enrollment, processing enablement
+or retention. Choose dedicated restricted parent channels, not a general chat
+channel. A staffing prefix outside these parents does nothing. Empty tenant
+settings disable the boundary with no privacy SQL or Discord lookups. An
+unresolvable thread parent in a configured guild fails closed. Administrator
+status grants no approval exemption.
 
 For a real backend, set `DAIMON_RECRUITMENT__BACKENDS` to a JSON object keyed by
 tenant UUID with `base_url` (HTTPS) and `api_key` for each tenant. Supply this
@@ -68,7 +65,7 @@ field changes. A configured recruiter with fresh access to the original thread
 can create or link a candidate, correct details, or skip tracking. Corrections
 are ordinary explicit thread messages followed by `/recruitment action:refresh`.
 Every create, link and subsequent update requires explicit confirmation of the
-current review revision. Old clicks are refused and refresh the card. No hiring
+current review revision and covered event watermark. Old clicks are refused and refresh the card. No hiring
 ranking or automatic rejection is performed.
 
 Confirmed writes enter a durable encrypted outbox before delivery. Timeouts and
@@ -103,8 +100,8 @@ contain operational identifiers and safe error codes, not candidate text.
 Defaults retain raw source data for seven days and derived state/approved
 payloads for thirty days after thread activity; both are configurable per tenant.
 The scheduler erases expired data even when recruitment is disabled, retaining
-minimal enrollment/idempotency tombstones to prevent replay and keep expired
-sources out of agent reads. Expiry invalidates approval and retry. The Discord recovery loop also redacts expired cards while recruitment is
+minimal enrollment/idempotency tombstones to prevent replay. Settings keep
+recruitment channels out of general agent reads independently of erasure. Expiry invalidates approval and retry. The Discord recovery loop also redacts expired cards while recruitment is
 disabled, using the retained non-content message ID. Redacting
 Discord cards requires the bot to retain access; Discord source messages and
 backend records have their own retention policies.
@@ -122,6 +119,11 @@ configured test recruiter accounts:
 
 1. Create or rename a fresh thread to `  !LABS-staffing: Synthetic candidate`.
    Wait for a complete review; correct, create or link using the current card.
+   Verify that a staffing prefix outside the configured parent channels does
+   not enroll, and that general mentions inside a recruitment parent/thread
+   are ignored. From an ordinary channel, MCP reads/lists/search must withhold
+   these sources without exposing names; `/dm-me move` must refuse before
+   opening a DM or reading history.
 2. Remove the prefix and post `Synthetic phone: 555-0100` (or
    `Synthetic position: Test engineer`). Verify an update diff appears and no
    update is delivered until Confirm update. Test a stale card and a
@@ -146,23 +148,29 @@ isolated recruitment endpoint, never a production endpoint.
 
 ## Source and delivery invariants
 
-One recruitment source policy filters text, embeds and attachment URLs before
-provider context or MCP output is serialized. It covers parent-channel starters,
-thread history and deltas, reply targets and older-file scans. Queued turns
-recheck before admission. Search uses live thread metadata rather than indexed
-names, and withholds sources whose safety cannot be established. An empty-tenant
-cache keeps ordinary ingress cheap; it never authorizes output. Dispatch and
-serialization load current tenant configuration and enrollment, including
-privacy tombstones retained after disablement or erasure.
+One pure settings predicate, `is_recruitment_channel(guild_id, channel_id,
+parent_id)`, decides privacy at each non-recruitment entry before content is read.
+Thread parents are immutable; titles and enrollment never authorize a reader.
+There are no privacy database caches, task snapshots or per-message context
+filters. Parent-channel histories, older CV scans, reply targets and thread
+histories cannot be opened by the general agent because their source channel
+is unavailable. The same boundary precedes classifier collection, queued turns,
+DM moves and descriptive MCP errors.
 
-Raw edit, delete and bulk-delete events commit non-content revision metadata
-before Discord or model enrichment, including events for parent starters and
-empty edits. Pending enrichment blocks confirmation and delivery. Deletions are
-tombstones, and raw retention preserves edit times, hashes and the message
-manifest so later edits and offline deletions still invalidate derived reviews.
-Unchanged erased text is never restored simply by rereading history.
+Gateway creates, edits, deletes and bulk deletes in enrolled threads (including
+parent starters) durably increment `seen_watermark` before Discord or model
+work. Reviews record `covered_watermark`; cards bind it together with the summary
+revision. Confirmation checks equality with the current counter in the same
+transaction that inserts the approved outbox. Pending enrichment blocks delivery.
+Known own-card IDs and own-author events do not enter the evidence ledger.
+Unknown-author bot edits are durably classified during enrichment/reconciliation;
+only their covered watermark advances, preserving an identical review.
 
-An outbox request independently records whether any attempt may have applied.
-A later rejected HTTP attempt cannot erase uncertainty from an earlier timeout.
-Only an authoritative same-key outcome resolves it. The service and card use
-the same discard predicate, so an uncertain operation cannot be discarded.
+Deletions are content-free tombstones. Raw retention preserves edit times,
+hashes and a message manifest, so newer edits and offline deletions still
+invalidate derived reviews without restoring unchanged erased text.
+
+An outbox independently records whether any attempt may have applied. A later
+rejected attempt cannot erase uncertainty from an earlier timeout. Only an
+authoritative same-key outcome resolves it. The card and service share the same
+discard predicate.

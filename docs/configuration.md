@@ -1386,6 +1386,15 @@ an operator.
 
 Read from `daimon.core.config.RecruitmentSettings`. Prefix `DAIMON_RECRUITMENT__`.
 
+### `DAIMON_RECRUITMENT__TENANTS`
+
+`dict[str, RecruitmentTenantSettings]` · optional · default `{}`
+
+Guild ID to recruitment settings (required nonempty channel_ids and recruiter_user_ids
+or recruiter_role_ids). Immutable for the process lifetime; restart Discord, MCP and
+scheduler together when changing. Privacy applies even when recruitment processing is
+disabled.
+
 ### `DAIMON_RECRUITMENT__ENABLED`
 
 `bool` · optional · default `False`

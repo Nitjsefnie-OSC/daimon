@@ -2514,21 +2514,25 @@ tool safety disabled.
 
 ## Recruitment threads
 
-Opt-in staffing uses the existing Discord worker for create/rename/message/edit
-events and persistent review cards. Core owns four tenant-filtered encrypted
-config/thread/message/outbox tables, stateless extraction, revision-bound human
-approval and idempotent backend delivery. Every backend mutation requires a live
-configured recruiter with original-thread access. The existing scheduler pages
-new and old history, reconciles delivery and purges expired content; the existing
-Discord recovery sweep repairs cards. There is no new gateway, process, queue
-or database. A shared recruitment-source predicate withholds qualifying and
-enrolled threads from normal/shared turns and agent-facing Discord reads.
+Opt-in staffing runs in the existing Discord worker, core and scheduler. Core
+owns stateless recruitment extraction, encrypted evidence, recruiter-reviewed
+outbox intents and idempotent backend delivery. The existing scheduler scans
+old/new history and purges expired content; Discord repairs in-thread review
+cards after restart. No new process, gateway, queue or database is required.
 Backend credentials are trusted-service settings, never agent tools or sidecar
 credentials. See [Recruitment threads](recruitment.md) for operation and synthetic QA.
 
-Recruitment uses one source policy at provider/MCP serialization boundaries;
-queued dispatch loads a fresh snapshot. The admission cache holds only tenant
-IDs and does not authorize provider output. Source events fence the review in
-Postgres before enrichment; retained edit-time/revision metadata and deletion
-tombstones remain effective after raw erasure. Outbox uncertainty is independent
-of the latest HTTP error and shares one discard predicate with the review card.
+Recruitment privacy is a pure service-settings boundary: configured guilds name
+nonempty recruitment parent channels and recruiters. General Discord ingress,
+queued and automatic turns, classifiers, DM transfer and MCP readers refuse
+these channels and all their threads before reading content or naming a source
+in an error. Thread titles and database enrollment do not participate. Empty
+settings require no privacy I/O; immutable thread parents avoid enrollment and
+rename races. The three tenant-scoped tables hold threads, source evidence and
+outbox intents; configuration comes only from restart-bound settings.
+
+Gateway human creates/edits/deletes increment a durable seen watermark before
+enrichment. Review cards bind revision and covered watermark; confirmation
+atomically checks the current counter while inserting its outbox intent. Own
+controls never become candidate evidence, and unknown-author bot events are
+resolved without changing an otherwise identical review.

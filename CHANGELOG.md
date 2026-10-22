@@ -7,11 +7,19 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Changed
+
+- Reserve configured recruitment parent channels and their threads for human
+  staffing. Replace dynamic privacy filters and database configuration with
+  restart-bound tenant settings; reject general classifiers, DM transfers and
+  Discord MCP readers before content access. Fence confirmations with durable
+  event watermarks, including new messages, and exclude own-card echoes.
+
 ### Fixed
 
-- Recruitment now filters all provider-context and search sources, durably invalidates
-  raw source events, tracks edits after retention, and preserves uncertainty across retries.
-  Unconfigured ingress uses a cached fast path while output checks remain current.
+- Recruitment tracks edits and deletions after raw-data retention, fences source events
+  before enrichment, and preserves backend uncertainty independently of later errors.
+  Empty recruitment settings require no privacy database or HTTP lookups.
 
 ### Added
 
