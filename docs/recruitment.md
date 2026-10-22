@@ -143,3 +143,26 @@ cross-restart evidence. Automated tests additionally cover response loss after
 application, replay deduplication and tenant separation. Synthetic Preview proves
 OS behavior; real-backend contract parity remains a separate test against an
 isolated recruitment endpoint, never a production endpoint.
+
+## Source and delivery invariants
+
+One recruitment source policy filters text, embeds and attachment URLs before
+provider context or MCP output is serialized. It covers parent-channel starters,
+thread history and deltas, reply targets and older-file scans. Queued turns
+recheck before admission. Search uses live thread metadata rather than indexed
+names, and withholds sources whose safety cannot be established. An empty-tenant
+cache keeps ordinary ingress cheap; it never authorizes output. Dispatch and
+serialization load current tenant configuration and enrollment, including
+privacy tombstones retained after disablement or erasure.
+
+Raw edit, delete and bulk-delete events commit non-content revision metadata
+before Discord or model enrichment, including events for parent starters and
+empty edits. Pending enrichment blocks confirmation and delivery. Deletions are
+tombstones, and raw retention preserves edit times, hashes and the message
+manifest so later edits and offline deletions still invalidate derived reviews.
+Unchanged erased text is never restored simply by rereading history.
+
+An outbox request independently records whether any attempt may have applied.
+A later rejected HTTP attempt cannot erase uncertainty from an earlier timeout.
+Only an authoritative same-key outcome resolves it. The service and card use
+the same discard predicate, so an uncertain operation cannot be discarded.

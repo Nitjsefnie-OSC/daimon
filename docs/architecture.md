@@ -2525,3 +2525,10 @@ or database. A shared recruitment-source predicate withholds qualifying and
 enrolled threads from normal/shared turns and agent-facing Discord reads.
 Backend credentials are trusted-service settings, never agent tools or sidecar
 credentials. See [Recruitment threads](recruitment.md) for operation and synthetic QA.
+
+Recruitment uses one source policy at provider/MCP serialization boundaries;
+queued dispatch loads a fresh snapshot. The admission cache holds only tenant
+IDs and does not authorize provider output. Source events fence the review in
+Postgres before enrichment; retained edit-time/revision metadata and deletion
+tombstones remain effective after raw erasure. Outbox uncertainty is independent
+of the latest HTTP error and shares one discard predicate with the review card.

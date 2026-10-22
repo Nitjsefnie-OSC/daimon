@@ -7,6 +7,12 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+### Fixed
+
+- Recruitment now filters all provider-context and search sources, durably invalidates
+  raw source events, tracks edits after retention, and preserves uncertainty across retries.
+  Unconfigured ingress uses a cached fast path while output checks remain current.
+
 ### Added
 
 - Opt-in recruiter-reviewed Discord staffing threads with a tenant-scoped encrypted ledger,
