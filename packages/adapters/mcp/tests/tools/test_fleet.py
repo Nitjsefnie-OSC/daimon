@@ -862,7 +862,7 @@ async def test_default_bridge_collects_the_original_run_from_a_real_completion_f
 @pytest.mark.parametrize("caps", [None, (262144, 65536)])
 async def test_public_token_caps_reach_existing_worker_limits(tool, caps) -> None:
     root = host_parent()
-    orchestrator = create_autospec(FleetOrchestrator, instance=True)
+    orchestrator = fleet_orchestrator_double()
     orchestrator.spawn.return_value = {"run_id": str(RUN), "status": "pending"}
 
     async def load(caller):
@@ -976,6 +976,18 @@ async def test_host_bridge_refuses_root_mismatch_or_nested_worker_before_store_r
     assert owner.mock_calls == []
 
 
+def fleet_orchestrator_double() -> Mock:
+    """Mocked owner operations; spawn limits still run the real defaulting code."""
+    orchestrator = create_autospec(FleetOrchestrator, instance=True)
+    orchestrator.admitted_worker.return_value = None
+
+    async def spawn_limits(*args: Any, **kwargs: Any) -> WorkerLimits:
+        return await FleetOrchestrator.spawn_limits(orchestrator, *args, **kwargs)
+
+    orchestrator.spawn_limits.side_effect = spawn_limits
+    return orchestrator
+
+
 def plain_root() -> WorkerPermissions:
     root = host_parent()
     luna = ModelRef(provider="openai", id="gpt-6-luna")
@@ -987,7 +999,7 @@ def plain_root() -> WorkerPermissions:
 
 
 def plain_bridge(root: WorkerPermissions) -> tuple[HostFleetToolService, Mock]:
-    orchestrator = create_autospec(FleetOrchestrator, instance=True)
+    orchestrator = fleet_orchestrator_double()
     orchestrator.spawn.return_value = {"run_id": str(RUN), "status": "pending"}
     orchestrator.read_snapshot.return_value = host_owner().read_run.return_value
     orchestrator.collect.return_value = {"run_id": str(RUN), "status": "waiting"}
@@ -1093,3 +1105,48 @@ async def test_planned_workers_hint_reaches_the_default_budget() -> None:
     # Run budget $1 shared by the 2 planned workers instead of 3 slots.
     assert orchestrator.spawn.await_args.kwargs["limits"].budget_usd == Decimal("0.50")
     orchestrator.spawn.assert_awaited_once()
+
+
+async def test_fleet_r7_plain_gemini_worker_gets_the_gemini_runtime_bound() -> None:
+    root = plain_root()
+    flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
+    root = replace(
+        root,
+        backend_grants=(
+            *root.backend_grants,
+            backend_selection("gemini").model_copy(update={"model": flash.id}),
+        ),
+        models=(*root.models, flash),
+    )
+    bridge, orchestrator = plain_bridge(root)
+    before = datetime.now(UTC)
+    async with Client(registered(bridge)) as client:
+        for model in ("gemini-3.8-flash", "gpt-6-luna"):
+            await client.call_tool(
+                "fleet_spawn",
+                {"operation_key": model, "role": "W", "task": "Compare.", "model": model},
+            )
+    gemini, luna = (call.kwargs["limits"] for call in orchestrator.spawn.await_args_list)
+    assert before + timedelta(seconds=120) <= gemini.deadline
+    assert gemini.deadline <= datetime.now(UTC) + timedelta(seconds=120)
+    assert luna.deadline == root.limits.deadline
+
+
+async def test_plain_spawn_retry_reuses_the_admitted_workers_limits() -> None:
+    from types import SimpleNamespace
+
+    root = plain_root()
+    bridge, orchestrator = plain_bridge(root)
+    stored = SimpleNamespace(
+        run_id=RUN,
+        budget_usd=Decimal("0.330000"),
+        deadline_at=datetime.now(UTC) + timedelta(seconds=40),
+    )
+    orchestrator.admitted_worker.return_value = stored
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn", {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
+        )
+    limits = orchestrator.spawn.await_args.kwargs["limits"]
+    assert (limits.budget_usd, limits.deadline) == (Decimal("0.33"), stored.deadline_at)
+    orchestrator.read_snapshot.assert_not_awaited()

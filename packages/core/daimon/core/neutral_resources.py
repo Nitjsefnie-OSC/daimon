@@ -1083,6 +1083,20 @@ def task_worker_spec(
     return AgentSpec(name=role, model=choice, system=task, declared_drops=tuple(drops))
 
 
+def worker_runtime_ceiling(
+    parent: WorkerPermissions, provider: Provider, backend: BackendConfig | None = None
+) -> int | None:
+    """The shortest worker runtime a granted profile for this provider allows, if any."""
+    from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_RUNTIME_S
+
+    profiles = (
+        {backend.profile}
+        if backend is not None and backend.profile is not None
+        else {grant.profile for grant in parent.backend_grants if grant.backend == provider}
+    )
+    return WORKER_MAX_RUNTIME_S if INLINE_REUSE.profile_id in profiles else None
+
+
 def default_worker_limits(
     ceiling: WorkerLimits,
     run: FleetRun | None,
@@ -1095,10 +1109,14 @@ def default_worker_limits(
     max_input_tokens: int | None = None,
     max_output_tokens: int | None = None,
     planned_workers: int | None = None,
+    now: datetime | None = None,
+    max_runtime_s: int | None = None,
 ) -> WorkerLimits:
     """Fill omitted worker limits from the frozen root, so a model need not guess them.
 
-    The deadline defaults to (and is never later than) the root's frozen deadline. The
+    The deadline defaults to (and is never later than) the root's frozen deadline, and
+    to `now + max_runtime_s` when the selected profile caps a worker's runtime (a
+    Gemini worker gets 120 s); a later supplied deadline is shortened the same way. The
     budget defaults to an even share, per remaining worker slot, of what the run and
     the provider line have left. Slots bound how many workers can be admitted, so
     parallel spawns reading the same snapshot never add up past either cap. A root that
@@ -1108,6 +1126,10 @@ def default_worker_limits(
     budgets and every ceiling are still checked by the resolver and financial admission.
     """
     latest = ceiling.deadline
+    if max_runtime_s is not None:
+        if now is None:
+            raise WorkerSpecRefused("deadline", "unbound")
+        latest = min(latest, now + timedelta(seconds=max_runtime_s))
     if budget_usd is None:
         if run is None:
             raise WorkerSpecRefused("budget", "unbound")

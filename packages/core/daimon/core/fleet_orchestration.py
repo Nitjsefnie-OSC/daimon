@@ -22,7 +22,7 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.security_audit import record_authz_denial
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import AgentMessagePayload, Event, TextPart
-from mux.contracts.ids import ResourceRef, Revision, Scope
+from mux.contracts.ids import Provider, ResourceRef, Revision, Scope
 from mux.contracts.resources import Agent, AgentPatch, AgentSpec, SessionSpec
 from pydantic import JsonValue, TypeAdapter
 
@@ -107,6 +107,10 @@ class FleetPorts(Protocol):
     ) -> tuple[FleetRun, tuple[FleetWorker, ...]]: ...
 
     async def controller_account(self, parent: WorkerPermissions) -> uuid.UUID | None: ...
+
+    async def admitted_worker(
+        self, parent: WorkerPermissions, operation_key: str
+    ) -> FleetWorker | None: ...
 
     async def capture_source(self, parent: WorkerPermissions) -> BackendAgent | None: ...
 
@@ -300,6 +304,72 @@ class FleetOrchestrator:
         if len({worker.id for worker in workers}) != len(workers):
             raise FleetRefused("ambiguous_workers")
         return run, workers
+
+    async def admitted_worker(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, operation_key: str
+    ) -> FleetWorker | None:
+        """The worker a spawn with this operation key already admitted in the root's run.
+
+        A retry reuses its stored limits, so host defaults that move with time or with
+        the run's other workers cannot turn a replay into an operation conflict.
+        """
+        _authorize(parent, policy)
+        worker = await self._owner().admitted_worker(parent, operation_key)
+        if worker is not None and worker.run_id != parent.fleet.run_id:
+            raise FleetRefused("foreign_worker")
+        return worker
+
+    async def spawn_limits(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        *,
+        operation_key: str,
+        provider: Provider,
+        now: datetime,
+        budget_usd: Decimal | None = None,
+        deadline: datetime | None = None,
+        max_turns: int | None = None,
+        max_input_tokens: int | None = None,
+        max_output_tokens: int | None = None,
+        planned_workers: int | None = None,
+        max_runtime_s: int | None = None,
+    ) -> WorkerLimits:
+        """Limits for a spawn, with omitted ones defaulted from the frozen root.
+
+        A retry of an admitted operation reuses that worker's budget and deadline:
+        fresh defaults move with time and the run's other workers, and would turn the
+        replay into an operation conflict.
+        """
+        from daimon.core.neutral_resources import default_worker_limits
+
+        if budget_usd is None or deadline is None:
+            retained = await self.admitted_worker(parent, policy, operation_key=operation_key)
+            if retained is not None:
+                if budget_usd is None:
+                    # Defaulted budgets are whole cents; the stored value keeps them.
+                    budget_usd = retained.budget_usd.quantize(Decimal("0.01"))
+                if deadline is None:
+                    deadline = retained.deadline_at
+        run, workers = (
+            await self.read_snapshot(parent, policy, parent.fleet.run_id)
+            if budget_usd is None
+            else (None, ())
+        )
+        return default_worker_limits(
+            parent.limits,
+            run,
+            workers,
+            provider=provider,
+            budget_usd=budget_usd,
+            deadline=deadline,
+            max_turns=max_turns,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
+            planned_workers=planned_workers,
+            now=now,
+            max_runtime_s=max_runtime_s,
+        )
 
     async def spawn(
         self,
@@ -1064,6 +1134,22 @@ class HostFleetPorts:
             return None
         async with self._load_preparation(parent) as request:
             return (await request.capture_root(parent)).source
+
+    async def admitted_worker(
+        self, parent: WorkerPermissions, operation_key: str
+    ) -> FleetWorker | None:
+        from daimon.core.stores import mux_state
+
+        run_id = parent.fleet.run_id
+        async with self.sessions() as db:
+            record = await mux_state.get_operation(
+                db, parent.fleet.scope, f"fleet:{run_id}:admit:{operation_key}"
+            )
+        if record is None or record.operation.status != "processed":
+            return None
+        worker_id = record.result.get("worker_id")
+        _, workers = await self.read_run(parent.fleet.scope, run_id)
+        return next((worker for worker in workers if str(worker.id) == worker_id), None)
 
     async def controller_account(self, parent: WorkerPermissions) -> uuid.UUID | None:
         from daimon.core.stores.identity import find_platform_principal
