@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Fleet: a plain-language Gemini worker no longer fails with a provider 400. When the caller gives no token limits, a Gemini Flash worker gets a bounded envelope derived from its own prompt and budget (max input = the prompt's bytes plus headroom; max output = what the rest of its budget buys, at most 65,536 tokens), and an unbounded Gemini worker whose prompt clearly exceeds the 4096-token turn cap is refused at spawn instead of being sent.
+
 - Fleet: slow admissions taking turns on the tenant fleet lock no longer make the budget watcher cancel every worker in the run. While the lock is busy the watcher keeps checking every worker's spend from a lock-free read-only snapshot, logs which transaction holds the lock, and fails closed when one transaction holds it for 10 s or it stays busy for 60 s; a budget read granted late in its lock wait is no longer counted as a slow read.
 
 - Fleet: a plain-language Gemini worker is no longer refused for its deadline. A worker's default deadline is now the sooner of the run's deadline and the Gemini worker runtime limit (120 s), and a later deadline is shortened the same way; Anthropic and OpenAI workers keep the run's deadline.

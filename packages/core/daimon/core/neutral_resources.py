@@ -1097,6 +1097,58 @@ def worker_runtime_ceiling(
     return WORKER_MAX_RUNTIME_S if INLINE_REUSE.profile_id in profiles else None
 
 
+#: Bytes added to a bounded Gemini worker's input cap for the trigger and turn wrapping.
+GEMINI_INPUT_HEADROOM_TOKENS = 4096
+#: The smallest output envelope worth dispatching; a budget that buys less refuses.
+GEMINI_MIN_OUTPUT_TOKENS = 1024
+#: The bounded worker path's own output ceiling (worker_token_limits_supported).
+GEMINI_MAX_OUTPUT_TOKENS = 65_536
+
+
+def gemini_worker_cost_usd(model: str, max_input_tokens: int, max_output_tokens: int) -> Decimal:
+    """Worst-case provider cost of one bounded Gemini worker turn at its current tariff."""
+    from daimon.core import pricing
+    from mux.profiles.gemini import INLINE_REUSE
+
+    price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
+    if price is None:
+        raise WorkerSpecRefused("budget", "unsupported")
+    return (max_input_tokens * price.input + max_output_tokens * price.output) / Decimal(10**6)
+
+
+def bounded_gemini_worker_tokens(
+    system: str, budget_usd: Decimal, *, model: str, markup: Decimal = Decimal(1)
+) -> dict[str, int]:
+    """Token limits that keep a plain-language Gemini worker on the bounded path.
+
+    max_input_tokens = UTF-8 bytes of the worker's instructions + headroom: a token
+    never covers less than one byte, so the real prompt always fits, and the driver
+    still counts it exactly before sending. max_output_tokens = what the rest of the
+    worker's budget buys at the output tariff, at most GEMINI_MAX_OUTPUT_TOKENS:
+    (budget / markup - max_input * input_rate) / output_rate. So the worst-case
+    provider cost, max_input * input_rate + max_output * output_rate, never exceeds
+    budget / markup.
+    """
+    from daimon.core import pricing
+    from mux.profiles.gemini import INLINE_REUSE
+
+    price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
+    if price is None or markup <= 0:
+        raise WorkerSpecRefused("budget", "unsupported")
+    max_input = len(system.encode()) + GEMINI_INPUT_HEADROOM_TOKENS
+    if price.max_priced_input_tokens is not None and max_input > price.max_priced_input_tokens:
+        raise WorkerSpecRefused("max_input_tokens", "unsupported")
+    per_token = Decimal(10**6)
+    room = budget_usd / markup - max_input * price.input / per_token
+    max_output = min(
+        GEMINI_MAX_OUTPUT_TOKENS,
+        int((room * per_token / price.output).to_integral_value(rounding=ROUND_DOWN)),
+    )
+    if max_output < GEMINI_MIN_OUTPUT_TOKENS:
+        raise WorkerSpecRefused("budget", "exhausted")
+    return {"max_input_tokens": max_input, "max_output_tokens": max_output}
+
+
 def default_worker_limits(
     ceiling: WorkerLimits,
     run: FleetRun | None,

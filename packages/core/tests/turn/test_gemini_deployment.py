@@ -2258,3 +2258,41 @@ async def test_fleet_r7_plain_language_gemini_worker_default_deadline_is_admitte
         replace(selected, source=source, before_native=forbidden, deadline=limits.deadline)
     )
     assert runtime.materialize_worker is not None
+
+
+@pytest.mark.parametrize("explicit_worker_request", ["derived"], indirect=True)
+async def test_fleet_r9_plain_gemini_worker_with_the_real_root_prompt_takes_the_bounded_path(
+    materialization_worker_request,
+):
+    """r9: a plain-language Gemini worker inherited a ~24k-char root prompt and got the
+    unbounded 4096-token agent, which Google refused (HTTP 400). Derived limits keep it
+    on the bounded path, inside its budget and the deployment's $0.49 per-turn hold."""
+    from decimal import Decimal
+
+    from daimon.core.headless_runner import run_worker
+    from daimon.core.neutral_resources import gemini_worker_cost_usd
+
+    (selected, root, worker, prices, owned, calls), _ = materialization_worker_request
+    limits, system = selected.worker.limits, selected.worker.spec.system
+    assert len(system) >= 24_000
+    assert limits.max_input_tokens == len(system.encode()) + 4096
+    worst = gemini_worker_cost_usd(
+        selected.worker.spec.model.id, limits.max_input_tokens, limits.max_output_tokens
+    )
+    assert worst <= limits.budget_usd and worst <= Decimal("0.49")
+    result = await run_worker(
+        selected,
+        parent=root,
+        worker=worker,
+        trigger_message="Complete the assigned task",
+        prices=prices,
+        cancel=asyncio.Event(),
+    )
+    assert result.status == "succeeded"
+    inputs = [r for r in calls if r.url.path.endswith("/interactions") and r.method == "POST"]
+    assert len(inputs) == 1
+    sent = json.loads(inputs[0].content)
+    assert sent["system_instruction"] == system
+    assert sent["generation_config"] == {"max_output_tokens": limits.max_output_tokens}
+    # No managed agent, so no 4096-token total cap for the prompt to overflow.
+    assert not {"agent", "agent_config", "environment"} & sent.keys()
