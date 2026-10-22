@@ -728,6 +728,7 @@ class DaimonBot(commands.Bot):
                     data,
                     parse_interaction,
                     lambda work: self._spawn(work),
+                    application_id=self.application_id,
                 )
 
         self._connection.parsers["INTERACTION_CREATE"] = parse_allowed_interaction

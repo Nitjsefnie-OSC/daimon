@@ -23,9 +23,20 @@ def dispatch_general_interaction(
     data: dict[str, Any],
     dispatch: Callable[[dict[str, Any]], None],
     spawn: Callable[[Coroutine[Any, Any, None]], object],
+    *,
+    application_id: int | None = None,
 ) -> None:
     """Gate slash commands and listener controls before the SDK dispatches them."""
-    if not recruitment.tenants or str(data.get("data", {}).get("custom_id", "")).startswith(
+    if not recruitment.tenants:
+        dispatch(data)
+        return
+    own_recruitment_command = (
+        data.get("type") == 2
+        and application_id is not None
+        and str(data.get("application_id")) == str(application_id)
+        and data.get("data", {}).get("name") == "recruitment"
+    )
+    if own_recruitment_command or str(data.get("data", {}).get("custom_id", "")).startswith(
         "recruit:"
     ):
         dispatch(data)

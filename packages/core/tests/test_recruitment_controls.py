@@ -98,3 +98,69 @@ async def test_raw_interaction_dispatch_blocks_all_general_controls_before_sdk(m
     await asyncio.gather(*pending)
     dispatch.assert_not_called()
     tap.response.send_message.assert_awaited_once_with("Source unavailable.", ephemeral=True)
+
+
+@pytest.mark.parametrize("action", ["status", "refresh", "retry", "discard"])
+async def test_own_recruitment_application_command_reaches_cog_in_reserved_thread(
+    action, monkeypatch
+):
+    from daimon.adapters.discord import control_dispatch
+
+    # The boundary must not reconstruct the interaction before the cog gets it.
+    monkeypatch.setattr(
+        control_dispatch.discord,
+        "Interaction",
+        MagicMock(side_effect=AssertionError("early SDK reconstruction")),
+    )
+    dispatch = MagicMock()
+    data = {
+        "type": 2,
+        "application_id": "999",
+        "data": {"name": "recruitment", "options": [{"name": "action", "value": action}]},
+    }
+    control_dispatch.dispatch_general_interaction(
+        policy(), MagicMock(), data, dispatch, MagicMock(), application_id=999
+    )
+    dispatch.assert_called_once_with(data)
+
+
+@pytest.mark.parametrize(
+    "name,application,kind",
+    [
+        ("here", "999", 2),
+        ("recruitment", "998", 2),
+        ("recruitment", None, 2),
+        ("recruitment", "999", 3),
+    ],
+)
+async def test_general_or_foreign_commands_remain_refused(name, application, kind, monkeypatch):
+    import asyncio
+
+    from daimon.adapters.discord import control_dispatch
+
+    tap = interaction()
+    monkeypatch.setattr(control_dispatch.discord, "Interaction", MagicMock(return_value=tap))
+    dispatch, tasks = MagicMock(), []
+    control_dispatch.dispatch_general_interaction(
+        policy(),
+        MagicMock(),
+        {"type": kind, "application_id": application, "data": {"name": name}},
+        dispatch,
+        lambda work: tasks.append(asyncio.create_task(work)),
+        application_id=999,
+    )
+    await asyncio.gather(*tasks)
+    dispatch.assert_not_called()
+    tap.response.send_message.assert_awaited_once_with("Source unavailable.", ephemeral=True)
+
+
+def test_empty_settings_dispatch_does_not_inspect_payload_or_channel():
+    from daimon.adapters.discord.control_dispatch import dispatch_general_interaction
+
+    class Opaque(dict):
+        def get(self, *args):
+            raise AssertionError("disabled feature inspected interaction")
+
+    data, dispatch = Opaque(), MagicMock()
+    dispatch_general_interaction(RecruitmentSettings(), MagicMock(), data, dispatch, MagicMock())
+    dispatch.assert_called_once_with(data)

@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import AsyncMock, MagicMock
 
 import discord
+import pytest
 from daimon.adapters.discord.recruitment import RecruitmentCog
 from daimon.adapters.discord.recruitment_cards import review_card
 from daimon.core.recruitment import Candidate, ThreadState
@@ -243,3 +244,67 @@ async def test_empty_settings_raw_hooks_do_no_database_or_discord_io(monkeypatch
         await cog.on_raw_bulk_message_delete(payload)
     invalidate.assert_not_awaited()
     bot.fetch_channel.assert_not_called()
+
+
+async def _slash_recruitment(action, *, recruiter=True, access=True):
+    from daimon.core.recruitment import RecruitmentConfig
+
+    service = SimpleNamespace(
+        config=AsyncMock(
+            return_value=RecruitmentConfig(
+                guild_id="101", enabled=True, recruiter_user_ids=("7",), channel_ids=("2",)
+            )
+        ),
+        authorize=AsyncMock(side_effect=None if access else PermissionError),
+        refresh=AsyncMock(),
+        deliver=AsyncMock(),
+        discard=AsyncMock(),
+        store=SimpleNamespace(list_threads=AsyncMock(return_value=[])),
+    )
+
+    @asynccontextmanager
+    async def context(guild):
+        yield service, None
+
+    bot = MagicMock()
+    bot.fetch_channel = AsyncMock(return_value=MagicMock(spec=discord.Thread))
+    cog = RecruitmentCog(bot, MagicMock())
+    cog.service, cog.publish = context, AsyncMock()
+    tap = MagicMock(spec=discord.Interaction)
+    tap.guild.id, tap.channel_id, tap.user.id = 101, 20, 7
+    tap.guild.fetch_member = AsyncMock(
+        return_value=SimpleNamespace(id=7 if recruiter else 8, roles=[])
+    )
+    tap.response.defer, tap.followup.send = AsyncMock(), AsyncMock()
+    await cog.recruitment.callback(cog, tap, action=action)
+    return cog, service, tap
+
+
+# The parser exemption still leaves the live role/thread decisions to the cog.
+
+
+@pytest.mark.parametrize("action", ["status", "refresh", "retry", "discard"])
+@pytest.mark.parametrize("recruiter,access", [(True, True), (False, True), (True, False)])
+async def test_recruitment_slash_retains_live_cog_authorization(action, recruiter, access):
+    cog, service, tap = await _slash_recruitment(action, recruiter=recruiter, access=access)
+    tap.guild.fetch_member.assert_awaited_once_with(7)
+    succeeds = recruiter and (action == "status" or access)
+    if succeeds:
+        if action == "status":
+            service.store.list_threads.assert_awaited_once()
+        else:
+            service.authorize.assert_awaited_once_with("7", "20")
+            cog.publish.assert_awaited_once()
+            method = {
+                "refresh": service.refresh,
+                "retry": service.deliver,
+                "discard": service.discard,
+            }[action]
+            method.assert_awaited_once()
+    else:
+        service.refresh.assert_not_awaited()
+        service.deliver.assert_not_awaited()
+        service.discard.assert_not_awaited()
+        cog.publish.assert_not_awaited()
+        assert "refused" in tap.followup.send.await_args.args[0]
+    assert tap.followup.send.await_args.kwargs["ephemeral"]
