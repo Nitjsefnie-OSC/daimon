@@ -219,6 +219,20 @@ log = structlog.get_logger(__name__)
 #: before returning; a slower finalizer keeps running in the background.
 _FINALIZE_TIMEOUT_S = 15.0
 
+#: Finalizers still running past their wait: strong references so they are
+#: never garbage collected mid-revocation; each removes itself when done.
+_PENDING_FINALIZERS: set[asyncio.Future[None]] = set()
+
+
+def _finalizer_done(task: asyncio.Future[None]) -> None:
+    _PENDING_FINALIZERS.discard(task)
+    if task.cancelled():
+        log.warning("turn.finalize_cancelled")
+        return
+    error = task.exception()
+    if error is not None:
+        log.warning("turn.finalize_failed", error=type(error).__name__)
+
 
 async def _settle(deps: TurnDeps, *, session_id: str, scope: Scope, record: UsageRecorder) -> None:
     """Debit model calls on `session_id` that no live stream metered.
@@ -871,6 +885,8 @@ async def run_prepared_turn(
             # Credential revocation must survive a second cancel of this task:
             # the shielded call keeps running even if this wait is cancelled.
             pending = asyncio.ensure_future(finalize())
+            _PENDING_FINALIZERS.add(pending)
+            pending.add_done_callback(_finalizer_done)
             try:
                 await asyncio.wait_for(asyncio.shield(pending), timeout=_FINALIZE_TIMEOUT_S)
             except TimeoutError:

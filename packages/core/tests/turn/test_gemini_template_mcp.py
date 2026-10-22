@@ -535,3 +535,64 @@ async def test_a_second_cancel_cannot_abandon_credential_revocation(monkeypatch)
     assert not finished.is_set()
     released.set()
     await asyncio.wait_for(finished.wait(), timeout=2)
+
+
+async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_is_logged(
+    monkeypatch,
+):
+    import asyncio
+    from types import SimpleNamespace
+
+    from daimon.core.turn import run as run_module
+    from structlog.testing import capture_logs
+
+    release = asyncio.Event()
+
+    async def slow_failing_finalize() -> None:
+        await release.wait()
+        raise RuntimeError("revocation failed")
+
+    async def answered(*_args, **_kwargs):
+        return SimpleNamespace(ma_session_id="session", state=None, recovered=False)
+
+    monkeypatch.setattr(run_module, "run_prepared_turn_impl", answered)
+    monkeypatch.setattr(run_module, "_FINALIZE_TIMEOUT_S", 0.05)
+    observation = SimpleNamespace(
+        activate=lambda: __import__("contextlib").nullcontext(),
+        finish=lambda **_: None,
+        thread_id=None,
+    )
+    prepared = SimpleNamespace(
+        admission=SimpleNamespace(
+            observation=observation,
+            account_id=None,
+            agent=SimpleNamespace(id="agent"),
+            backend_footer_profile=None,
+        ),
+        ma_session_id="session",
+        _finalize=slow_failing_finalize,
+    )
+    deps = SimpleNamespace(
+        backend_selection_enabled=False,
+        running_turns=SimpleNamespace(track=lambda: __import__("contextlib").nullcontext()),
+    )
+    with capture_logs() as logs:
+        await run_module.run_prepared_turn(
+            deps,  # pyright: ignore[reportArgumentType]
+            prepared,  # pyright: ignore[reportArgumentType]
+            tenant_id=None,  # pyright: ignore[reportArgumentType]
+            platform="discord",
+            thread_id="t",
+            external_user_id="u",
+            user_message="m",
+            lifecycle=None,  # pyright: ignore[reportArgumentType]
+            cancel=asyncio.Event(),
+            reseed_user_message=None,  # pyright: ignore[reportArgumentType]
+            recovery_lifecycle=None,  # pyright: ignore[reportArgumentType]
+        )
+        assert len(run_module._PENDING_FINALIZERS) == 1  # pyright: ignore[reportPrivateUsage]
+        release.set()
+        await asyncio.sleep(0.05)
+    assert not run_module._PENDING_FINALIZERS  # pyright: ignore[reportPrivateUsage]
+    events = [entry["event"] for entry in logs]
+    assert "turn.finalize_timeout" in events and "turn.finalize_failed" in events
