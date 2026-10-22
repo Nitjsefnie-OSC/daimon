@@ -1259,3 +1259,38 @@ def test_spawns_refused_at_admission_free_their_slot_and_budget():
     assert default_worker_limits(
         unlimited, run, (admitted, refused, refused), provider="openai", planned_workers=2
     ).budget_usd == Decimal("0.50")
+
+
+async def test_fleet_r7_only_gemini_workers_default_to_its_runtime_bound(captured):
+    """r7: the run's deadline is the default except where a profile caps runtime."""
+    from daimon.core.neutral_resources import default_worker_limits, worker_runtime_ceiling
+
+    root = compose(captured)
+    assert worker_runtime_ceiling(root, "anthropic") is None
+    assert worker_runtime_ceiling(root, "openai") is None
+    assert worker_runtime_ceiling(root, "gemini") == 120
+    ceiling = root.limits.model_copy(update={"deadline": NOW + timedelta(minutes=10)})
+    for provider in ("anthropic", "openai", "gemini"):
+        bound = worker_runtime_ceiling(root, provider)
+        limits = default_worker_limits(
+            ceiling, _run(), (), provider=provider, now=NOW, max_runtime_s=bound
+        )
+        expected = NOW + timedelta(seconds=120) if provider == "gemini" else ceiling.deadline
+        assert limits.deadline == expected
+        late = default_worker_limits(
+            ceiling,
+            _run(),
+            (),
+            provider=provider,
+            deadline=NOW + timedelta(hours=1),
+            now=NOW,
+            max_runtime_s=bound,
+        )
+        assert late.deadline == expected
+    # The run's own deadline still wins when it is sooner.
+    soon = ceiling.model_copy(update={"deadline": NOW + timedelta(seconds=60)})
+    assert default_worker_limits(
+        soon, _run(), (), provider="gemini", now=NOW, max_runtime_s=120
+    ).deadline == NOW + timedelta(seconds=60)
+    with pytest.raises(WorkerSpecRefused, match="deadline: unbound"):
+        default_worker_limits(ceiling, _run(), (), provider="gemini", max_runtime_s=120)

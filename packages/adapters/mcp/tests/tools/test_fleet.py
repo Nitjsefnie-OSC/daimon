@@ -1093,3 +1093,28 @@ async def test_planned_workers_hint_reaches_the_default_budget() -> None:
     # Run budget $1 shared by the 2 planned workers instead of 3 slots.
     assert orchestrator.spawn.await_args.kwargs["limits"].budget_usd == Decimal("0.50")
     orchestrator.spawn.assert_awaited_once()
+
+
+async def test_fleet_r7_plain_gemini_worker_gets_the_gemini_runtime_bound() -> None:
+    root = plain_root()
+    flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
+    root = replace(
+        root,
+        backend_grants=(
+            *root.backend_grants,
+            backend_selection("gemini").model_copy(update={"model": flash.id}),
+        ),
+        models=(*root.models, flash),
+    )
+    bridge, orchestrator = plain_bridge(root)
+    before = datetime.now(UTC)
+    async with Client(registered(bridge)) as client:
+        for model in ("gemini-3.8-flash", "gpt-6-luna"):
+            await client.call_tool(
+                "fleet_spawn",
+                {"operation_key": model, "role": "W", "task": "Compare.", "model": model},
+            )
+    gemini, luna = (call.kwargs["limits"] for call in orchestrator.spawn.await_args_list)
+    assert before + timedelta(seconds=120) <= gemini.deadline
+    assert gemini.deadline <= datetime.now(UTC) + timedelta(seconds=120)
+    assert luna.deadline == root.limits.deadline

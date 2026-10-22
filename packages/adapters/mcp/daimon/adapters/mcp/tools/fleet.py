@@ -249,7 +249,11 @@ class HostFleetToolService:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id
         )
-        from daimon.core.neutral_resources import default_worker_limits, task_worker_spec
+        from daimon.core.neutral_resources import (
+            default_worker_limits,
+            task_worker_spec,
+            worker_runtime_ceiling,
+        )
 
         if agent is None and clone is None and task is not None:
             agent = task_worker_spec(parent, role=role, task=task, model=model)
@@ -267,10 +271,11 @@ class HostFleetToolService:
             if budget_usd is None
             else (None, ())
         )
+        now = datetime.now(UTC)
         return await self._orchestrator.spawn(
             parent,
             policy,
-            now=datetime.now(UTC),
+            now=now,
             run_id=run_id,
             operation_key=operation_key,
             role=role,
@@ -286,6 +291,8 @@ class HostFleetToolService:
                 max_input_tokens=max_input_tokens,
                 max_output_tokens=max_output_tokens,
                 planned_workers=planned_workers,
+                now=now,
+                max_runtime_s=worker_runtime_ceiling(parent, provider, backend),
             ),
             agent=agent,
             clone=clone,
@@ -491,9 +498,10 @@ def register_fleet_tools(
         Leave everything else out: the host binds this turn's run (never
         invent a run_id), picks the granted backend, splits the budget left
         evenly across your planned workers and uses the run's deadline (a
-        later deadline is shortened to it). A worker on another model than
-        yours runs at that model's default effort. Budgets above the grant are
-        refused. After spawning, end your turn; you are woken to fleet_collect.
+        later deadline is shortened to it; a Gemini worker gets at most 120 s).
+        A worker on another model than yours runs at that model's default
+        effort. Budgets above the grant are refused. After spawning, end your
+        turn; you are woken to fleet_collect.
         Advanced: an agent spec or an authorized clone with sparse overrides
         instead of task. Retries reuse operation_key.
         """

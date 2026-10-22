@@ -2215,3 +2215,46 @@ async def test_a_new_gemini_thread_sends_its_platforms_system_prompt_with_fragme
     foreign = "|".join(p for p in ("discord", "slack", "teams") if p != platform)
     assert re.search(foreign, head, re.IGNORECASE) is None
     assert head != shipped
+
+
+async def test_fleet_r7_plain_language_gemini_worker_default_deadline_is_admitted(
+    materialization_worker_request: tuple[_ClaimedWorker, str],
+) -> None:
+    """r7: the run's 10-minute default deadline refused every plain Gemini worker."""
+    from datetime import timedelta
+    from decimal import Decimal
+
+    from daimon.core.neutral_resources import (
+        WorkerLimits,
+        default_worker_limits,
+        worker_runtime_ceiling,
+    )
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+
+    (selected, root, _, _, _, _), _ = materialization_worker_request
+    now = selected.now()
+    run_ceiling = WorkerLimits(
+        budget_usd=Decimal("1"), deadline=now + timedelta(minutes=10), max_turns=1
+    )
+    with pytest.raises(AdmissionDenied):
+        build_gemini_runtime(replace(selected, deadline=run_ceiling.deadline))
+    assert worker_runtime_ceiling(root, "gemini") == 120
+    limits = default_worker_limits(
+        run_ceiling,
+        None,
+        (),
+        provider="gemini",
+        budget_usd=Decimal("0.49"),
+        now=now,
+        max_runtime_s=worker_runtime_ceiling(root, "gemini"),
+    )
+    assert limits.deadline == now + timedelta(seconds=120)
+    source = await capture_preparation_source(selected)
+
+    async def forbidden() -> None:
+        raise AssertionError("building the runtime invoked its financial guard")
+
+    runtime = build_gemini_runtime(
+        replace(selected, source=source, before_native=forbidden, deadline=limits.deadline)
+    )
+    assert runtime.materialize_worker is not None
