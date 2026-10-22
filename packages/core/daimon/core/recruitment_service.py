@@ -80,7 +80,7 @@ class RecruitmentService:
                 fresh = list(
                     {m.id: m for m in fresh + [m for m in messages if m.id in source_ids]}.values()
                 )
-            if not fresh:
+            if not fresh or await self.store.pending_enrichment(thread_id):
                 return
             state.revision = uuid4().hex
             state.config_revision, state.backend = config.revision, self.backend
@@ -179,6 +179,7 @@ class RecruitmentService:
                 or not state.scan_complete
                 or state.config_revision != config.revision
                 or state.backend != self.backend
+                or await self.store.pending_enrichment(thread_id)
             ):
                 raise ValueError("stale_summary")
             if selection == "skip":
@@ -256,6 +257,8 @@ class RecruitmentService:
         async with self.store.claim(thread_id):
             state = await self.store.get(thread_id)
             if not state or not state.outbox_id:
+                return
+            if await self.store.pending_enrichment(thread_id):
                 return
             item = await self.store.outbox(state.outbox_id)
             if not item or item.state in {"completed", "discarded", "expired"}:
@@ -363,19 +366,12 @@ class RecruitmentService:
         await self.ingest(thread_id, await self.store.messages(thread_id), refresh=True)
 
     async def delete_message(self, thread_id: str, message_id: str) -> None:
-        messages = await self.store.messages(thread_id)
-        for message in messages:
-            if message.id == message_id and not message.deleted:
-                await self.ingest(
-                    thread_id,
-                    [
-                        message.model_copy(
-                            update={
-                                "content": "",
-                                "deleted": True,
-                                "observed_at": datetime.now(UTC),
-                            }
-                        )
-                    ],
+        from daimon.core.stores.recruitment import invalidate_source
+
+        for id, channel, deleted in await self.store.message_manifest(thread_id):
+            if id == message_id and not deleted:
+                await invalidate_source(
+                    self.store.sessions, self.store.tenant_id, channel, id, deleted=True
                 )
+                await self.ingest(thread_id, [])
                 return

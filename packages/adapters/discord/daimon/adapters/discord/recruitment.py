@@ -3,6 +3,7 @@
 import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager, suppress
+from datetime import datetime
 from typing import Literal
 from uuid import uuid4
 
@@ -14,7 +15,12 @@ from daimon.core.recruitment import may_decide
 from daimon.core.recruitment_discord import RecruitmentDiscord
 from daimon.core.recruitment_runtime import backend_client, build_service
 from daimon.core.recruitment_service import RecruitmentService
-from daimon.core.stores.recruitment import RecruitmentBusy, RecruitmentStore, configured_tenants
+from daimon.core.stores.recruitment import (
+    RecruitmentBusy,
+    RecruitmentStore,
+    configured_tenants,
+    invalidate_source,
+)
 
 import discord
 from discord import app_commands
@@ -77,18 +83,78 @@ class RecruitmentCog(commands.Cog):
             return
         await self.ingest_message(message.channel, message.id)
 
-    @commands.Cog.listener()
-    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
-        if not self.runtime.settings.recruitment.enabled or payload.guild_id is None:
+    async def raw_revision(
+        self,
+        guild_id: int | None,
+        channel_id: int,
+        message_id: int,
+        *,
+        edited_at: datetime | None = None,
+        deleted: bool = False,
+    ) -> None:
+        if guild_id is None:
             return
+        tenant = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
+        thread_id = await invalidate_source(
+            self.runtime.sessionmaker,
+            tenant,
+            str(channel_id),
+            str(message_id),
+            observed_at=edited_at,
+            deleted=deleted,
+        )
+        if thread_id is None or not self.runtime.settings.recruitment.enabled:
+            return
+        # The event is durable before the first Discord read. Failed enrichment
+        # leaves confirmation/delivery fenced for reconciliation after restart.
         try:
-            channel = await self.bot.fetch_channel(payload.channel_id)
-            if isinstance(channel, discord.Thread):
-                await self.ingest_message(channel, payload.message_id)
-        except (discord.NotFound, discord.Forbidden):
+            thread = await self.bot.fetch_channel(int(thread_id))
+            if isinstance(thread, discord.Thread):
+                if deleted:
+                    async with self.service(guild_id) as (service, _):
+                        await service.ingest(thread_id, [])
+                else:
+                    await self.ingest_message(thread, message_id, source_channel_id=str(channel_id))
+        except (
+            PermissionError,
+            ValueError,
+            LookupError,
+            RecruitmentBusy,
+            httpx.HTTPError,
+            discord.HTTPException,
+        ):
             return
 
-    async def ingest_message(self, thread: discord.Thread, message_id: int) -> None:
+    @commands.Cog.listener()
+    async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        raw_time = payload.data.get("edited_timestamp")
+        edited = datetime.fromisoformat(raw_time) if isinstance(raw_time, str) else None
+        await self.raw_revision(
+            payload.guild_id, payload.channel_id, payload.message_id, edited_at=edited
+        )
+
+    @commands.Cog.listener()
+    async def on_raw_message_delete(self, payload: discord.RawMessageDeleteEvent) -> None:
+        await self.raw_revision(
+            payload.guild_id, payload.channel_id, payload.message_id, deleted=True
+        )
+
+    @commands.Cog.listener()
+    async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
+        # Invalidate the entire batch before enriching or posting anything.
+        for message_id in payload.message_ids:
+            if payload.guild_id is not None:
+                await invalidate_source(
+                    self.runtime.sessionmaker,
+                    derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id)),
+                    str(payload.channel_id),
+                    str(message_id),
+                    deleted=True,
+                )
+
+    async def ingest_message(
+        self, thread: discord.Thread, message_id: int, *, source_channel_id: str | None = None
+    ) -> None:
         try:
             async with self.service(thread.guild.id) as (service, port):
                 if not await service.store.enrolled(str(thread.id)):
@@ -99,7 +165,9 @@ class RecruitmentCog(commands.Cog):
                 await port.check_access(
                     config, str(thread.id), await port.bot_id(), recruiter=False
                 )
-                source = await port.message(config, str(thread.id), str(message_id))
+                source = await port.message(
+                    config, source_channel_id or str(thread.id), str(message_id)
+                )
                 if source:
                     # Accept a live revision even while reconciliation holds a
                     # worker claim. Processing can safely resume next tick.

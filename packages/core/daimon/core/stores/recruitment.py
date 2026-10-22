@@ -86,6 +86,10 @@ class RecruitmentStore:
                 )
             )
 
+        from daimon.core.stores.recruitment_privacy import protect_tenant
+
+        protect_tenant(self.sessions, self.tenant_id)
+
     async def configuration(self) -> RecruitmentConfig | None:
         async with self.sessions() as session:
             row = await session.get(RecruitmentConfigRecord, self.tenant_id)
@@ -132,7 +136,14 @@ class RecruitmentStore:
                     phase="expired",
                     card_id=row.card_id,
                 )
-            return ThreadState.model_validate_json(self.fernet.decrypt(row.encrypted_state))
+            state = ThreadState.model_validate_json(self.fernet.decrypt(row.encrypted_state))
+            if state.revision != row.revision:
+                state.revision, state.error, state.card_revision = (
+                    row.revision,
+                    "refresh_required",
+                    "",
+                )
+            return state
 
     async def save(
         self,
@@ -202,6 +213,12 @@ class RecruitmentStore:
                     )
             for message in processed:
                 digest = hashlib.sha256(message.model_dump_json().encode()).hexdigest()
+                if message.deleted:
+                    row = await session.get(
+                        RecruitmentMessageRecord, (self.tenant_id, state.thread_id, message.id)
+                    )
+                    if row and row.deleted and row.observed_at == message.observed_at:
+                        digest = row.revision
                 await session.execute(
                     update(RecruitmentMessageRecord)
                     .where(
@@ -213,13 +230,17 @@ class RecruitmentStore:
                     .values(processed_revision=digest)
                 )
 
+        from daimon.core.stores.recruitment_privacy import protect_tenant
+
+        protect_tenant(self.sessions, self.tenant_id)
+
     async def messages(self, thread_id: str, *, pending_only: bool = False) -> list[SourceMessage]:
         async with self.sessions() as session:
             rows = await session.scalars(
                 select(RecruitmentMessageRecord).where(
                     RecruitmentMessageRecord.tenant_id == self.tenant_id,
                     RecruitmentMessageRecord.thread_id == thread_id,
-                    RecruitmentMessageRecord.encrypted_source.is_not(None),
+                    RecruitmentMessageRecord.needs_enrichment.is_(False),
                     *(
                         [
                             RecruitmentMessageRecord.processed_revision.is_distinct_from(
@@ -231,32 +252,78 @@ class RecruitmentStore:
                     ),
                 )
             )
-            return sorted(
-                [
-                    SourceMessage.model_validate_json(self.fernet.decrypt(r.encrypted_source))
-                    for r in rows
-                    if r.encrypted_source
-                ],
-                key=lambda m: int(m.id),
+            config = await session.get(RecruitmentConfigRecord, self.tenant_id)
+            guild = str(config.config["guild_id"]) if config else "0"
+            result: list[SourceMessage] = []
+            for row in rows:
+                if row.deleted:
+                    result.append(
+                        SourceMessage(
+                            id=row.message_id,
+                            content="",
+                            deleted=True,
+                            observed_at=row.observed_at,
+                            url=f"https://discord.com/channels/{guild}/{row.source_channel_id}/{row.message_id}",
+                        )
+                    )
+                elif row.encrypted_source:
+                    result.append(
+                        SourceMessage.model_validate_json(self.fernet.decrypt(row.encrypted_source))
+                    )
+            return sorted(result, key=lambda m: int(m.id))
+
+    async def message_manifest(self, thread_id: str) -> list[tuple[str, str, bool]]:
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(
+                    RecruitmentMessageRecord.message_id,
+                    RecruitmentMessageRecord.source_channel_id,
+                    RecruitmentMessageRecord.deleted,
+                ).where(
+                    RecruitmentMessageRecord.tenant_id == self.tenant_id,
+                    RecruitmentMessageRecord.thread_id == thread_id,
+                )
             )
+            return [(r[0], r[1], r[2]) for r in rows]
+
+    async def pending_enrichment(self, thread_id: str) -> list[tuple[str, str]]:
+        async with self.sessions() as session:
+            rows = await session.execute(
+                select(
+                    RecruitmentMessageRecord.message_id, RecruitmentMessageRecord.source_channel_id
+                ).where(
+                    RecruitmentMessageRecord.tenant_id == self.tenant_id,
+                    RecruitmentMessageRecord.thread_id == thread_id,
+                    RecruitmentMessageRecord.needs_enrichment.is_(True),
+                )
+            )
+            return [(r[0], r[1]) for r in rows]
 
     async def ingest(self, thread_id: str, message: SourceMessage) -> bool:
         async with self.sessions.begin() as session:
-            row = await session.get(
-                RecruitmentMessageRecord, (self.tenant_id, thread_id, message.id)
-            )
-            # Ignore stale gateway events; history rereads retain the actual edited time.
-            if row:
-                if row.encrypted_source is None:
-                    return False
-                old = SourceMessage.model_validate_json(self.fernet.decrypt(row.encrypted_source))
-                if old.observed_at > message.observed_at or old == message:
-                    return False
             thread = await session.get(
                 RecruitmentThreadRecord, (self.tenant_id, thread_id), with_for_update=True
             )
-            if not thread or not thread.encrypted_state:
+            if not thread or not thread.encrypted_state or thread.expires_at <= datetime.now(UTC):
                 raise LookupError("thread_not_enrolled")
+            row = await session.get(
+                RecruitmentMessageRecord, (self.tenant_id, thread_id, message.id)
+            )
+            digest = hashlib.sha256(message.model_dump_json().encode()).hexdigest()
+            if row:
+                if row.deleted or message.observed_at < row.observed_at:
+                    return False
+                if row.needs_enrichment and row.revision == digest:
+                    # A duplicate/partial event may require re-review, but must
+                    # not resurrect unchanged erased evidence or renew its TTL.
+                    row.needs_enrichment = False
+                    return False
+                if not row.needs_enrichment and (
+                    row.revision == digest
+                    or row.encrypted_source is None
+                    and message.observed_at <= row.observed_at
+                ):
+                    return False
             claim = self._claim.get()
             if claim and thread.claim_token != claim[1]:
                 raise RecruitmentBusy("claim_expired")
@@ -279,6 +346,14 @@ class RecruitmentStore:
                     tenant_id=self.tenant_id,
                     thread_id=thread_id,
                     message_id=message.id,
+                    observed_at=message.observed_at,
+                    source_channel_id=(
+                        message.url.rstrip("/").split("/")[-2]
+                        if "/channels/" in message.url
+                        else thread_id
+                    ),
+                    needs_enrichment=False,
+                    deleted=message.deleted,
                     raw_expires_at=datetime.now(UTC) + timedelta(days=config.raw_retention_days),
                     revision=hashlib.sha256(message.model_dump_json().encode()).hexdigest(),
                     encrypted_source=self.seal(message),
@@ -286,8 +361,13 @@ class RecruitmentStore:
                 .on_conflict_do_update(
                     index_elements=["tenant_id", "thread_id", "message_id"],
                     set_={
-                        "revision": hashlib.sha256(message.model_dump_json().encode()).hexdigest(),
+                        "revision": digest,
                         "encrypted_source": self.seal(message),
+                        "observed_at": message.observed_at,
+                        "needs_enrichment": False,
+                        "deleted": message.deleted,
+                        "raw_expires_at": datetime.now(UTC)
+                        + timedelta(days=config.raw_retention_days),
                     },
                 )
             )
@@ -372,6 +452,74 @@ async def configured_tenants(sessions: async_sessionmaker[AsyncSession]) -> list
     async with sessions() as session:
         return list(await session.scalars(select(RecruitmentConfigRecord.tenant_id)))
 
+
+async def invalidate_source(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    channel_id: str,
+    message_id: str,
+    *,
+    observed_at: datetime | None = None,
+    deleted: bool = False,
+) -> str | None:
+    """Accept event metadata and fence approvals before any Discord/model enrichment.
+
+    Parent starters map by (parent_id, thread_id=message_id). Deleted evidence
+    stays a content-free tombstone; enrichment failures leave the barrier set.
+    """
+    from sqlalchemy import and_, or_
+
+    async with sessions.begin() as session:
+        thread = await session.scalar(
+            select(RecruitmentThreadRecord)
+            .where(
+                RecruitmentThreadRecord.tenant_id == tenant_id,
+                or_(
+                    RecruitmentThreadRecord.thread_id == channel_id,
+                    and_(
+                        RecruitmentThreadRecord.parent_id == channel_id,
+                        RecruitmentThreadRecord.thread_id == message_id,
+                    ),
+                ),
+            )
+            .with_for_update()
+        )
+        if thread is None or thread.phase == "expired":
+            return None
+        old = await session.get(RecruitmentMessageRecord, (tenant_id, thread.thread_id, message_id))
+        when = observed_at or (old.observed_at if old and not deleted else datetime.now(UTC))
+        if old and (old.deleted or observed_at and observed_at < old.observed_at):
+            return thread.thread_id
+        revision = uuid4().hex
+        thread.revision, thread.claim_token = revision, uuid4().hex
+        values = dict(
+            tenant_id=tenant_id,
+            thread_id=thread.thread_id,
+            message_id=message_id,
+            revision=revision if deleted or old is None else old.revision,
+            processed_revision=None,
+            observed_at=when,
+            source_channel_id=channel_id,
+            needs_enrichment=not deleted,
+            deleted=deleted,
+            encrypted_source=old.encrypted_source
+            if old and not deleted and old.raw_expires_at > datetime.now(UTC)
+            else None,
+            raw_expires_at=old.raw_expires_at if old else datetime.now(UTC),
+        )
+        await session.execute(
+            insert(RecruitmentMessageRecord)
+            .values(**values)
+            .on_conflict_do_update(
+                index_elements=["tenant_id", "thread_id", "message_id"],
+                set_={
+                    k: v
+                    for k, v in values.items()
+                    if k not in {"tenant_id", "thread_id", "message_id"}
+                },
+            )
+        )
+        return thread.thread_id
 
 async def is_recruitment_source(
     sessions: async_sessionmaker[AsyncSession],

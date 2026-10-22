@@ -16,7 +16,7 @@ from daimon.core.recruitment import (
     SourceMessage,
 )
 from daimon.core.recruitment_api import RecruitmentAPI, SyntheticRecruitmentTransport
-from daimon.core.recruitment_discord import RecruitmentDiscord
+from daimon.core.recruitment_discord import DiscordResourceMissing, RecruitmentDiscord
 from daimon.core.recruitment_extraction import extract_candidate
 from daimon.core.recruitment_service import RecruitmentService
 from daimon.core.stores.recruitment import (
@@ -112,6 +112,22 @@ async def reconcile_thread(
     state = await service.store.get(thread)
     if not state or state.phase in {"skipped", "expired"}:
         return
+    for message_id, source_channel in await service.store.pending_enrichment(thread):
+        try:
+            source = await discord.message(config, source_channel, message_id)
+        except DiscordResourceMissing:
+            from daimon.core.stores.recruitment import invalidate_source
+
+            await invalidate_source(
+                service.store.sessions,
+                service.store.tenant_id,
+                source_channel,
+                message_id,
+                deleted=True,
+            )
+            continue
+        if source is not None:
+            await service.store.ingest(thread, source)
     # Scan old pages even after a restart; initial review stays unconfirmable
     # until a complete history traversal has established the evidence boundary.
     old, before, _ = await discord.history(config, thread, before=state.scan_before)
@@ -126,13 +142,9 @@ async def reconcile_thread(
     seen = set(state.scan_seen) | {m.id for m in old}
     new, _, cursor = await discord.history(config, thread, after=state.cursor)
     if before is None:
-        for message in await service.store.messages(thread):
-            if (
-                message.id not in seen
-                and int(message.id) <= int(state.cursor)
-                and not message.deleted
-            ):
-                await service.delete_message(thread, message.id)
+        for message_id, _, deleted in await service.store.message_manifest(thread):
+            if message_id not in seen and int(message_id) <= int(state.cursor) and not deleted:
+                await service.delete_message(thread, message_id)
     await service.ingest(thread, old + new)
     async with service.store.claim(thread):
         current = await service.store.get(thread)

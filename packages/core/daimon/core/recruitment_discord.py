@@ -95,14 +95,16 @@ class DiscordMessage(BaseModel):
                 *[f"Attachment: {a.filename} {a.url}" for a in self.attachments],
             ]
         )
-        if not content.strip():
-            return None
         return SourceMessage(
             id=self.id,
             content=content,
             observed_at=self.edited_timestamp or self.timestamp,
             url=f"https://discord.com/channels/{guild}/{thread}/{self.id}",
         )
+
+
+class DiscordResourceMissing(PermissionError):
+    pass
 
 
 class RecruitmentDiscord:
@@ -117,7 +119,9 @@ class RecruitmentDiscord:
             timeout=30,
             follow_redirects=False,
         )
-        if response.status_code in {403, 404}:
+        if response.status_code == 404:
+            raise DiscordResourceMissing("resource_missing")
+        if response.status_code == 403:
             raise PermissionError("thread_unavailable")
         response.raise_for_status()
         return response
