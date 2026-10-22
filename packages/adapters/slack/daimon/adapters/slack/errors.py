@@ -53,14 +53,30 @@ def bound_request_id() -> str:
 NOT_SET_UP_NOTICE = (
     "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `/agent-setup`."
 )
-# Said to a sender who belongs to another Slack workspace (Slack Connect).
-NON_MEMBER_NOTICE = (
-    "Sorry, I can only respond to members of this workspace. "
-    "Please ask a workspace member to mention me instead."
-)
 SETUP_OUT_OF_DATE_NOTICE = (
     "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
 )
+# What someone from another workspace (Slack Connect) is told: they cannot run
+# `/agent-setup`, so they are pointed at the people who can.
+_NOT_SET_UP_FOREIGN = (
+    "Daimon isn't set up in this channel yet.\n\n"
+    "Ask someone in the workspace that added Daimon to set it up."
+)
+_SETUP_OUT_OF_DATE_FOREIGN = (
+    "This channel's setup is out of date.\n\n"
+    "Ask someone in the workspace that added Daimon to check it."
+)
+
+
+def not_set_up_notice(*, foreign: bool = False) -> str:
+    """The not-set-up notice; `foreign` words it for a member of another workspace."""
+    return _NOT_SET_UP_FOREIGN if foreign else NOT_SET_UP_NOTICE
+
+
+def setup_out_of_date_notice(*, foreign: bool = False) -> str:
+    """The setup-out-of-date notice, for the same two audiences."""
+    return _SETUP_OUT_OF_DATE_FOREIGN if foreign else SETUP_OUT_OF_DATE_NOTICE
+
 
 _USAGE_LIMIT = (
     "Daimon has reached its usage limit.",

@@ -97,6 +97,8 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )

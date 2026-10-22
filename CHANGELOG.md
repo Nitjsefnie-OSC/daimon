@@ -7,7 +7,14 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- A turn held to its channel (its requester is from another organisation, or the channel is shared with one) uses a memory of its own for that channel and never sees the agent's shared memory or anyone's personal memory; shared and personal memory never see the channel's. `/memory` in such a channel shows the channel's memory, and `/memory mine` and `forget-mine` say personal memory is not used there. A routine posting into a shared channel runs held the same way, and its result is never sent by direct message instead. A Teams `memory` answer for a shared channel is never moved to the 1:1 chat. A session that changes memory this way starts clean.
+
+- Teams: people from another organisation are held to the channel they asked in and cannot use DMs.
+- A turn asked by someone from another organisation, or in a channel shared with one, can be held to that channel (groundwork; Teams behaviour is unchanged).
+
 - Slack: an external (Slack Connect) member's role is never taken from their own workspace, a mention from one is refused before anything is stored, and their queued follow-ups no longer run.
+
+- Slack: people from another workspace in a Slack Connect channel can mention Daimon as plain users, held to that channel, and every turn in a shared channel is held to it. Re-apply the app manifest to subscribe `channel_shared`, `channel_unshared` and `member_joined_channel`.
 
 - A conversation that moves to a different memory store starts clean: nothing from the old session is carried over, and the old session is not handed back while a turn is still running in it.
 

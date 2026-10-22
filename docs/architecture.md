@@ -317,8 +317,8 @@ event fires only on a direct mention, but installs have reported it arriving
 for thread replies that never mentioned the bot, so `_handle_app_mention`
 checks the text itself, as Discord checks `message.mentions`. The bot's user
 id comes from `auth.test`, cached per workspace. The check runs after the
-token read and before dedup and the Slack Connect rejection, so an external
-sender who never addressed the bot gets no notice. A dropped event is logged as
+token read and before dedup, so a sender (an external member included)
+who never addressed the bot gets no notice. A dropped event is logged as
 `slack.event_dropped.no_explicit_mention`; a failed `auth.test` drops the event
 without an error reply.
 
@@ -1870,7 +1870,7 @@ add per-memory author/origin records or rollback tooling.
 
 ### Shared and personal memory
 
-An agent has two kinds of memory store (`packages/core/daimon/core/memory_resource.py`):
+An agent has three kinds of memory store (`packages/core/daimon/core/memory_resource.py`):
 
 - **Shared**: one per agent (`agent_memory_store`). Every session of the agent mounts
   it, for every person and channel. Its instructions keep it to team and agent
@@ -1880,6 +1880,9 @@ An agent has two kinds of memory store (`packages/core/daimon/core/memory_resour
   `/mnt/memory/personal-<account id>/` beside the shared store. Its instructions keep
   it to that person's preferences and facts about them, and forbid copying from it
   into the shared store.
+- **Channel**: one per agent and parent channel (`agent_channel_memory_store`, keyed by
+  platform and channel id), created on the first held session there. It is what a
+  held turn mounts, and nothing else (see below).
 
 A chat session is already keyed on the caller's account (`thread_sessions`), so only
 that person's own sessions (channel threads, DMs, on every platform) mount their
@@ -1911,6 +1914,30 @@ nothing personal is to be recorded. Who else gets one:
   (`cli.local_user`), which is configuration rather than a verified person, so it gets
   no personal store.
 
+**Held turns.** A turn is held (`Admission.hold`) when its requester is from another
+organisation or unknown, or its channel is shared with another organisation. A held
+session mounts its channel's store read-write (read-only when the turn's memory is
+restricted) and no other: not the shared store and no personal store, whoever asks. The
+channel store's instructions tell the agent that everyone in the channel, including
+people from another organisation, sees it and that it must not record anything it would
+not say there. The isolation holds both ways: a held session never has the shared or a
+personal store mounted, and an unheld session never has a channel store. A thread shares
+its parent channel's store, and a shared-thread session (no caller account, so no held
+credential) mounts the place's store too. `desired_snapshot_for` takes the same store, so
+a session still on the shared store when its channel turns shared (or the reverse) is
+replaced, with nothing carried over and refused while a turn is active (the memory
+boundary above); a session already on the channel store is reused. The session snapshot
+also records the isolation scope (`memory_scope`: absent when unheld, else
+`channel:<platform>:<id>`), whether or not a store mounted, so a held place whose store
+failed to provision is still told apart from an unheld one and from another place. Any
+scope change is a boundary, a permitted handoff to another agent included: it carries
+nothing across, though a handoff that stays on one side of the boundary keeps its carry
+rule. The field is omitted when unset, so the previous build reads the stored snapshot. A fleet worker
+captures exactly one memory resource, the shared store, so a held admission never reaches
+that capture. Archiving an agent archives its channel stores with the others. Rolling back
+to a build without channel stores replaces those sessions with shared-store ones (again
+carrying nothing over); the table is ignored.
+
 MA attaches memory stores only when a session is created. A live session recorded
 without a personal store is reused, not replaced, after the caller's store exists
 (`session_compat`); the store is mounted on the caller's next new session. A session
@@ -1923,7 +1950,18 @@ the number of memories, how many look personal and a few redacted examples (pref
 words kept, names, mentions, e-mail addresses and every other word masked). It only lists
 and reads memories; deciding what to do with them is left to the operator.
 
-`/memory` (Discord, Slack) and `memory` (Teams) still show the shared store read-only.
+`/memory` (Discord, Slack) and `memory` (Teams) still show the shared store read-only,
+or in a held place (the channel is recorded as shared, or the person asking is recorded
+as from another organisation) the channel's own store. The command takes the live facts
+from its adapter, not only the recorded ones: who the asker is (a workspace member, from
+another organisation, or unknown) and whether the platform calls the channel shared. Only
+a verified member in a channel neither the platform nor the registry calls shared reads the
+agent-wide store; an unknown asker is held, and nothing is recorded about them. Slack asks
+`users.info` and `conversations.info`; Teams reads the activity's tenant evidence (no
+evidence is unknown) and its channel type; Discord has no other-organisation members and
+uses the registry. In Teams the answer to a command typed in a held channel is never moved
+to the sender's 1:1 chat when the private reply is refused. In a held place `mine` and
+`forget-mine` answer that personal memory is not used there and touch nothing.
 `mine` lists the caller's own personal store and `mine /<path>` shows one file;
 `forget-mine` shows what would be deleted and a six-character code, and
 `forget-mine <code>` deletes every memory in that store. The store is always the one of

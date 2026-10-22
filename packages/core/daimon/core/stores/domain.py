@@ -94,6 +94,9 @@ class AccountIdentityRow(BaseModel):
     )  # platform_principals.external_id (LEFT JOIN on tenant's platform; null when none)
     # accounts.platform_role_ids as of the account's last chat turn.
     platform_role_ids: tuple[str, ...] = ()
+    # platform_principals.foreign_home_id: the principal was verified to belong to another
+    # organisation (sticky), so it is a client on every call, even with no running turn.
+    foreign_home_id: str | None = None
 
 
 class ChannelSkillRow(BaseModel):
@@ -133,6 +136,7 @@ class PlatformPrincipalRow(BaseModel):
     account_id: uuid.UUID
     created_at: datetime
     active_agent_name: str | None = None
+    foreign_home_id: str | None = None
 
 
 class PrincipalLinkRow(BaseModel):
@@ -804,6 +808,19 @@ class AgentMemoryStoreRow(BaseModel):
     created_at: datetime
 
 
+class AgentChannelMemoryStoreRow(BaseModel):
+    """Pydantic row for AgentChannelMemoryStore (a held channel's memory)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    platform: str
+    channel_id: str
+    memory_store_id: str
+    created_at: datetime
+
+
 class GitHubAppInstallationRow(BaseModel):
     """Pydantic row for GitHubAppInstallation."""
 
@@ -1118,6 +1135,7 @@ class TurnOriginRow(BaseModel):
     created_at: datetime
     expires_at: datetime
     sender_foreign: bool = False
+    shared_channel: bool = False
 
 
 class _Facts(BaseModel):

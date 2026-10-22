@@ -27,6 +27,7 @@ from daimon.core.turn.admission import AdmissionObserver, admit
 from daimon.core.turn.binding import prepared_persistence
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import PreparedTurn, bind_session
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.admin_bindings import AdminBindings, AdminCommand, AdminReceipt
 from daimon.testing.admission_evidence import AdmissionEffects, AdmissionReceipt, admission_edge
 from daimon.testing.channel_accounting import (
@@ -151,6 +152,7 @@ class New15Bindings:
             admitted = await admit(
                 self.deps,
                 tenant_id=uuid.UUID(self.scope.tenant_id),
+                requester_org=RequesterOrg.HOST,
                 platform=self.admin.platform,
                 external_user_id=self.external_user_id,
                 channel_id=self.channel_id,

@@ -16,6 +16,7 @@ from daimon.core.config import Settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
@@ -800,6 +801,7 @@ async def test_default_denial_observation_keeps_the_real_external_user_id(operat
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="denied-human",
             channel_id="900",

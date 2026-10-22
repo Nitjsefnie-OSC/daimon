@@ -64,6 +64,13 @@ async def require_turn_origin(
         tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id
     ):
         raise ToolError("That origin_context_id belongs to another agent.")
+    if auth.hold is not None and not auth.hold.contains(
+        origin.thread_id or origin.parent_channel_id, origin.parent_channel_id
+    ):
+        raise ToolError(
+            "This conversation is held to the channel it runs in, and that origin_context_id "
+            "is outside it. Tell the caller. Do not retry."
+        )
     return origin
 
 
@@ -85,6 +92,13 @@ async def _sole_running_origin_id(runtime: McpRuntime, auth: AuthIdentity) -> st
         for origin in running
         if derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=origin.responder_ma_agent_id)
         == executing_agent
+        # A held credential's one running turn is the one inside its channel.
+        and (
+            auth.hold is None
+            or auth.hold.contains(
+                origin.thread_id or origin.parent_channel_id, origin.parent_channel_id
+            )
+        )
     ]
     return str(mine[0].id) if len(mine) == 1 else None
 
