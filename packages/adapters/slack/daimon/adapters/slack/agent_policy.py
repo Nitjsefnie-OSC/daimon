@@ -152,6 +152,7 @@ async def refuse_unless_allowed(
     *,
     operation: OperationKind,
     tenant_id: uuid.UUID,
+    team_id: str,
     agent_id: uuid.UUID,
     channel_id: str,
     user_id: str,
@@ -164,7 +165,7 @@ async def refuse_unless_allowed(
     ephemeral), False to proceed. `caller_account_id` leaves the caller's own
     live sessions out of the sharing read; None counts them.
     """
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
         return False
 
@@ -215,6 +216,7 @@ async def refuse_unless_allowed_for_agent_name(
     *,
     operation: OperationKind,
     tenant_id: uuid.UUID,
+    team_id: str,
     agent_name: str,
     channel_id: str,
     user_id: str,
@@ -234,7 +236,7 @@ async def refuse_unless_allowed_for_agent_name(
     the sharing read; None counts them. `agent`, when the caller holds a fresh
     read, is decided as it is rather than looked up again by name.
     """
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     if _allowed_whatever_the_target(operation, is_admin=is_admin):
         return False
 

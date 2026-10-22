@@ -808,6 +808,19 @@ class AgentMemoryStoreRow(BaseModel):
     created_at: datetime
 
 
+class AgentChannelMemoryStoreRow(BaseModel):
+    """Pydantic row for AgentChannelMemoryStore (a held channel's memory)."""
+
+    model_config = ConfigDict(from_attributes=True, frozen=True)
+
+    tenant_id: uuid.UUID
+    agent_id: uuid.UUID
+    platform: str
+    channel_id: str
+    memory_store_id: str
+    created_at: datetime
+
+
 class GitHubAppInstallationRow(BaseModel):
     """Pydantic row for GitHubAppInstallation."""
 

@@ -172,7 +172,7 @@ async def handle_coding_tools_click(
         )
         return
 
-    is_admin = await resolve_is_admin(client, user_id=user_id)
+    is_admin = await resolve_is_admin(client, user_id=user_id, host_team_id=team_id)
     async with runtime.sessionmaker() as session:
         roster = await load_panel_roster(
             session,

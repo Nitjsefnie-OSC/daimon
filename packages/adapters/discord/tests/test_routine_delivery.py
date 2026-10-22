@@ -634,3 +634,36 @@ async def test_a_failed_record_does_not_fail_the_delivery(
 
     assert outcome.status == "delivered", "the result is out; a lost record only loses tidying"
     channel.send.assert_awaited_once()
+
+
+@pytest.mark.parametrize("marked", ["destination", "parent-found-at-delivery"])
+async def test_a_shared_channels_routine_never_leaves_it_by_dm(
+    marked: str,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The fire ran held to the channel. A thread saved without its parent is
+    placed at delivery, and the parent's recorded sharing holds it too."""
+    from daimon.core.stores.shared_channels import mark_channel_shared
+
+    row = await _routine(db_session)
+    await mark_channel_shared(
+        db_session,
+        tenant_id=row.tenant_id,
+        platform="discord",
+        channel_id="555" if marked == "destination" else "444",
+        source="platform",
+    )
+    await db_session.commit()
+    dms = _Dms()
+    if marked == "destination":
+        channels: object = discord.NotFound(MagicMock(status=404, reason="Not Found"), "gone")
+        expected = "destination_unavailable"
+    else:
+        channels = {555: _uncached_thread(private=True), 444: _text_channel()}
+        expected = "creator_cannot_post"
+
+    outcome = await _poster(db_session_factory, channels, dms=dms)(row)
+
+    assert (outcome.status, outcome.note) == ("skipped", expected)
+    assert dms.sent == [], "the result never goes by DM"

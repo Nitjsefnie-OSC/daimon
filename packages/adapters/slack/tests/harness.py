@@ -5,8 +5,10 @@ tests that drive `_orchestrate` / `_run_thread_turn`.
 
 from __future__ import annotations
 
+import re
 from dataclasses import replace
 from decimal import Decimal
+from typing import Any
 from unittest.mock import MagicMock
 
 import httpx
@@ -119,3 +121,19 @@ def make_orchestrate_app(
         deployment_default=resolved_deployment_default,
     )
     return SlackApp(runtime=runtime), anthropic_client
+
+
+_CONVERSATIONS_INFO_PATTERN = re.compile(r"https://slack\.com/api/conversations\.info.*")
+
+
+def register_conversations_info(mock: Any, *, is_ext_shared: bool) -> None:
+    """Answer ``conversations.info`` (GET) with the channel's Slack Connect flag.
+
+    Not registered by default: a test that does not say whether its channel is
+    shared gets Slack's lookup failing, which admission treats as "no signal".
+    """
+    mock.get(  # pyright: ignore[reportUnknownMemberType]
+        _CONVERSATIONS_INFO_PATTERN,
+        payload={"ok": True, "channel": {"id": "C_ANY", "is_ext_shared": is_ext_shared}},
+        repeat=True,
+    )

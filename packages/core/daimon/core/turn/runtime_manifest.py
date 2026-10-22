@@ -1349,7 +1349,12 @@ async def capture_preparation_source(
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.sessions import project_session_resources
+    from mux.errors import ScopeViolation
 
+    if request.admission.hold is not None:
+        # The source records the agent-wide memory store; a held turn mounts its
+        # channel's store only, so it never has a source to capture.
+        raise ScopeViolation("source-preparation", "a held turn never captures a fleet source")
     if fresh:
         from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 

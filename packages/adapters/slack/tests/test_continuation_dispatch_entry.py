@@ -44,9 +44,12 @@ from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn
 from daimon.core.turn.run import RunOutcome
 from daimon.core.turn.state import TurnState
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing import build_fake_anthropic, ma_agent, ma_environment, resolved_agent_env_router
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
+
+from .harness import register_conversations_info
 
 _AGENT_ID = "agent_continuation_entry"
 _ENV_ID = "env_continuation_entry"
@@ -579,28 +582,18 @@ async def test_continuation_turn_never_runs_as_admin_for_a_non_admin_requester(
     )
 
 
-@pytest.mark.parametrize(
-    "requester",
-    [
-        pytest.param(None, id="lookup-failed"),
-        pytest.param(_requester(is_admin=True, team_id="T_OTHER"), id="external-workspace-admin"),
-        pytest.param(_requester(is_admin=True, is_stranger=True), id="stranger"),
-        pytest.param(_requester(is_admin=True, team_id=None), id="no-team-id"),
-    ],
-)
 @pytest.mark.parametrize("reason", ["timer", "task_handoff"])
-async def test_continuation_for_an_unverified_requester_is_denied_and_runs_nothing(
+async def test_continuation_whose_requester_lookup_failed_is_denied_and_runs_nothing(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
-    requester: SlackRequester | None,
     reason: ContinuationReason,
 ) -> None:
-    """Only a verified member of the host workspace runs a queued follow-up.
+    """A failed users.info proves nothing about the requester, so the follow-up is denied.
 
-    An external member (or a failed lookup, which proves nothing) raises
-    `AdmissionDenied`, which core dispatch settles as `admission_denied:<reason>`
-    without a retry. No account is admitted, no role written, no session bound.
+    It raises `AdmissionDenied`, which core dispatch settles as
+    `admission_denied:<reason>` without a retry. No account is admitted, no role
+    written, no session bound.
     """
     tenant = await make_tenant(db_session, platform="slack", workspace_id=f"T_CONT_DENIED_{reason}")
     principal = await get_or_create_platform_principal(
@@ -617,7 +610,7 @@ async def test_continuation_for_an_unverified_requester_is_denied_and_runs_nothi
         patch(
             "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=requester,
+            return_value=None,
         ),
         patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock) as admit,
         patch("daimon.adapters.slack.app.bind_session", new_callable=AsyncMock) as bind,
@@ -641,7 +634,78 @@ async def test_continuation_for_an_unverified_requester_is_denied_and_runs_nothi
     assert await _requester_role(db_session_factory) == [Role.USER], "no role may be written"
 
 
-async def test_an_external_requesters_queued_follow_up_settles_as_admission_denied(
+@pytest.mark.parametrize(
+    ("requester", "org", "home"),
+    [
+        pytest.param(
+            _requester(is_admin=True, team_id="T_OTHER"),
+            RequesterOrg.OTHER,
+            "T_OTHER",
+            id="external-workspace-admin",
+        ),
+        pytest.param(
+            _requester(is_admin=True, is_stranger=True), RequesterOrg.UNKNOWN, None, id="stranger"
+        ),
+        pytest.param(
+            _requester(is_admin=True, team_id=None), RequesterOrg.UNKNOWN, None, id="no-team-id"
+        ),
+        pytest.param(_requester(), RequesterOrg.HOST, None, id="host-member"),
+    ],
+)
+async def test_continuation_runs_with_the_requesters_organisation_from_users_info(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    requester: SlackRequester,
+    org: RequesterOrg,
+    home: str | None,
+) -> None:
+    """An external requester's queued follow-up is admitted as another organisation
+    (held, never an admin) instead of being denied; a host member keeps running as one."""
+    tenant = await make_tenant(db_session, platform="slack", workspace_id="T_CONT_ENTRY")
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U_REQUESTER"
+    )
+    await db_session.commit()
+    app = _make_app(db_session_factory, tenant_id_str=str(tenant.id))
+    register_conversations_info(fake_slack_web_client.mock, is_ext_shared=True)
+    row = _make_continuation_row(
+        tenant_id=tenant.id, account_id=principal.account_id, reason="timer"
+    )
+
+    with (
+        patch(
+            "daimon.adapters.slack.app.resolve_requester",
+            new_callable=AsyncMock,
+            return_value=requester,
+        ),
+        patch(
+            "daimon.adapters.slack.app.admit",
+            new_callable=AsyncMock,
+            side_effect=AdmissionDenied(reason="cap_exceeded"),
+        ) as admit,
+        pytest.raises(AdmissionDenied),
+    ):
+        await app._run_continuation_turn(  # pyright: ignore[reportPrivateUsage]
+            row,
+            "finish the migration",
+            web_client=fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_ID,
+            team_id="T_CONT_ENTRY",
+        )
+
+    kwargs = admit.await_args.kwargs  # pyright: ignore[reportOptionalMemberAccess]
+    assert kwargs["requester_org"] is org
+    assert kwargs["requester_home_id"] == home
+    assert kwargs["role"] is (
+        Role.ADMIN if org is RequesterOrg.HOST and requester.is_admin else Role.USER
+    )
+    assert kwargs["channel_shared"] is True
+
+
+async def test_a_failed_requester_lookup_settles_the_queued_follow_up_as_admission_denied(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
@@ -659,7 +723,7 @@ async def test_an_external_requesters_queued_follow_up_settles_as_admission_deni
         patch(
             "daimon.adapters.slack.app.resolve_requester",
             new_callable=AsyncMock,
-            return_value=_requester(is_admin=True, team_id="T_OTHER"),
+            return_value=None,
         ),
         patch("daimon.adapters.slack.app.run_prepared_turn", new_callable=AsyncMock) as run_turn,
     ):

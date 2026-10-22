@@ -308,7 +308,7 @@ async def run_new_agent_submission(
         )
 
         async with runtime.sessionmaker() as session:
-            is_admin = await resolve_is_admin(web_client, user_id=user_id)
+            is_admin = await resolve_is_admin(web_client, user_id=user_id, host_team_id=team_id)
             roster = await load_panel_roster(
                 session,
                 runtime.anthropic,

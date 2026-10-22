@@ -179,6 +179,19 @@ def _track_host_team(monkeypatch: pytest.MonkeyPatch) -> None:
         monkeypatch.setattr(SlackApp, name, _tracking_host_team(getattr(SlackApp, name)))
 
 
+@pytest.fixture(autouse=True)
+def _host_member_verified(monkeypatch: pytest.MonkeyPatch) -> None:
+    """Dispatch tests send payloads that name no workspace; treat their user as a host member.
+
+    The gate itself is covered in `test_unverified_interactions.py`, which overrides this.
+    """
+
+    async def verified(self: SlackApp, team_id: str, user_id: str) -> str:
+        return "member"
+
+    monkeypatch.setattr(SlackApp, "_host_check", verified)
+
+
 @pytest.fixture
 def fake_slack_web_client() -> Iterator[FakeSlackWebClient]:
     """Yield a real AsyncWebClient whose aiohttp calls are intercepted.
