@@ -17,6 +17,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import uuid4
 
+import httpx
 import structlog
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
@@ -684,8 +685,9 @@ class _LazyStream(AsyncIterator[TurnEvent]):
         if self._reader is not None:
             raise RuntimeError("concurrent Gemini stream reads are unsupported")
         self._reader = asyncio.current_task()
+        idle = asyncio.timeout(self.timeout_s)
         try:
-            async with asyncio.timeout(self.timeout_s):
+            async with idle:
                 await self._gate.wait()
                 if self._closed:
                     raise StopAsyncIteration
@@ -735,6 +737,15 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                     self.io.check_terminal(normalized)
                     self._ended |= normalized.type == "session.turn_ended"
                     return frame
+        except TimeoutError:
+            await self.close()
+            if not idle.expired():
+                raise
+            # Gemini can stay silent past one read while the interaction
+            # still runs or has already completed. That is the driver's
+            # eventless cycle (status check, then reconnect or replay), never
+            # the turn ceiling, which the caller's own deadline enforces.
+            raise httpx.ReadTimeout(f"Gemini stream sent no event for {self.timeout_s}s") from None
         except BaseException:
             await self.close()
             raise
