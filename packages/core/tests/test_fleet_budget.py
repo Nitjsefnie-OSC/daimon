@@ -795,7 +795,8 @@ async def test_real_reservation_is_idempotent_and_unknown_consumes_bound_after_r
         audits = await security_audit.list_events(db, tenant_id=run.tenant_id)
         ledger = await tenant_ledger.list_for_tenant(db, tenant_id=run.tenant_id)
     assert len(audits) == 1
-    assert [entry.reason for entry in ledger] == (
+    # list_for_tenant has no order; compare the reasons as a multiset.
+    assert sorted(entry.reason for entry in ledger) == (
         ["trial_credit", "turn_debit"] if provider == "anthropic" else ["trial_credit"]
     )
 

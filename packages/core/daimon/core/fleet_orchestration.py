@@ -270,6 +270,21 @@ def _session_authorize(
         raise FleetRefused(decision.reason or "permission_refused")
 
 
+def worker_trigger(reviewed_result: Event | None) -> str:
+    """The input a worker's turn starts with; a reviewer's embeds the reviewed result."""
+    from daimon.core.fleet import result_digest
+
+    if reviewed_result is None:
+        return "Complete the task in your instructions."
+    return json.dumps(
+        {
+            "instruction": "Return JSON verdict approved or refused and reviewed_digest.",
+            "reviewed_digest": result_digest(dict(reviewed_result.payload)),
+            "result": dict(reviewed_result.payload),
+        }
+    )
+
+
 class FleetOrchestrator:
     """Shared operations for authenticated MCP and platform control adapters."""
 
@@ -333,6 +348,7 @@ class FleetOrchestrator:
         max_input_tokens: int | None = None,
         max_output_tokens: int | None = None,
         planned_workers: int | None = None,
+        planned_on_provider: int | None = None,
         max_runtime_s: int | None = None,
     ) -> WorkerLimits:
         """Limits for a spawn, with omitted ones defaulted from the frozen root.
@@ -367,16 +383,19 @@ class FleetOrchestrator:
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             planned_workers=planned_workers,
+            planned_on_provider=planned_on_provider,
             now=now,
             max_runtime_s=max_runtime_s,
         )
 
     def _bounded_gemini(
         self,
+        parent: WorkerPermissions,
         resolved: ResolvedWorkerSpec,
         resolve: Callable[[WorkerLimits], ResolvedWorkerSpec],
         *,
         fill: bool,
+        trigger: str,
     ) -> ResolvedWorkerSpec:
         """Keep a Gemini worker off the unbounded path when its prompt cannot fit it.
 
@@ -384,9 +403,13 @@ class FleetOrchestrator:
         inherited root instructions alone exceed. When the caller set no token limits,
         a Flash worker gets a bounded envelope derived from its own prompt and budget;
         an unbounded worker whose prompt clearly exceeds the cap is refused here rather
-        than sent to a guaranteed provider 400.
+        than sent to a guaranteed provider 400. The prompt counted is the instructions
+        plus the exact trigger dispatch sends, which embeds a reviewer's reviewed result,
+        and the envelope's worst case stays within the deployment's per-turn hold.
         """
         from daimon.core.neutral_resources import bounded_gemini_worker_tokens
+        from daimon.core.turn.runtime_manifest import manifest_hold_usd
+        from mux.contracts.config import ConfigRevision
         from mux.drivers.gemini.flash import FLASH_PRIMARY
         from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS
 
@@ -402,12 +425,22 @@ class FleetOrchestrator:
         ):
             markup = getattr(self._ports, "markup", None)
             markup = markup if isinstance(markup, Decimal) else Decimal(1)
+            hold = manifest_hold_usd(
+                ConfigRevision.create(parent.fleet.root.channel, 1, resolved.backend),
+                tenant_id=parent.fleet.scope.tenant_id,
+                account_id=parent.fleet.scope.account_id,
+            )
             tokens = bounded_gemini_worker_tokens(
-                system, limits.budget_usd, model=resolved.spec.model.id, markup=markup
+                system,
+                limits.budget_usd,
+                model=resolved.spec.model.id,
+                markup=markup,
+                hold_usd=hold,
+                extra_input=trigger,
             )
             return resolve(limits.model_copy(update=tokens))
         # About four characters per token: an estimate, used only to refuse early.
-        if len(system) // 4 >= WORKER_MAX_TOTAL_TOKENS:
+        if (len(system) + len(trigger)) // 4 >= WORKER_MAX_TOTAL_TOKENS:
             raise FleetRefused("prompt_exceeds_worker_token_cap")
         return resolved
 
@@ -498,7 +531,6 @@ class FleetOrchestrator:
             )
 
         resolved = resolve(limits)
-        resolved = self._bounded_gemini(resolved, resolve, fill=fill_token_limits)
         reviewed: Event | None = None
         if reviewer_of is not None:
             run, workers = await self.read_snapshot(parent, policy, selected_run)
@@ -508,6 +540,9 @@ class FleetOrchestrator:
                 "format": "review",
                 "reviewed_digest": target.result.digest if target.result is not None else "",
             }
+        resolved = self._bounded_gemini(
+            parent, resolved, resolve, fill=fill_token_limits, trigger=worker_trigger(reviewed)
+        )
         run, worker = await owner.admit(
             parent,
             resolved,
@@ -997,7 +1032,7 @@ class HostFleetPorts:
         reviewed_result: Event | None,
     ) -> None:
         from daimon.core.channel_budget import watch_fleet_budget
-        from daimon.core.fleet import FleetConflict, result_digest
+        from daimon.core.fleet import FleetConflict
         from daimon.core.headless_runner import commit_worker_transition, run_worker
         from daimon.core.stores import fleet
         from daimon.core.turn.ceiling import remaining_s
@@ -1046,17 +1081,7 @@ class HostFleetPorts:
 
                 watch[2].add_done_callback(ended)
             cancel = watch[0].setdefault(worker.id, asyncio.Event())
-            trigger = "Complete the task in your instructions."
-            if reviewed_result is not None:
-                trigger = json.dumps(
-                    {
-                        "instruction": (
-                            "Return JSON verdict approved or refused and reviewed_digest."
-                        ),
-                        "reviewed_digest": result_digest(dict(reviewed_result.payload)),
-                        "result": dict(reviewed_result.payload),
-                    }
-                )
+            trigger = worker_trigger(reviewed_result)
 
             async def execute() -> None:
                 with request.deps.running_turns.track():

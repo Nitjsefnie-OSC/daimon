@@ -12,7 +12,7 @@ import io
 import json
 import uuid
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
@@ -1097,7 +1097,7 @@ def worker_runtime_ceiling(
     return WORKER_MAX_RUNTIME_S if INLINE_REUSE.profile_id in profiles else None
 
 
-#: Bytes added to a bounded Gemini worker's input cap for the trigger and turn wrapping.
+#: Tokens added to a bounded Gemini worker's input cap for the turn's own wrapping.
 GEMINI_INPUT_HEADROOM_TOKENS = 4096
 #: The smallest output envelope worth dispatching; a budget that buys less refuses.
 GEMINI_MIN_OUTPUT_TOKENS = 1024
@@ -1117,17 +1117,25 @@ def gemini_worker_cost_usd(model: str, max_input_tokens: int, max_output_tokens:
 
 
 def bounded_gemini_worker_tokens(
-    system: str, budget_usd: Decimal, *, model: str, markup: Decimal = Decimal(1)
+    system: str,
+    budget_usd: Decimal,
+    *,
+    model: str,
+    markup: Decimal = Decimal(1),
+    hold_usd: Decimal | None = None,
+    extra_input: str = "",
 ) -> dict[str, int]:
     """Token limits that keep a plain-language Gemini worker on the bounded path.
 
-    max_input_tokens = UTF-8 bytes of the worker's instructions + headroom: a token
-    never covers less than one byte, so the real prompt always fits, and the driver
-    still counts it exactly before sending. max_output_tokens = what the rest of the
-    worker's budget buys at the output tariff, at most GEMINI_MAX_OUTPUT_TOKENS:
-    (budget / markup - max_input * input_rate) / output_rate. So the worst-case
-    provider cost, max_input * input_rate + max_output * output_rate, never exceeds
-    budget / markup.
+    max_input_tokens = UTF-8 bytes of the worker's instructions and of `extra_input`
+    (its trigger message, which embeds a reviewed result for a reviewer) + headroom:
+    a token never covers less than one byte, so the real prompt always fits, and the
+    driver still counts it exactly before sending. With limit = min(budget / markup,
+    hold_usd), max_output_tokens = what the rest of the limit buys at the output
+    tariff, at most GEMINI_MAX_OUTPUT_TOKENS: (limit - max_input * input_rate) /
+    output_rate. So the worst-case provider cost, max_input * input_rate +
+    max_output * output_rate, never exceeds the worker's budget or the deployment's
+    per-turn hold.
     """
     from daimon.core import pricing
     from mux.profiles.gemini import INLINE_REUSE
@@ -1135,11 +1143,12 @@ def bounded_gemini_worker_tokens(
     price = pricing.provider_prices(INLINE_REUSE.profile_id).get((INLINE_REUSE.provider, model))
     if price is None or markup <= 0:
         raise WorkerSpecRefused("budget", "unsupported")
-    max_input = len(system.encode()) + GEMINI_INPUT_HEADROOM_TOKENS
+    max_input = len(system.encode()) + len(extra_input.encode()) + GEMINI_INPUT_HEADROOM_TOKENS
     if price.max_priced_input_tokens is not None and max_input > price.max_priced_input_tokens:
         raise WorkerSpecRefused("max_input_tokens", "unsupported")
     per_token = Decimal(10**6)
-    room = budget_usd / markup - max_input * price.input / per_token
+    limit = budget_usd / markup if hold_usd is None else min(budget_usd / markup, hold_usd)
+    room = limit - max_input * price.input / per_token
     max_output = min(
         GEMINI_MAX_OUTPUT_TOKENS,
         int((room * per_token / price.output).to_integral_value(rounding=ROUND_DOWN)),
@@ -1147,6 +1156,17 @@ def bounded_gemini_worker_tokens(
     if max_output < GEMINI_MIN_OUTPUT_TOKENS:
         raise WorkerSpecRefused("budget", "exhausted")
     return {"max_input_tokens": max_input, "max_output_tokens": max_output}
+
+
+def planned_providers(parent: WorkerPermissions, models: Sequence[str]) -> list[Provider]:
+    """The provider of each planned worker's model; every model must be granted."""
+    granted: dict[str, Provider] = {
+        model.id: model.provider for model in (*parent.models, parent.spec.model)
+    }
+    try:
+        return [granted[model] for model in models]
+    except KeyError:
+        raise WorkerSpecRefused("backend", "not_subset") from None
 
 
 def default_worker_limits(
@@ -1163,6 +1183,7 @@ def default_worker_limits(
     planned_workers: int | None = None,
     now: datetime | None = None,
     max_runtime_s: int | None = None,
+    planned_on_provider: int | None = None,
 ) -> WorkerLimits:
     """Fill omitted worker limits from the frozen root, so a model need not guess them.
 
@@ -1174,7 +1195,8 @@ def default_worker_limits(
     parallel spawns reading the same snapshot never add up past either cap. A root that
     says how many workers it plans shares among those not yet admitted instead (still
     at most the free slots); spawning more at once than planned can only be refused
-    by admission, never exceed a cap. Supplied
+    by admission, never exceed a cap. When the root also says how many planned workers
+    use this provider, the provider line is shared among just those. Supplied
     budgets and every ceiling are still checked by the resolver and financial admission.
     """
     latest = ceiling.deadline
@@ -1192,8 +1214,13 @@ def default_worker_limits(
         slots = run.max_workers - len(workers)
         if slots <= 0:
             raise WorkerSpecRefused("budget", "exhausted")
+        free = slots
         if planned_workers is not None:
-            slots = min(slots, max(planned_workers - len(workers), 1))
+            slots = min(free, max(planned_workers - len(workers), 1))
+        provider_slots = slots
+        if planned_on_provider is not None:
+            on_provider = sum(1 for w in workers if w.backend == provider)
+            provider_slots = min(free, max(planned_on_provider - on_provider, 1))
 
         def held(provider_only: bool) -> Decimal:
             return sum(
@@ -1211,7 +1238,7 @@ def default_worker_limits(
         )
         if ceiling.provider_limits_usd is not None:
             line = ceiling.provider_limits_usd.get(provider, Decimal(0))
-            share = min(share, (line - held(True)) / slots)
+            share = min(share, (line - held(True)) / provider_slots)
         budget_usd = max(share, Decimal(0)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
         if budget_usd <= 0:
             # Refuse before admission, so an exhausted run never spends a worker slot.

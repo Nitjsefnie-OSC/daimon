@@ -8,6 +8,7 @@ import os
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import replace
 from datetime import datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
@@ -2615,6 +2616,23 @@ def _matching_rows(
     """`profile` and `tenant_id` are always exact. The other scope fields are
     exact-matched first; `allow_wildcard` additionally accepts `_WILDCARD` rows
     on those fields only — the caller tries exact-only before falling back."""
+    return _rows_for(
+        rows,
+        revision,
+        tenant_id=request.scope.tenant_id,
+        account_id=request.scope.account_id,
+        allow_wildcard=allow_wildcard,
+    )
+
+
+def _rows_for(
+    rows: list[dict[str, JsonValue]],
+    revision: ConfigRevision,
+    *,
+    tenant_id: str,
+    account_id: str,
+    allow_wildcard: bool,
+) -> list[dict[str, JsonValue]]:
 
     def field_matches(row: dict[str, JsonValue], field: str, actual: object) -> bool:
         value = row.get(field)
@@ -2626,12 +2644,47 @@ def _matching_rows(
         row
         for row in rows
         if row.get("profile") == revision.profile
-        and row.get("tenant_id") == request.scope.tenant_id
+        and row.get("tenant_id") == tenant_id
         and field_matches(row, "platform", revision.channel.platform)
         and field_matches(row, "channel_id", revision.channel.channel_id)
-        and field_matches(row, "account_id", request.scope.account_id)
+        and field_matches(row, "account_id", account_id)
         and manifest_configuration_matches(row, revision)
     ]
+
+
+def manifest_hold_usd(
+    revision: ConfigRevision, *, tenant_id: str, account_id: str
+) -> Decimal | None:
+    """The per-turn hold of the row `select_runtime_manifest` would select, if any.
+
+    Exact rows first, then the most specific wildcard row, as selection does: a
+    channel's own row wins over a tenant-wide "*" row. None when no manifest is
+    installed or readable, no single row is selected, or it names no valid hold.
+    """
+    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    if not manifest_path:
+        return None
+    try:
+        with Path(manifest_path).open("rb") as manifest:
+            raw = manifest.read(_MAX_BYTES + 1)
+        if len(raw) > _MAX_BYTES:
+            return None
+        rows = _ROWS.validate_json(raw)
+        selected = _rows_for(
+            rows, revision, tenant_id=tenant_id, account_id=account_id, allow_wildcard=False
+        )
+        if not selected:
+            selected = _most_specific(
+                _rows_for(
+                    rows, revision, tenant_id=tenant_id, account_id=account_id, allow_wildcard=True
+                )
+            )
+        if len(selected) != 1:
+            return None
+        hold = Decimal(str(selected[0]["hold_usd"]))
+    except (OSError, ValidationError, KeyError, ArithmeticError, ValueError):
+        return None
+    return hold if hold.is_finite() and hold > 0 else None
 
 
 def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:

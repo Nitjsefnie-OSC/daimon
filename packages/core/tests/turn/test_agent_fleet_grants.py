@@ -244,6 +244,36 @@ async def test_expired_grant_cannot_be_persisted(owned):
     assert await service.current(agent) is None
 
 
+def _capped(*caps: str):
+    return grant().model_copy(
+        update={
+            "limits": grant().limits.model_copy(
+                update={
+                    "provider_limits_usd": dict(
+                        zip(("anthropic", "openai", "gemini"), map(Decimal, caps), strict=True)
+                    )
+                }
+            )
+        }
+    )
+
+
+async def test_provider_caps_above_the_run_budget_are_refused_at_preview(owned):
+    """Fleet r6: caps of 3 x $1.20 under a $2 run passed the grant, then failed every spawn."""
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    over = _capped("0.40", "0.40", "0.40")  # $1.20 of caps under the $0.90 run budget
+    with pytest.raises(AgentBackendRefused, match="fleet provider limits exceed budget"):
+        await service.preview_fleet_grant(agent, over, now=NOW)
+    with pytest.raises(AgentBackendRefused, match="fleet provider limits exceed budget"):
+        await service.set_fleet_grant(
+            agent, over, 0, actor, expected_preview_digest="0" * 64, now=NOW
+        )
+    assert await service.current(agent) is None
+    exact = await set_grant(service, agent, actor, _capped("0.30", "0.30", "0.30"))
+    assert exact.fleet_grant["limits"]["provider_limits_usd"]["gemini"] == "0.30"
+
+
 @pytest.mark.parametrize("fault", ["provider", "model", "duplicate", "wildcard", "options"])
 def test_grant_choices_are_exact_pairs_not_a_cartesian_product(fault):
     value = grant().model_dump(mode="json")

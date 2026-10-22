@@ -1170,3 +1170,50 @@ async def test_fleet_r9_token_limits_are_filled_only_when_the_caller_gives_none(
     assert plain.kwargs["fill_token_limits"] is True
     assert explicit.kwargs["fill_token_limits"] is False
     assert explicit.kwargs["limits"].max_input_tokens == 262144
+
+
+async def test_planned_models_give_each_provider_its_own_share() -> None:
+    root = plain_root()
+    root = replace(
+        root,
+        limits=root.limits.model_copy(
+            update={"provider_limits_usd": {"anthropic": Decimal("0.5"), "openai": Decimal("0.5")}}
+        ),
+    )
+    bridge, orchestrator = plain_bridge(root)
+    plan = ["gpt-6-luna", "claude-haiku-5-5"]
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {
+                "operation_key": "W1",
+                "role": "W1",
+                "task": "Compare X and Y.",
+                "model": "gpt-6-luna",
+                "planned_models": plan,
+            },
+        )
+        with pytest.raises(ToolError, match="does not allow: gemini-3.8-pro"):
+            await client.call_tool(
+                "fleet_spawn",
+                {
+                    "operation_key": "W2",
+                    "role": "W2",
+                    "task": "Go.",
+                    "planned_models": [*plan, "gemini-3.8-pro"],
+                },
+            )
+        with pytest.raises(ToolError, match="planned_workers is smaller"):
+            await client.call_tool(
+                "fleet_spawn",
+                {
+                    "operation_key": "W3",
+                    "role": "W3",
+                    "task": "Go.",
+                    "planned_models": plan,
+                    "planned_workers": 1,
+                },
+            )
+    # Run $1 over the 2 planned workers; the OpenAI line ($0.50) is not split.
+    assert orchestrator.spawn.await_args.kwargs["limits"].budget_usd == Decimal("0.50")
+    orchestrator.spawn.assert_awaited_once()

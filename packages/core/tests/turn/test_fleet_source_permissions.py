@@ -1347,8 +1347,9 @@ async def test_fleet_r9_plain_gemini_spawn_fills_limits_only_when_none_are_given
     plain = task_worker_spec(root, role="W3", task="Compare X and Y.", model=flash.id)
     resolve = resolver(plain)
     base = resolve(root.limits.model_copy(update={"max_turns": 1}))
-    filled = owner._bounded_gemini(base, resolve, fill=True)  # pyright: ignore[reportPrivateUsage]
-    assert filled.limits.max_input_tokens == len(filled.spec.system.encode()) + 4096
+    filled = owner._bounded_gemini(root, base, resolve, fill=True, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
+    # The instructions plus the trigger dispatch sends, plus headroom.
+    assert filled.limits.max_input_tokens == len(filled.spec.system.encode()) + len("Go.") + 4096
     assert filled.limits.max_output_tokens is not None
     # Explicit limits from the caller win and are not replaced.
     explicit = resolve(
@@ -1356,12 +1357,275 @@ async def test_fleet_r9_plain_gemini_spawn_fills_limits_only_when_none_are_given
             update={"max_turns": 1, "max_input_tokens": 262144, "max_output_tokens": 65536}
         )
     )
-    kept = owner._bounded_gemini(explicit, resolve, fill=True)  # pyright: ignore[reportPrivateUsage]
+    kept = owner._bounded_gemini(root, explicit, resolve, fill=True, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
     assert (kept.limits.max_input_tokens, kept.limits.max_output_tokens) == (262144, 65536)
     # Without a fill, a prompt the unbounded 4096-token cap cannot hold is refused clearly.
     with pytest.raises(FleetRefused, match="prompt_exceeds_worker_token_cap"):
-        owner._bounded_gemini(base, resolve, fill=False)  # pyright: ignore[reportPrivateUsage]
+        owner._bounded_gemini(root, base, resolve, fill=False, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
     # Other providers are untouched.
     luna = resolver(task_worker_spec(root, role="W2", task="Compare.", model="gpt-6-luna"))
     other = luna(root.limits.model_copy(update={"max_turns": 1}))
-    assert owner._bounded_gemini(other, luna, fill=True) is other  # pyright: ignore[reportPrivateUsage]
+    assert owner._bounded_gemini(root, other, luna, fill=True, trigger="Go.") is other  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_provider_line_is_shared_only_by_that_providers_planned_workers():
+    """Fleet r6: one worker per provider could use only a third of each provider line."""
+    from daimon.core.neutral_resources import default_worker_limits
+
+    skewed = CEILING.model_copy(
+        update={
+            "provider_limits_usd": {
+                "anthropic": Decimal("0.30"),
+                "openai": Decimal("0.15"),
+                "gemini": Decimal("1.55"),
+            }
+        }
+    )
+    run = _run()
+
+    def share(provider, on_provider, workers=()):
+        return default_worker_limits(
+            skewed,
+            run,
+            workers,
+            provider=provider,
+            planned_workers=3,
+            planned_on_provider=on_provider,
+        ).budget_usd
+
+    assert (share("anthropic", 1), share("openai", 1), share("gemini", 1)) == (
+        Decimal("0.30"),
+        Decimal("0.15"),
+        Decimal("0.66"),
+    )
+    # Without the per-provider count each line is still split three ways.
+    assert default_worker_limits(
+        skewed, run, (), provider="gemini", planned_workers=3
+    ).budget_usd == Decimal("0.51")
+    # Two planned on one provider share its line; one already admitted leaves its rest.
+    assert share("anthropic", 2) == Decimal("0.15")
+    assert share("anthropic", 2, (_worker("anthropic", "0.15"),)) == Decimal("0.15")
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        ("anthropic", "openai", "gemini"),
+        ("gemini", "gemini", "openai"),
+        ("anthropic", "anthropic", "anthropic", "openai"),
+    ],
+)
+def test_parallel_spawns_with_a_provider_plan_never_exceed_any_cap(plan):
+    from daimon.core.neutral_resources import default_worker_limits
+
+    run = _run()
+    spent = {provider: Decimal(0) for provider in CEILING.provider_limits_usd}
+    total = Decimal(0)
+    for provider in plan:
+        amount = default_worker_limits(
+            CEILING,
+            run,
+            (),
+            provider=provider,
+            planned_workers=len(plan),
+            planned_on_provider=plan.count(provider),
+        ).budget_usd
+        spent[provider] += amount
+        total += amount
+    assert total <= run.total_budget_usd
+    assert all(spent[p] <= CEILING.provider_limits_usd[p] for p in spent)
+
+
+def test_bounded_gemini_tokens_count_the_trigger_and_respect_the_hold():
+    from daimon.core.neutral_resources import (
+        bounded_gemini_worker_tokens,
+        gemini_worker_cost_usd,
+    )
+
+    system = "Real root instructions. " * 1000
+    review = json.dumps({"result": {"text": "x" * 50_000}})
+    plain = bounded_gemini_worker_tokens(system, Decimal("1"), model="gemini-3.8-flash")
+    reviewer = bounded_gemini_worker_tokens(
+        system, Decimal("1"), model="gemini-3.8-flash", extra_input=review
+    )
+    # A reviewer's embedded reviewed result is part of what it sends.
+    assert reviewer["max_input_tokens"] == plain["max_input_tokens"] + len(review.encode())
+    held = bounded_gemini_worker_tokens(
+        system, Decimal("1"), model="gemini-3.8-flash", hold_usd=Decimal("0.10")
+    )
+    worst = gemini_worker_cost_usd(
+        "gemini-3.8-flash", held["max_input_tokens"], held["max_output_tokens"]
+    )
+    assert (
+        worst
+        <= Decimal("0.10")
+        < gemini_worker_cost_usd(
+            "gemini-3.8-flash", plain["max_input_tokens"], plain["max_output_tokens"]
+        )
+    )
+
+
+def test_manifest_hold_is_the_row_runtime_selection_would_pick(tmp_path, monkeypatch):
+    """Since D3 a tenant-wide "*" Gemini row sits next to #fleet-test's own rows."""
+    from daimon.core.turn.runtime_manifest import manifest_hold_usd
+    from mux.contracts.config import ConfigRevision
+
+    backend = backend_selection("gemini").model_copy(update={"model": "gemini-3.8-flash"})
+    grant = {
+        "profiles": [backend.profile],
+        "models": ["gemini-3.8-flash"],
+        "thread_modes": [backend.thread_mode],
+        "requires": {},
+    }
+
+    def revision(channel_id):
+        channel = ChannelRef(tenant_id="tenant", platform="discord", channel_id=channel_id)
+        return ConfigRevision.create(channel, 1, backend)
+
+    def row(**changes):
+        base = {
+            "profile": backend.profile,
+            "tenant_id": "tenant",
+            "platform": "discord",
+            "channel_id": "fleet-test",
+            "account_id": "*",
+            "configuration_grant": grant,
+            "hold_usd": "0.49",
+        }
+        return base | changes
+
+    path = tmp_path / "runtime.json"
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+
+    def hold(channel_id, account_id="acct"):
+        return manifest_hold_usd(revision(channel_id), tenant_id="tenant", account_id=account_id)
+
+    path.write_text(
+        json.dumps(
+            [
+                row(),
+                row(platform="*", channel_id="*", hold_usd="0.25"),
+                row(tenant_id="other", hold_usd="0.01"),
+            ]
+        )
+    )
+    # The channel's own row wins over the tenant-wide default, as selection does.
+    assert hold("fleet-test") == Decimal("0.49")
+    assert hold("elsewhere") == Decimal("0.25")
+    # Two rows naming different fields are ambiguous: selection refuses, so no hold.
+    path.write_text(json.dumps([row(), row(channel_id="*", account_id="acct", hold_usd="0.10")]))
+    assert hold("fleet-test") is None
+    assert hold("fleet-test", account_id="someone") == Decimal("0.49")
+    monkeypatch.delenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    assert hold("fleet-test") is None
+
+
+@pytest.mark.parametrize("reviewer", [False, True])
+@pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
+async def test_fleet_r9_plain_gemini_spawn_admits_the_derived_envelope_end_to_end(
+    captured, tmp_path, monkeypatch, reviewer
+):
+    """Through FleetOrchestrator.spawn: the admitted worker carries the derived envelope,
+    capped by the channel's manifest hold."""
+    from types import SimpleNamespace
+    from unittest.mock import create_autospec
+    from uuid import uuid4
+
+    from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, worker_trigger
+    from daimon.core.neutral_resources import gemini_worker_cost_usd, task_worker_spec
+    from mux.contracts.config import BackendConfig
+
+    source, _, grant, fleet, policy, _ = captured
+    flash = ModelRef(provider="gemini", id="gemini-3.8-flash")
+    backend = backend_selection("gemini").model_copy(update={"model": flash.id})
+    widened = grant.model_copy(update={"choices": (*grant.choices, (backend, flash))})
+    root = compose(captured[:2] + (widened,) + captured[3:])
+    large = "Real root instructions. " * 1000
+    root = replace(root, spec=root.spec.model_copy(update={"system": large}), base_system=large)
+    path = tmp_path / "runtime.json"
+    path.write_text(
+        json.dumps(
+            [
+                {
+                    "profile": backend.profile,
+                    "tenant_id": fleet.scope.tenant_id,
+                    "platform": "*",
+                    "channel_id": "*",
+                    "account_id": "*",
+                    "configuration_grant": {
+                        "profiles": [backend.profile],
+                        "models": [flash.id],
+                        "thread_modes": [backend.thread_mode],
+                        "requires": {},
+                    },
+                    "hold_usd": "0.12",
+                }
+            ]
+        )
+    )
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    ports = create_autospec(FleetPorts, instance=True)
+    ports.capture_source.return_value = None
+    admitted = []
+
+    class Admitted(Exception):
+        pass
+
+    async def admit(parent, resolved, **kwargs):
+        admitted.append(resolved)
+        raise Admitted
+
+    ports.admit.side_effect = admit
+    owner = FleetOrchestrator(ports)
+    triggers = []
+    sized = owner._bounded_gemini  # pyright: ignore[reportPrivateUsage]
+
+    def spy(*args, trigger, **kwargs):
+        triggers.append(trigger)
+        return sized(*args, trigger=trigger, **kwargs)
+
+    monkeypatch.setattr(owner, "_bounded_gemini", spy)
+    reviewed_id = None
+    if reviewer:
+        # A large reviewed result rides in the reviewer's trigger.
+        reviewed_id = uuid4()
+        target = SimpleNamespace(
+            id=reviewed_id,
+            reviewer_of=None,
+            backend="openai",
+            result=SimpleNamespace(digest="reviewed-digest"),
+        )
+        reviewed = SimpleNamespace(payload={"content": [{"text": "x" * 40_000}]})
+
+        async def snapshot(*args):
+            return SimpleNamespace(), (target,)
+
+        async def result(*args):
+            return reviewed
+
+        monkeypatch.setattr(owner, "read_snapshot", snapshot)
+        monkeypatch.setattr(owner, "_result", result)
+    with pytest.raises(Admitted):
+        await owner.spawn(
+            root,
+            policy,
+            now=NOW,
+            operation_key="W3",
+            role="W3",
+            backend=BackendConfig.model_validate(backend.model_dump()),
+            limits=root.limits.model_copy(update={"max_turns": 1}),
+            agent=task_worker_spec(root, role="W3", task="Compare X and Y.", model=flash.id),
+            fill_token_limits=True,
+            reviewer_of=reviewed_id,
+        )
+    (resolved,) = admitted
+    (trigger,) = triggers
+    # The trigger the envelope was sized for is exactly what dispatch will send.
+    dispatched = worker_trigger(ports.admit.await_args.kwargs["reviewed_result"])
+    assert trigger == dispatched and (reviewer == ("x" * 40_000 in dispatched))
+    limits = resolved.limits
+    assert limits.max_input_tokens == (
+        len(resolved.spec.system.encode()) + len(dispatched.encode()) + 4096
+    )
+    worst = gemini_worker_cost_usd(flash.id, limits.max_input_tokens, limits.max_output_tokens)
+    assert worst <= Decimal("0.12") <= limits.budget_usd
