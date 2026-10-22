@@ -79,6 +79,8 @@ async def test_create_list_and_cancel_a_timer_from_a_turn(
         responder_ma_agent_id="agt_daimon",
         responder_name="daimon",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         timer = await _create_timer_impl(
             runtime,
@@ -139,6 +141,8 @@ async def test_create_timer_refuses_a_time_without_an_offset(
         responder_ma_agent_id="agt_daimon",
         responder_name="daimon",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="UTC offset"):
             await _create_timer_impl(

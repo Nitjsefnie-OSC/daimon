@@ -170,6 +170,7 @@ async def _origin(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
             sender_foreign=foreign,

@@ -8,6 +8,7 @@ from daimon.core.stores import mux_state
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.turn.admission import admit_impl
 from daimon.core.turn.errors import AdmissionDenied
+from daimon.core.turn_hold import RequesterOrg
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
 from mux.contracts.resources import Agent, AgentSpec
 from structlog.testing import capture_logs
@@ -80,6 +81,7 @@ async def test_real_admission_refuses_even_a_reader_accepting_the_native_compone
     )
     kwargs = dict(
         tenant_id=TENANT,
+        requester_org=RequesterOrg.HOST,
         platform="slack",
         external_user_id="caller",
         channel_id="channel",
@@ -148,6 +150,7 @@ async def test_prewrite_source_projection_receives_effective_seal_and_memory_pol
         await admit_impl(
             deps,
             tenant_id=TENANT,
+            requester_org=RequesterOrg.HOST,
             platform="slack",
             external_user_id="caller",
             channel_id="channel",

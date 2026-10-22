@@ -61,6 +61,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     if (
         config.thread_mode != "per_caller"
         or admission.shared_owner is not None
+        or admission.hold is not None
         or admission.origin_seal_ids
         or (
             admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
@@ -78,6 +79,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
     deployment = journal.deployment
     if request.worker is not None or admission.backend_revision_origin == "agent":
         from daimon.core.turn.gemini_deployment import load_gemini_deployment
+        from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
 
         if request.counterpart is None or request.source is None or target is None:
             raise AdmissionDenied(reason="backend_unsupported")
@@ -89,7 +91,12 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             or replace(deployment, native_agent=None) != expected
             or checked.agent.spec != expected.agent
             or (
+                plan.root_materialization
+                and checked.catalog_id != root_counterpart_catalog_id(request)
+            )
+            or (
                 not plan.worker_materialization
+                and not plan.root_materialization
                 and (
                     checked.catalog_id != plan.counterpart_catalog_id
                     or checked.local_revision != plan.counterpart_catalog_revision

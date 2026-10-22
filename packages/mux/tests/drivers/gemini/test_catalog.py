@@ -408,6 +408,22 @@ async def test_unsupported_authored_intent_refuses_before_native_post(case: Case
     assert not case.wire.requests
 
 
+async def test_argon_is_an_allowed_native_catalog_model(case: Case) -> None:
+    argon = spec().model_copy(update={"model": ModelRef(provider="gemini", id="gemini-4-argon")})
+    made = await case.driver.agents.create(SCOPE, argon, key="create:argon")
+    posted = _OBJECT.validate_json(case.wire.requests[0].content, strict=True)
+    assert posted["agent_config"] == {"type": "antigravity", "model": "gemini-4-argon"}
+    assert made.spec.model.id == "gemini-4-argon"
+
+
+@pytest.mark.parametrize("near", ["gemini-4-argon-preview", "gemini-4", "gemini-4-argon-latest"])
+async def test_argon_near_miss_ids_refuse_before_native_post(case: Case, near: str) -> None:
+    requested = spec().model_copy(update={"model": ModelRef(provider="gemini", id=near)})
+    with pytest.raises(UnsupportedCapability):
+        await case.driver.agents.create(SCOPE, requested, key="near")
+    assert not case.wire.requests
+
+
 def bundle(body: bytes = b"# Original\nKeep every byte.\n") -> SkillUpload:
     return SkillUpload(
         files=(

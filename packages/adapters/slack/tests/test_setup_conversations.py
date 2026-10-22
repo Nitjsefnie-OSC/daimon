@@ -158,7 +158,7 @@ async def test_setup_root_routes_daimon_and_retains_target_through_archive_and_d
             )
             slack.get(
                 re.compile(r"https://slack.com/api/users.info.*"),
-                payload={"ok": True, "user": {"is_admin": is_admin}},
+                payload={"ok": True, "user": {"is_admin": is_admin, "team_id": "T_SETUP"}},
                 repeat=True,
             )
             slack.post(
