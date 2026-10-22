@@ -1200,3 +1200,40 @@ def test_exhausted_budget_or_slots_refuse_before_admission():
         )
     with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
         default_worker_limits(CEILING, _run(total="0.03"), (), provider="openai")
+
+
+def test_planned_workers_share_the_budget_instead_of_unused_slots():
+    from daimon.core.neutral_resources import default_worker_limits
+
+    unlimited = CEILING.model_copy(update={"provider_limits_usd": None, "budget_usd": Decimal(1)})
+    run = _run(total="1.00", max_workers=8)
+    assert default_worker_limits(unlimited, run, (), provider="openai").budget_usd == Decimal(
+        "0.12"
+    )
+    assert default_worker_limits(
+        unlimited, run, (), provider="openai", planned_workers=2
+    ).budget_usd == Decimal("0.50")
+    # Planned workers already admitted leave the rest to the remaining ones.
+    one = (_worker("openai", "0.50"),)
+    assert default_worker_limits(
+        unlimited, run, one, provider="openai", planned_workers=2
+    ).budget_usd == Decimal("0.50")
+    # More than planned, or more than the slots: never more than what is left.
+    two = (*one, _worker("openai", "0.50"))
+    with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
+        default_worker_limits(unlimited, run, two, provider="openai", planned_workers=2)
+    assert default_worker_limits(
+        unlimited, _run(total="1.00", max_workers=2), (), provider="openai", planned_workers=8
+    ).budget_usd == Decimal("0.50")
+
+
+@pytest.mark.parametrize("planned", [1, 2, 3, 4])
+def test_parallel_planned_spawns_never_exceed_the_caps(planned):
+    from daimon.core.neutral_resources import default_worker_limits
+
+    run = _run()
+    for provider, line in CEILING.provider_limits_usd.items():
+        share = default_worker_limits(
+            CEILING, run, (), provider=provider, planned_workers=planned
+        ).budget_usd
+        assert share * planned <= min(line, run.total_budget_usd)

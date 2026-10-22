@@ -1094,13 +1094,17 @@ def default_worker_limits(
     max_turns: int | None = None,
     max_input_tokens: int | None = None,
     max_output_tokens: int | None = None,
+    planned_workers: int | None = None,
 ) -> WorkerLimits:
     """Fill omitted worker limits from the frozen root, so a model need not guess them.
 
     The deadline defaults to (and is never later than) the root's frozen deadline. The
     budget defaults to an even share, per remaining worker slot, of what the run and
     the provider line have left. Slots bound how many workers can be admitted, so
-    parallel spawns reading the same snapshot never add up past either cap. Supplied
+    parallel spawns reading the same snapshot never add up past either cap. A root that
+    says how many workers it plans shares among those not yet admitted instead (still
+    at most the free slots); spawning more at once than planned can only be refused
+    by admission, never exceed a cap. Supplied
     budgets and every ceiling are still checked by the resolver and financial admission.
     """
     latest = ceiling.deadline
@@ -1110,6 +1114,8 @@ def default_worker_limits(
         slots = run.max_workers - len(workers)
         if slots <= 0:
             raise WorkerSpecRefused("budget", "exhausted")
+        if planned_workers is not None:
+            slots = min(slots, max(planned_workers - len(workers), 1))
 
         def held(provider_only: bool) -> Decimal:
             return sum(

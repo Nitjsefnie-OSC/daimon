@@ -68,6 +68,7 @@ class FleetToolService(Protocol):
         origin_context_id: uuid.UUID | None = None,
         task: str | None = None,
         model: str | None = None,
+        planned_workers: int | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
     async def status(
@@ -243,6 +244,7 @@ class HostFleetToolService:
         origin_context_id: uuid.UUID | None = None,
         task: str | None = None,
         model: str | None = None,
+        planned_workers: int | None = None,
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id
@@ -283,6 +285,7 @@ class HostFleetToolService:
                 max_turns=max_turns,
                 max_input_tokens=max_input_tokens,
                 max_output_tokens=max_output_tokens,
+                planned_workers=planned_workers,
             ),
             agent=agent,
             clone=clone,
@@ -416,6 +419,7 @@ def register_fleet_tools(
         origin_context_id: uuid.UUID | None = None,
         task: str | None = None,
         model: str | None = None,
+        planned_workers: int | None = None,
     ) -> dict[str, JsonValue]:
         if sum(item is not None for item in (task, agent, clone)) != 1:
             raise ToolError("Give the worker a task, an agent spec or a pinned clone, exactly one.")
@@ -450,6 +454,7 @@ def register_fleet_tools(
                 reviewer_of=reviewer_of,
                 task=task,
                 model=model,
+                planned_workers=planned_workers,
             )
         )
 
@@ -460,6 +465,7 @@ def register_fleet_tools(
         role: str,
         task: str | None = None,
         model: str | None = None,
+        planned_workers: PositiveCount | None = None,
         origin_context_id: uuid.UUID | None = None,
         backend: BackendConfig | None = None,
         budget_usd: PositiveMoney | None = None,
@@ -478,21 +484,24 @@ def register_fleet_tools(
         """Start one worker in this turn's fleet run. Call once per worker, in parallel.
 
         Usually pass only operation_key (unique per worker, e.g. "W1"), role,
-        task (the worker's full instructions) and model (a model id from the
-        fleet grant, e.g. "gpt-6-luna"; omit it for your own model), plus
-        origin_context_id from your turn controls. Leave everything else out:
-        the host binds this turn's run (never invent a run_id), picks the
-        granted backend, gives each worker an even share of the budget left
-        and uses the run's deadline (a later deadline is shortened to it). A
-        worker on another model than yours runs at that model's default
-        effort. Budgets above the grant are refused. After spawning, end your turn; you are woken to
-        fleet_collect. Advanced: an agent spec or an authorized clone with
-        sparse overrides instead of task. Retries reuse operation_key.
+        task (the worker's full instructions), model (a model id from the
+        fleet grant, e.g. "gpt-6-luna"; omit it for your own model) and
+        planned_workers (how many workers you are starting in total, the same
+        number on every call), plus origin_context_id from your turn controls.
+        Leave everything else out: the host binds this turn's run (never
+        invent a run_id), picks the granted backend, splits the budget left
+        evenly across your planned workers and uses the run's deadline (a
+        later deadline is shortened to it). A worker on another model than
+        yours runs at that model's default effort. Budgets above the grant are
+        refused. After spawning, end your turn; you are woken to fleet_collect.
+        Advanced: an agent spec or an authorized clone with sparse overrides
+        instead of task. Retries reuse operation_key.
         """
         return await spawn(
             ctx,
             task=task,
             model=model,
+            planned_workers=planned_workers,
             run_id=run_id,
             origin_context_id=origin_context_id,
             operation_key=operation_key,
