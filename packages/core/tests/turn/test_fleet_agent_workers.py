@@ -12,15 +12,19 @@ from daimon.core.authz import build_agent_ref
 from daimon.core.channel_backend import load_backend_agent
 from daimon.core.mux_compat import retrieve_agent
 from daimon.core.neutral_resources import (
+    AgentFleetGrant,
     WorkerSpecRefused,
+    agent_worker_backend,
+    agent_worker_patch,
     agent_worker_permissions,
     resolve_worker_spec,
     worker_agent_allowed,
+    worker_agents_line,
 )
 from daimon.core.sessions import project_session_resources
 from daimon.core.stores import agent_memory_stores
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 from ..test_agent_backend import owned as owned
 from .test_fleet_source_permissions import NOW, compose
@@ -29,7 +33,7 @@ from .test_fleet_source_permissions import captured as captured
 RESEARCHER_SYSTEM = "You are the research agent. Cite sources."
 
 
-async def capture_agent(owned, scope, *, ma_id, name, model="claude-haiku-5-5"):
+async def capture_agent(owned, scope, *, ma_id, name, model="claude-haiku-5-5", tools=()):
     """Capture another on-server agent the way the root's source is captured."""
     _, identity, actor, sessions = owned
     native = ma_agent(
@@ -45,7 +49,8 @@ async def capture_agent(owned, scope, *, ma_id, name, model="claude-haiku-5-5"):
                 "name": "lookup",
                 "description": "Look a fact up",
                 "input_schema": {"type": "object", "properties": {}},
-            }
+            },
+            *tools,
         ],
     )
     trace = ScriptedTransport()
@@ -86,22 +91,27 @@ def any_agent(grant):
     return grant.model_copy(update={"worker_agents": "any"})
 
 
-def test_worker_agents_field_has_three_explicit_states():
+def test_worker_agents_field_has_three_explicit_states(captured):
+    _, _, grant, _, _, _ = captured
     root, other = uuid4(), uuid4()
-
-    class Grant:
-        pass
-
-    legacy = Grant()
+    legacy = AgentFleetGrant.model_validate_json(grant.model_dump_json())
+    assert legacy.worker_agents is None and "worker_agents" not in legacy.model_dump()
     assert worker_agent_allowed(legacy, root, root)  # the root is always allowed
     assert not worker_agent_allowed(legacy, root, other)  # absent: never silently widened
-    anyone = Grant()
-    anyone.worker_agents = "any"
+    anyone = any_agent(grant)
     assert worker_agent_allowed(anyone, root, other)
-    listed = Grant()
-    listed.worker_agents = (other,)
+    listed = grant.model_copy(update={"worker_agents": (other,)})
     assert worker_agent_allowed(listed, root, other)
     assert not worker_agent_allowed(listed, root, uuid4())
+    for bad in ((), (other, other)):
+        with pytest.raises(ValueError, match="nonempty list of unique"):
+            AgentFleetGrant.model_validate({**grant.model_dump(mode="json"), "worker_agents": bad})
+    assert worker_agents_line(anyone, {}) == "Workers can be any agent you can use here."
+    assert worker_agents_line(legacy, {}) == "Workers run as this agent only."
+    assert (
+        worker_agents_line(listed, {other: "researcher"})
+        == "Workers can be this agent or: researcher."
+    )
 
 
 async def test_a_worker_runs_as_the_named_agent_with_its_own_ceiling(captured, owned):
@@ -155,16 +165,46 @@ async def test_a_legacy_grant_never_lets_workers_run_as_another_agent(captured, 
     ).agent_id == (researcher.agent_id)
 
 
-async def test_the_worker_agents_model_must_be_granted(captured, owned):
+async def test_a_worker_agent_runs_on_its_own_configured_model_not_the_grants_list(captured, owned):
+    from mux.contracts.ids import ModelRef
+
     _, admission, grant, fleet, policy, _ = captured
     root = compose(captured)
     pricey, actual = await capture_agent(
         owned, fleet.scope, ma_id="pricey-source", name="pricey", model="claude-opus-5-5"
     )
+    assert pricey.effective_spec is not None
     as_pricey = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
-    # Unlike the root, a worker agent's own model is never implied by the grant.
+    opus = ModelRef(provider="anthropic", id="claude-opus-5-5")
+    assert opus not in grant.models
+    # No backend setting: the agent's own native model, though the grant never lists it.
+    native = agent_worker_permissions(
+        root, pricey, as_pricey, any_agent(grant), policy=policy, now=NOW
+    )
+    assert native.models == (opus,)
+    # A Gemini agent config picks that model, as long as the tenant enables Gemini.
+    flash = agent_worker_backend(pricey.effective_spec, "gemini", None)
+    assert flash[1] == ModelRef(provider="gemini", id="gemini-3.8-flash")
+    gemini_off = policy.model_copy(update={"enabled_backends": ("anthropic",)})
+    gemini_on = policy.model_copy(update={"enabled_backends": ("anthropic", "gemini")})
     with pytest.raises(WorkerSpecRefused, match="backend"):
-        agent_worker_permissions(root, pricey, as_pricey, any_agent(grant), policy=policy, now=NOW)
+        agent_worker_permissions(
+            root, pricey, as_pricey, any_agent(grant), policy=gemini_off, now=NOW, backend=flash
+        )
+    configured = agent_worker_permissions(
+        root, pricey, as_pricey, any_agent(grant), policy=gemini_on, now=NOW, backend=flash
+    )
+    assert configured.models[0] == flash[1] and flash[0] in configured.backend_grants
+    patch = agent_worker_patch(pricey.effective_spec, "Summarize.", configured.models[0])
+    assert patch is not None and patch.model == flash[1]
+    assert {"mcp", "memory", "sandbox"} <= set(patch.declared_drops or ())
+    # A model the profile keeps for channel turns only still can't be a worker.
+    argon = agent_worker_backend(pricey.effective_spec, "gemini", "gemini-4-argon")
+    assert argon[0].model == "gemini-4-argon"
+    with pytest.raises(WorkerSpecRefused, match="backend"):
+        agent_worker_permissions(
+            root, pricey, as_pricey, any_agent(grant), policy=gemini_on, now=NOW, backend=argon
+        )
 
 
 async def test_the_requester_must_be_able_to_run_that_agent_here(captured, owned):
@@ -263,6 +303,73 @@ async def test_spawn_as_agent_admits_that_agent_with_the_task_after_its_own_prom
     assert system.index(RESEARCHER_SYSTEM) < system.index("Your task: Find three sources")
 
 
+async def test_spawn_as_a_gemini_configured_agent_runs_on_that_agents_model(captured, owned):
+    from daimon.core.fleet_orchestration import FleetOrchestrator
+    from mux.contracts.ids import ModelRef
+
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    researcher, actual = await capture_agent(
+        owned, fleet.scope, ma_id="researcher-source", name="researcher"
+    )
+    assert researcher.effective_spec is not None
+    as_researcher = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    gemini_on = policy.model_copy(update={"enabled_backends": ("anthropic", "gemini")})
+    worker_root = agent_worker_permissions(
+        root,
+        researcher,
+        as_researcher,
+        any_agent(grant),
+        policy=gemini_on,
+        now=NOW,
+        backend=agent_worker_backend(researcher.effective_spec, "gemini", None),
+    )
+    ports, admitted, Admitted = ports_for(worker_root, researcher)
+    with pytest.raises(Admitted):
+        await FleetOrchestrator(ports).spawn(
+            root,
+            gemini_on,
+            now=NOW,
+            operation_key="G1",
+            role="research",
+            backend=None,
+            limits=root.limits,
+            as_agent="researcher",
+            task="Find three sources.",
+        )
+    ((_, resolved),) = admitted
+    assert resolved.spec.model == ModelRef(provider="gemini", id="gemini-3.8-flash")
+    assert resolved.backend.backend == "gemini"
+    assert RESEARCHER_SYSTEM in resolved.spec.system
+
+
+async def test_an_agent_with_an_ask_tool_never_runs_as_a_worker(captured, owned):
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    researcher, actual = await capture_agent(
+        owned,
+        fleet.scope,
+        ma_id="researcher-source",
+        name="researcher",
+        tools=(
+            {
+                "type": "agent_toolset_20260401",
+                "configs": [
+                    {"name": "bash", "enabled": True, "permission_policy": {"type": "always_ask"}}
+                ],
+                "default_config": {"enabled": False, "permission_policy": {"type": "always_ask"}},
+            },
+        ),
+    )
+    as_researcher = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    # A worker has nobody to ask, so a gated tool stays gated: the agent is refused.
+    with pytest.raises(WorkerSpecRefused, match="tools: unsupported"):
+        agent_worker_permissions(
+            root, researcher, as_researcher, any_agent(grant), policy=policy, now=NOW
+        )
+    assert agent_worker_patch(researcher.effective_spec, "  ") is None
+
+
 async def test_spawn_as_agent_refuses_an_agent_outside_the_roots_run(captured, owned):
     from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused
 
@@ -324,6 +431,7 @@ async def test_fleet_agents_lists_only_agents_this_run_can_spawn_as(
         ),
         ma_agent(id="pricey-source", name="pricey", tenant_id=tenant, model="claude-opus-5-5"),
         ma_agent(id="kept-source", name="kept", tenant_id=tenant, model="claude-haiku-5-5"),
+        ma_agent(id="flash-source", name="flash", tenant_id=tenant, model="claude-haiku-5-5"),
     ]
     restricted = policy.model_copy(
         update={"agent_rules": {"kept": AgentRule(runs_in=("another-channel",))}}
@@ -337,6 +445,15 @@ async def test_fleet_agents_lists_only_agents_this_run_can_spawn_as(
     async def read_grant(deps, admission, *, now):
         return value
 
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+
+    flash = derive_agent_uuid(tenant_id=tenant, ma_agent_id="flash-source")
+
+    async def setting(db, tenant_id, agent_id, **_):
+        return SimpleNamespace(backend="gemini", model=None) if agent_id == flash else None
+
+    monkeypatch.setattr(agent_backends, "current", setting)
     monkeypatch.setattr(ma_index, "list_agents_by_tenant", listing)
     monkeypatch.setattr(runtime_manifest, "read_agent_fleet_grant", read_grant)
     ports = HostFleetPorts(
@@ -354,8 +471,16 @@ async def test_fleet_agents_lists_only_agents_this_run_can_spawn_as(
     monkeypatch.setattr(ports, "_load_preparation", root_request)
     listed = await ports.worker_agents(root, restricted)
     names = [row["name"] for row in listed]
-    assert names == (["helper", "researcher"] if mode == "any" else ["helper"])
+    # Each agent's own model counts, never the grant's list.
+    assert names == (["helper", "flash", "pricey", "researcher"] if mode == "any" else ["helper"])
     assert listed[0]["root"] is True and listed[0]["model"] == "claude-haiku-5-5"
+    if mode == "any":
+        rows = {row["name"]: row for row in listed}
+        assert rows["pricey"]["price_per_million_tokens"] == "input $4.0, output $20.0"
+        assert (rows["flash"]["backend"], rows["flash"]["model"]) == ("gemini", "gemini-3.8-flash")
+        # A backend the tenant has not enabled is not offered.
+        gemini_off = restricted.model_copy(update={"enabled_backends": ("anthropic",)})
+        assert "flash" not in {row["name"] for row in await ports.worker_agents(root, gemini_off)}
 
 
 @pytest.mark.parametrize("fault", [None, "refused", "foreign_capture"])

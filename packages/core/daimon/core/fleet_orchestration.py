@@ -539,7 +539,7 @@ class FleetOrchestrator:
         """
         _authorize(parent, policy)
         owner = self._owner()
-        from daimon.core.neutral_resources import resolve_worker_spec
+        from daimon.core.neutral_resources import agent_worker_patch, resolve_worker_spec
 
         if as_agent is not None:
             if agent is not None or clone is not None or overrides is not None:
@@ -554,12 +554,8 @@ class FleetOrchestrator:
                 raise FleetRefused("clone_evidence_unavailable")
             clone = captured_source.source.ref
             clone_revision = captured_source.source.revision
-            if task is not None and task.strip():
-                overrides = AgentPatch(
-                    system=(captured_source.effective_spec.system or "")
-                    + "\n\nYour task: "
-                    + task.strip()
-                )
+            # The agent's own configured model comes first (agent_worker_permissions).
+            overrides = agent_worker_patch(captured_source.effective_spec, task, parent.models[0])
 
         selected_run = parent.fleet.run_id if run_id is None else run_id
         if selected_run != parent.fleet.run_id:
@@ -618,6 +614,9 @@ class FleetOrchestrator:
             )
 
         resolved = resolve(limits)
+        if as_agent is not None and resolved.spec.model != parent.models[0]:
+            # A worker that runs as an agent runs on that agent's model, nothing else.
+            raise FleetRefused("worker_agent_model_mismatch")
         reviewed: Event | None = None
         if reviewer_of is not None:
             run, workers = await self.read_snapshot(parent, policy, selected_run)
@@ -1415,7 +1414,12 @@ class HostFleetPorts:
         self, parent: WorkerPermissions, agent_name: str
     ) -> WorkerPermissions:
         from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
-        from daimon.core.neutral_resources import WorkerSpecRefused, agent_worker_permissions
+        from daimon.core.neutral_resources import (
+            WorkerSpecRefused,
+            agent_worker_backend,
+            agent_worker_permissions,
+        )
+        from daimon.core.stores import agent_backends
         from daimon.core.stores.access_policy import load_access_policy
         from daimon.core.turn.admission import prepare_worker_agent
         from daimon.core.turn.errors import AdmissionDenied
@@ -1447,7 +1451,11 @@ class HostFleetPorts:
                 raise FleetRefused("worker_agent_unavailable")
             async with self.sessions() as db:
                 policy = await load_access_policy(db, tenant_id=root.tenant_id)
+                setting = await agent_backends.current(db, root.tenant_id, source.agent_id)
             try:
+                spec = request.source.effective_spec
+                if spec is None:
+                    raise WorkerSpecRefused("origin", "unbound")
                 worker_parent = agent_worker_permissions(
                     parent,
                     request.source,
@@ -1455,12 +1463,18 @@ class HostFleetPorts:
                     grant,
                     policy=policy,
                     now=datetime.now(UTC),
+                    # Its model and backend come from its own agent config.
+                    backend=agent_worker_backend(
+                        spec,
+                        setting.backend if setting is not None else None,
+                        setting.model if setting is not None else None,
+                    ),
                 )
             except WorkerSpecRefused as error:
                 raise FleetRefused(
                     "worker_agent_not_in_grant"
                     if error.field == "scope"
-                    else "worker_agent_model_not_granted"
+                    else "worker_agent_backend_not_enabled"
                     if error.field == "backend"
                     else f"worker_agent_{error.field}_{error.reason}"
                 ) from None
@@ -1470,6 +1484,7 @@ class HostFleetPorts:
     async def worker_agents(
         self, parent: WorkerPermissions, policy: TenantAccessPolicy
     ) -> list[dict[str, JsonValue]]:
+        from daimon.core import pricing
         from daimon.core.authz import Action, Surface, authorize, build_agent_ref
         from daimon.core.defaults.ma_index import list_agents_by_tenant
         from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
@@ -1477,7 +1492,8 @@ class HostFleetPorts:
         from daimon.core.neutral_resources import worker_agent_allowed
         from daimon.core.stores import agent_backends
         from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
-        from mux.profiles import MANAGED_AGENTS
+        from mux.errors import InvalidConfig
+        from mux.profiles import MANAGED_AGENTS, backend_selection
 
         deps = self._deps
         if deps is None or self._preparation is None:
@@ -1487,7 +1503,6 @@ class HostFleetPorts:
             grant = await read_agent_fleet_grant(deps, root.admission, now=datetime.now(UTC))
         if grant is None:
             raise FleetRefused("fleet_grant_unavailable")
-        granted = {model.id for model in grant.models}
         listed: list[dict[str, JsonValue]] = []
         for native in await list_agents_by_tenant(deps.anthropic, tenant_id=tenant_id):
             name = (native.metadata or {}).get(MA_METADATA_KEY_NAME) or native.name
@@ -1495,12 +1510,28 @@ class HostFleetPorts:
             async with self.sessions() as db:
                 setting = await agent_backends.current(db, tenant_id, agent_id)
             backend = (setting.backend if setting is not None else None) or MANAGED_AGENTS.provider
-            model = (setting.model if setting is not None else None) or (
-                native.model if isinstance(native.model, str) else native.model.id
-            )
+            native_model = native.model if isinstance(native.model, str) else native.model.id
+            if backend == MANAGED_AGENTS.provider:
+                model: str | None = native_model
+                rates: pricing.ModelRates | pricing.ProviderPrice | None = (
+                    pricing.AGENT_MODEL_PRICING.get(native_model)
+                )
+            else:
+                try:
+                    selection = backend_selection(backend)
+                except InvalidConfig:
+                    continue
+                model = (setting.model if setting is not None else None) or selection.model
+                rates = (
+                    pricing.provider_prices(selection.profile).get((backend, model))
+                    if model is not None
+                    else None
+                )
+            # Its model is its own config's; the grant's model list does not apply.
             allowed = (
-                worker_agent_allowed(grant, parent.agent_id, agent_id)
-                and (agent_id == parent.agent_id or model in granted)
+                model is not None
+                and backend in policy.enabled_backends
+                and worker_agent_allowed(grant, parent.agent_id, agent_id)
                 and authorize(
                     policy,
                     subject=parent.subject,
@@ -1518,6 +1549,11 @@ class HostFleetPorts:
                         "description": native.description or "",
                         "backend": backend,
                         "model": model,
+                        "price_per_million_tokens": (
+                            f"input ${rates.input}, output ${rates.output}"
+                            if rates is not None
+                            else "unknown"
+                        ),
                         "root": agent_id == parent.agent_id,
                     }
                 )

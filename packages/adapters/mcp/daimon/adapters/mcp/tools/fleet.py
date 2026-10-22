@@ -290,7 +290,7 @@ class HostFleetToolService:
             if spec is not None
             else overrides.model.provider
             if overrides is not None and overrides.model is not None
-            else worker_parent.spec.model.provider
+            else worker_parent.models[0].provider
             if worker_parent is not None
             else parent.spec.model.provider
         )
@@ -548,9 +548,9 @@ def register_fleet_tools(
         worker on another model than yours runs at that model's default
         effort. Budgets above the grant are refused. After spawning, end your
         turn; you are woken to fleet_collect.
-        To run a worker AS one of this server's agents (its own model, tools
-        and skills, under your permissions), pass agent=<its name> and its task;
-        fleet_agents lists the agents you can use.
+        To run a worker AS one of this server's agents (its own configured
+        model, tools and skills, under your permissions), pass agent=<its name>
+        and its task, with no model; fleet_agents lists the agents you can use.
         Advanced: an agent spec or an authorized clone with sparse overrides
         instead of task. Retries reuse operation_key.
         """
@@ -691,7 +691,8 @@ def register_fleet_tools(
     ) -> dict[str, JsonValue]:
         """List the on-server agents your workers can run as in this fleet run.
 
-        Each has a name, a short description, and its backend and model. Pass the
+        Each has a name, a short description, the backend and model its own
+        config runs it on, and a rough list price per million tokens. Pass the
         name as fleet_spawn's agent. Every spawn checks again, so the list is advice.
         """
         return dict(await owner().agents(await _auth(ctx), origin_context_id=origin_context_id))
