@@ -1031,7 +1031,11 @@ class HostFleetPorts:
         resolved: ResolvedWorkerSpec,
         reviewed_result: Event | None,
     ) -> None:
-        from daimon.core.channel_budget import watch_fleet_budget
+        from daimon.core.channel_budget import (
+            WorkerCancelReason,
+            cancel_workers,
+            watch_fleet_budget,
+        )
         from daimon.core.fleet import FleetConflict
         from daimon.core.headless_runner import commit_worker_transition, run_worker
         from daimon.core.stores import fleet
@@ -1050,6 +1054,7 @@ class HostFleetPorts:
                 finished = asyncio.Event()
 
                 async def monitor() -> None:
+                    reason: WorkerCancelReason = "watch_ended"
                     try:
                         with request.deps.running_turns.track():
                             async with asyncio.timeout(
@@ -1065,9 +1070,14 @@ class HostFleetPorts:
                                     cancelled=cancellations,
                                     finished=finished,
                                 )
+                    except TimeoutError:
+                        reason = "run_deadline"
+                        raise
+                    except asyncio.CancelledError:
+                        reason = "watch_cancelled"
+                        raise
                     finally:
-                        for event in cancellations.values():
-                            event.set()
+                        cancel_workers(cancellations, reason, run_id=worker.run_id)
 
                 watch = cancellations, finished, asyncio.create_task(monitor())
                 self._watches[worker.run_id] = watch
@@ -1086,7 +1096,7 @@ class HostFleetPorts:
             async def execute() -> None:
                 with request.deps.running_turns.track():
                     if request.deps.running_turns.shutting_down:
-                        cancel.set()
+                        cancel_workers({worker.id: cancel}, "shutdown", run_id=worker.run_id)
                     bound = min(request.deadline, worker.deadline_at)
                     async with asyncio.timeout(
                         remaining_s(bound, now=request.now(), refuse_expired=True)
@@ -1157,9 +1167,12 @@ class HostFleetPorts:
             task.add_done_callback(completed)
 
     async def close(self) -> None:
-        for events, finished, _ in self._watches.values():
-            for event in events.values():
-                event.set()
+        from daimon.core.channel_budget import cancel_workers
+
+        # Host shutdown (a deploy, scale-in or an out-of-memory restart) ends every
+        # in-flight worker; say so, since the workers only see an interruption.
+        for run_id, (events, finished, _) in self._watches.items():
+            cancel_workers(events, "shutdown", run_id=run_id)
             finished.set()
         tasks = (*self._tasks.values(), *(watch[2] for watch in self._watches.values()))
         if tasks:
