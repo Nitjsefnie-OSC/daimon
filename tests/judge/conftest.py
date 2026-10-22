@@ -1,4 +1,5 @@
-"""Replay the frozen Gemini fixtures inside their seven-day workspace window."""
+"""Replay the frozen Gemini fixtures inside their seven-day workspace window,
+with no read backoff (tapes are deterministic)."""
 
 import time
 from datetime import UTC, datetime, timedelta
@@ -18,3 +19,6 @@ def gemini_fixture_clock(monkeypatch: pytest.MonkeyPatch) -> None:
     start = time.monotonic()
     anchor = FIXTURE_RECORDED_AT + timedelta(hours=1)
     monkeypatch.setattr(core, "now", lambda: anchor + timedelta(seconds=time.monotonic() - start))
+    # A missing tape reply never appears on a retry, and the read backoff would
+    # only outlast the catalog turn clock. Fail on the first read instead.
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", ())
