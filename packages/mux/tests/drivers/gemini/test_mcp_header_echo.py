@@ -275,3 +275,16 @@ async def test_the_configured_transport_scrubs_every_later_read_after_one_create
             value = await read()
             assert TOKEN not in json.dumps(value), name
     assert reads[0] == "create" and {"get", "cancel", "stream"} <= set(reads)
+
+
+def test_the_shape_r12_actually_echoed_is_scrubbed() -> None:
+    """r12's completed interaction: `$.tools[3].headers.Authorization`, a plain dict entry."""
+    tools = [
+        {"type": "code_execution"},
+        {"type": "url_context"},
+        {"type": "google_search"},
+        mcp_tool(),
+    ]
+    clean = checked_storage_response(completed(tools=tools), protected=True, mcp_tokens={TOKEN})
+    assert "headers" not in clean["tools"][3]  # pyright: ignore[reportIndexIssue,reportArgumentType]
+    assert TOKEN not in json.dumps(clean)
