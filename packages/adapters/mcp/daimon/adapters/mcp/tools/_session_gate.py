@@ -165,25 +165,30 @@ async def _recorded_as_gated(
         tenant_id=auth.tenant_id,
         agent_id=agent.id,
     )
-    for asks_before_publishing in (False, True):
-        for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
-            tools = session_tools(
-                agent,
-                hidden,
-                tool_safety=runtime.settings.tool_safety,
-                public_url=None if public_url is None else str(public_url),
-                asks_before_publishing=asks_before_publishing,
-                confirmed_tools=backend_switch_tools(
-                    enabled=backend_selection_enabled(runtime.settings.turn)
+    confirmed = backend_switch_tools(
+        enabled=backend_selection_enabled(runtime.settings.turn)
+    ) | microsoft_send_tools(
+        enabled=runtime.settings.microsoft_accounts.configured,
+        tool_safety_on=runtime.settings.tool_safety.enabled,
+    )
+    # A bind sent before the channel switch existed gated the same tools less
+    # that one; it still proves every card it did gate.
+    for confirmed_tools in dict.fromkeys(
+        (confirmed, confirmed - {"request_channel_backend_switch"})
+    ):
+        for asks_before_publishing in (False, True):
+            for daimon_rule_tools in dict.fromkeys((frozenset[str](), rule_tools)):
+                tools = session_tools(
+                    agent,
+                    hidden,
+                    tool_safety=runtime.settings.tool_safety,
+                    public_url=None if public_url is None else str(public_url),
+                    asks_before_publishing=asks_before_publishing,
+                    confirmed_tools=confirmed_tools,
+                    daimon_rule_tools=daimon_rule_tools,
                 )
-                | microsoft_send_tools(
-                    enabled=runtime.settings.microsoft_accounts.configured,
-                    tool_safety_on=runtime.settings.tool_safety.enabled,
-                ),
-                daimon_rule_tools=daimon_rule_tools,
-            )
-            if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
-                [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
-            ):
-                return True
+                if hash_tools(tools) == recorded.tools_sha256 and has_confirmation_gate(
+                    [tool.model_dump(mode="json") for tool in tools], tool_name=tool_name
+                ):
+                    return True
     return False
