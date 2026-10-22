@@ -13,8 +13,8 @@ from daimon.core import mcp_attach, memory_view
 from daimon.core.mux_backend import resource_scope
 from daimon.core.mux_compat import archive_memory_store, create_memory_store
 from daimon.testing.ma_models import ma_agent, ma_environment
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 TENANT = uuid.UUID(int=1)
 SCOPE = resource_scope(tenant_id=str(TENANT))

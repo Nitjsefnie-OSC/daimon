@@ -40,8 +40,8 @@ from daimon.core.turn import run_turn
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 from daimon.testing.turn_leg import MUX_LEG, leg_scope, turn_leg
+from mux.testing.drivers.anthropic.ma_models import EMPTY_SESSION_STATS, EMPTY_SESSION_USAGE
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # --- Stream scripts --------------------------------------------------------

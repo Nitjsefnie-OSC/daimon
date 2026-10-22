@@ -61,13 +61,13 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
-from daimon.testing import ma_session
 from daimon.testing.asgi import asgi_lifespan
-from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.turn_leg import turn_leg
 from microsoft_teams.apps.token_manager import TokenManager
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

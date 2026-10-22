@@ -14,8 +14,6 @@ import pytest
 from daimon.core.mux_backend import TurnBackendRequest
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.posture import BillingExempt
-from daimon.testing.drivers.gemini.fake import MemoryStorage
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from google import genai
 from google.genai.types import HttpOptions, HttpRetryOptions
@@ -27,6 +25,8 @@ from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.mcp_auth import RedactedCredential
 from mux.drivers.gemini.transport import SDKTransport
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
+from mux.testing.drivers.gemini.fake import MemoryStorage
 
 from .test_gemini_codec import CHANNEL, PROFILE, SCOPE, THREAD
 from .test_gemini_resume import ANSWER, steps

@@ -36,15 +36,15 @@ from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.notices import render_termination_notice
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing import list_response, ma_session
-from daimon.testing.ma import (
+from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, ENV_ID, build_turn_router, turn_events
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
+    list_response,
     make_fake_memory_store_handler,
     sse_response,
 )
-from daimon.testing.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME
-from daimon.testing.turn_router import AGENT_ID, AGENT_TEXT, ENV_ID, build_turn_router, turn_events
+from mux.testing.drivers.anthropic.ma_models import DEFAULT_AGENT_NAME, DEFAULT_ENV_NAME, ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (

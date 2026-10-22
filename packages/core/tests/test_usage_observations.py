@@ -11,8 +11,8 @@ from daimon.core.tenant_balance import debit_amount
 from daimon.core.usage_compat import event_observation
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_model_usage
 from mux.contracts.usage import UsageObservation
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
 

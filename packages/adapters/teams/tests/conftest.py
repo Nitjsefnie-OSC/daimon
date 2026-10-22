@@ -38,23 +38,20 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.state import TextBlock, ToolUseBlock, TurnState
-from daimon.testing import (
-    build_fake_anthropic,
-    ma_session,
-    ma_session_agent,
-    make_agent_env_echo_handler,
-)
 from daimon.testing.asgi import asgi_lifespan
 from daimon.testing.db import db_clean as db_clean
 from daimon.testing.db import db_engine as db_engine
 from daimon.testing.db import db_schema as db_schema
 from daimon.testing.db import db_session as db_session
 from daimon.testing.db import db_session_factory as db_session_factory
+from daimon.testing.ma import make_agent_env_echo_handler
 from jsonschema import Draft6Validator
 from jsonschema.exceptions import best_match
 from microsoft_teams.api import MessageActivityInput, SentActivity
 from microsoft_teams.common import Client, ClientOptions
 from microsoft_teams.common.http.client import MiddlewareContext
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Synthetic identifiers only.

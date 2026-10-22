@@ -44,9 +44,10 @@ from daimon.core.stores.turn_outcomes import list_for_tenant as list_outcomes
 from daimon.core.turn.deps import build_turn_deps
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing import MARouter, build_fake_anthropic, json_body, ma_session
 from daimon.testing.turn_fakes import deps_for
 from daimon.testing.turn_router import build_turn_router, turn_events
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, json_body
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 

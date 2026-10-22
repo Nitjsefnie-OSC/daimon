@@ -92,6 +92,7 @@ def test_shards_and_candidate_are_all_deploy_prerequisites() -> None:
         "pytest-db",
         "pytest-discord",
         "pytest-light",
+        "mux-standalone",
         "pytest-notebook-host",
         "docker-publish-candidate",
     }

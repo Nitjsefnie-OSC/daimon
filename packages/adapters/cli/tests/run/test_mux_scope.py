@@ -16,9 +16,9 @@ from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import AccountRow, CliPrincipalRow, Role
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
@@ -95,7 +95,7 @@ def runtime(transport: ScriptedTransport, sm: Sessionmaker) -> CliRuntime:
 async def test_cli_mux_scope_drives_real_turn_with_identical_legacy_requests(
     monkeypatch: pytest.MonkeyPatch,
 ) -> None:
-    from daimon.testing.ma import send_events_response
+    from mux.testing.drivers.anthropic.ma import send_events_response
 
     install_identity(monkeypatch)
     monkeypatch.setattr(uuid, "uuid4", lambda: UUID(int=1))

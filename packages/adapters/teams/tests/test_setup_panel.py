@@ -33,8 +33,8 @@ from daimon.core.stores.platform_names import upsert_channel_names
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.thread_agent_bindings import list_active_bindings
-from daimon.testing import build_fake_anthropic, ma_agent
-from daimon.testing.ma import FakeMAState, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from pydantic import HttpUrl, SecretStr
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

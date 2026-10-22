@@ -20,11 +20,17 @@ from daimon.core.stores import access_policy, fleet, mux_state, tenant_ledger, t
 from daimon.core.turn.admission import Admission, AdmissionGrant
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import ProviderPreparationRequest
-from daimon.testing.ma import MARouter, list_response, send_events_response, sse_response
-from daimon.testing.ma_models import ma_agent, ma_session
-from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.config import ConfigRevision
 from mux.contracts.resources import ProviderBinding
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    list_response,
+    send_events_response,
+    sse_response,
+)
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 from ..test_fleet_budget import tariffs
 from ..test_fleet_permissions import POLICY
@@ -100,7 +106,7 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
     if live:
         from anthropic.types.beta import BetaEnvironment, BetaManagedAgentsModelConfig
         from daimon.core.channel_backend import load_backend_agent
-        from daimon.testing.ma_models import ma_model_config
+        from mux.testing.drivers.anthropic.ma_models import ma_model_config
 
         source = source.model_copy(
             update={
@@ -412,7 +418,10 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
             raw["resources"][0]["memory_store_id"] = "foreign-memory"
         return httpx.Response(200, json=raw)
 
-    from daimon.testing.ma import FakeMemoryStoreState, make_fake_memory_store_handler
+    from mux.testing.drivers.anthropic.ma import (
+        FakeMemoryStoreState,
+        make_fake_memory_store_handler,
+    )
 
     memory = make_fake_memory_store_handler(FakeMemoryStoreState())
     router.add("POST", r"/v1/memory_stores", lambda call, match: memory(call))

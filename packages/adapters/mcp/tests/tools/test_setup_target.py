@@ -22,10 +22,11 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.stores.turn_origins import create_origin, get_active_origin
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -274,7 +275,7 @@ async def test_model_change_uses_specialist_identity_and_retains_admin_gate(
     from daimon.adapters.mcp.tools.agents import _update_agent_impl
     from daimon.core.scope import ChannelScopeRef
     from daimon.core.stores.scoped_config_write import set_fields
-    from daimon.testing.ma import json_body
+    from mux.testing.drivers.anthropic.ma import json_body
 
     tenant = await make_tenant(db_session)
     account = await make_account(db_session, tenant=tenant)

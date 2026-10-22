@@ -45,9 +45,9 @@ from daimon.core.setup_conversations import EMPTY_ROSTER_COPY, shared_keys_sente
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.domain import ChatPlatform, Platform
 from daimon.core.stores.scoped_config_write import set_fields
-from daimon.testing import ma_agent, tenant_metadata
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter, list_response, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent, tenant_metadata
+from mux.testing.drivers.anthropic.ma import MARouter, list_response, make_fake_ma_handler
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .drivers.protocol import PlatformDriver
