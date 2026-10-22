@@ -3461,6 +3461,12 @@ class DaimonBot(commands.Bot):
         ``unprompted`` marks a turn nobody @mentioned (organic thread
         participation) so the context tells the agent it chose to speak.
         """
+        from daimon.adapters.discord.recruitment_guard import recruitment_message_filter
+
+        dispatch_filter = await recruitment_message_filter(self.runtime, guild_id)
+        for query in query_messages or (message,):
+            if await dispatch_filter(query):
+                return
         rid = generate_request_id()
         structlog.contextvars.bind_contextvars(rid=rid)
         surface = _TurnFailureSurface()
@@ -3855,7 +3861,10 @@ class DaimonBot(commands.Bot):
         rendering its own error -- there is no lifecycle message to attach
         one to before `bind_session` has even run.
         """
-        _ = guild_id  # kept for parity with _handle_mention's error-context signature
+        from daimon.adapters.discord.recruitment_guard import recruitment_thread_blocked
+
+        if await recruitment_thread_blocked(self.runtime, thread):
+            raise PermissionError("Recruitment sources cannot enter provider context")
         # Read the predecessor BEFORE bind_session decides the replacement --
         # once it runs, the old row is superseded and this is the only chance
         # to read what it was running.
@@ -5319,6 +5328,12 @@ class DaimonBot(commands.Bot):
         # wholesale with the merged attachments from all of the queued
         # author's messages -- otherwise only the first queued message's
         # attachments would ever reach the turn.
+        from daimon.adapters.discord.recruitment_guard import recruitment_message_filter
+
+        source_filter = await recruitment_message_filter(self.runtime, guild_id)
+        for query in query_messages or (message,):
+            if await source_filter(query):
+                raise PermissionError("Recruitment sources cannot enter provider context")
         attachments = (
             attachments_override if attachments_override is not None else message.attachments
         )
@@ -5347,6 +5362,7 @@ class DaimonBot(commands.Bot):
                 user_message, _ = await build_delta_xml(
                     thread,
                     trigger=message,
+                    source_filter=source_filter,
                     after_message_id=int(prepared.watermark),
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
@@ -5370,6 +5386,7 @@ class DaimonBot(commands.Bot):
                 user_message, _ = await build_context_xml(
                     thread,
                     trigger=message,
+                    source_filter=source_filter,
                     limit=100,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
@@ -5388,6 +5405,7 @@ class DaimonBot(commands.Bot):
                 user_message, _ = await build_channel_context_xml(
                     message.channel,
                     trigger=message,
+                    source_filter=source_filter,
                     thread=thread,
                     bot_user_id=self.user.id if self.user else None,
                     bot_display_name=discord_settings.bot_display_name,
@@ -5450,6 +5468,7 @@ class DaimonBot(commands.Bot):
             full_message, _ = await build_context_xml(
                 thread,
                 trigger=message,
+                source_filter=await recruitment_message_filter(self.runtime, guild_id),
                 limit=100,
                 bot_user_id=self.user.id if self.user else None,
                 bot_display_name=discord_settings.bot_display_name,

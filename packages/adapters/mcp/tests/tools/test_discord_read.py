@@ -1258,7 +1258,9 @@ def ordinary_sources_without_recruitment(monkeypatch: pytest.MonkeyPatch) -> Non
     # separately with persisted tenant configuration and enrollments.
     from unittest.mock import AsyncMock
 
+    from daimon.core.stores.recruitment_privacy import RecruitmentSources
+
     monkeypatch.setattr(
-        "daimon.adapters.mcp.tools.discord._recruitment.is_recruitment_source",
-        AsyncMock(return_value=False),
+        "daimon.adapters.mcp.tools.discord._recruitment.sources_for_task",
+        AsyncMock(return_value=RecruitmentSources()),
     )

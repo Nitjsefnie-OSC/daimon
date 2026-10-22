@@ -9,6 +9,7 @@ from cryptography.fernet import Fernet, MultiFernet
 from daimon.adapters.mcp.tools.discord._recruitment import recruitment_message, recruitment_thread
 from daimon.core.recruitment import RecruitmentConfig, ThreadState
 from daimon.core.stores.recruitment import RecruitmentStore
+from daimon.core.stores.recruitment_privacy import SourceChannel
 from daimon.testing.factories import make_tenant
 
 
@@ -23,12 +24,18 @@ async def test_qualifying_and_persisted_sources_survive_disable_and_rename(
     config = RecruitmentConfig(guild_id="101", enabled=False, channel_ids=("2",))
     await store.configure(config)
     runtime = SimpleNamespace(session_factory=db_session_factory)
-    assert await recruitment_thread(
-        runtime, "101", "20", title=" !LABS-staffing: Synthetic", parent_id="2"
-    )
-    assert not await recruitment_thread(
-        runtime, "101", "20", title=" !LABS-staffing: Synthetic", parent_id="3"
-    )
+
+    async def live_allowed(id):
+        return SourceChannel(id, "101", "2", " !LABS-staffing: Synthetic", True)
+
+    async def live_elsewhere(id):
+        return SourceChannel(id, "101", "3", " !LABS-staffing: Synthetic", True)
+
+    assert await recruitment_thread(runtime, "101", "20", resolve=live_allowed)
+    from daimon.core.stores.recruitment_privacy import sources_for_task
+
+    await sources_for_task(store.sessions, tenant.id, fresh=True)
+    assert not await recruitment_thread(runtime, "101", "20", resolve=live_elsewhere)
     await store.save(ThreadState(thread_id="20", parent_id="2"), config)
     assert await recruitment_thread(runtime, "101", "20", title="Prefix removed", parent_id="2")
     assert not await recruitment_thread(runtime, "102", "20")

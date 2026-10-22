@@ -211,3 +211,25 @@ async def test_expired_card_redaction_uses_retained_id_outside_recent_history() 
     await cog.redact_expired(thread, card_id="30")
     card.edit.assert_awaited_once_with(content="Recruitment data expired.", embeds=[], view=None)
     thread.history.assert_not_called()
+
+
+async def test_unconfigured_ingress_short_circuits_without_source_or_discord_io(
+    monkeypatch,
+) -> None:
+    from daimon.adapters.discord.recruitment_guard import recruitment_message_blocked
+
+    inactive = AsyncMock(return_value=False)
+    source_filter = AsyncMock(side_effect=AssertionError("should not build source filter"))
+    monkeypatch.setattr("daimon.adapters.discord.recruitment_guard.privacy_active", inactive)
+    monkeypatch.setattr(
+        "daimon.adapters.discord.recruitment_guard.recruitment_message_filter", source_filter
+    )
+    runtime = SimpleNamespace(sessionmaker=object())
+    message = MagicMock(spec=discord.Message)
+    message.guild.id = 101
+    message.flags.has_thread = True
+    message.guild.fetch_channel = AsyncMock()
+    for _ in range(20):
+        assert not await recruitment_message_blocked(runtime, message)
+    source_filter.assert_not_awaited()
+    message.guild.fetch_channel.assert_not_awaited()

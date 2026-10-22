@@ -37,7 +37,11 @@ from daimon.adapters.mcp.tools.discord._models import (
     ThreadRow,  # pyright: ignore[reportPrivateUsage]
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
-from daimon.adapters.mcp.tools.discord._recruitment import recruitment_message, recruitment_thread
+from daimon.adapters.mcp.tools.discord._recruitment import (
+    begin_recruitment_read,
+    recruitment_message,
+    recruitment_thread,
+)
 from daimon.adapters.mcp.tools.discord._visibility import (
     _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
     _bot_read_error,  # pyright: ignore[reportPrivateUsage]
@@ -175,6 +179,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
     """
     _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
+    await begin_recruitment_read(runtime, guild_id)
     token = _require_bot_token(runtime)
     bounded_limit = max(1, min(limit, _MAX_HISTORY_LIMIT))
     before_obj = _before_object(before)
@@ -274,6 +279,7 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
     """
     _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
+    await begin_recruitment_read(runtime, guild_id)
     token = _require_bot_token(runtime)
 
     async with rest_client(token) as c:
@@ -386,6 +392,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
     """
     _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
+    await begin_recruitment_read(runtime, guild_id)
     token = _require_bot_token(runtime)
     bounded_limit = max(1, min(limit, _MAX_HISTORY_LIMIT))
     before_obj = _before_object(before)
@@ -455,6 +462,7 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
     """
     _require_discord_identity(auth)
     guild_id = _require_guild_id(auth)
+    await begin_recruitment_read(runtime, guild_id)
     token = _require_bot_token(runtime)
 
     async with rest_client(token) as c:

@@ -938,7 +938,76 @@ def ordinary_sources_without_recruitment(monkeypatch: pytest.MonkeyPatch) -> Non
     # separately with persisted tenant configuration and enrollments.
     from unittest.mock import AsyncMock
 
+    from daimon.core.stores.recruitment_privacy import RecruitmentSources
+
     monkeypatch.setattr(
-        "daimon.adapters.mcp.tools.discord._recruitment.is_recruitment_source",
-        AsyncMock(return_value=False),
+        "daimon.adapters.mcp.tools.discord._recruitment.sources_for_task",
+        AsyncMock(return_value=RecruitmentSources()),
     )
+
+
+@pytest.fixture(autouse=True)
+def ordinary_search_sources(monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.stores.recruitment_privacy import RecruitmentSources
+
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools.discord._search.sources_for_task",
+        AsyncMock(return_value=RecruitmentSources()),
+    )
+
+
+@pytest.mark.parametrize("indexed_name", [None, "old ordinary title"])
+@pytest.mark.parametrize("unreachable", [False, True])
+async def test_search_qualifying_thread_uses_live_metadata_even_without_enrollment(
+    monkeypatch, indexed_name, unreachable
+):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.recruitment import RecruitmentConfig
+    from daimon.core.stores.recruitment_privacy import RecruitmentSources
+
+    # No enrollment: includes the refused-enrollment/provider-session scenario.
+    sources = RecruitmentSources(RecruitmentConfig(guild_id="111", channel_ids=("222",)))
+    monkeypatch.setattr(_search_mod, "sources_for_task", AsyncMock(return_value=sources))
+    live_requested = []
+    indexed = _thread_payload(thread_id="900", parent_id="222", name=indexed_name or "")
+    if indexed_name is None:
+        indexed.pop("name")
+
+    async def handler(route, kwargs):
+        if route.path in _standard_guild_member_routes():
+            return _standard_guild_member_routes()[route.path]
+        if route.path == "/guilds/{guild_id}/channels":
+            return [_text_channel_payload()]
+        if route.path == "/guilds/{guild_id}/messages/search":
+            hit = _search_hit_payload(
+                message_id="1234", channel_id="900", content="private-candidate@example.test"
+            )
+            hit["attachments"] = [
+                {
+                    "id": "44",
+                    "filename": "private-cv.pdf",
+                    "url": "https://cdn.discord.com/private-cv.pdf",
+                    "size": 10,
+                }
+            ]
+            return _search_response(messages=[[hit]], threads=[indexed])
+        if route.path == "/channels/{channel_id}":
+            live_requested.append(str(route.channel_id))
+            if unreachable:
+                raise discord.Forbidden(MagicMock(status=403, reason="no access"), "denied")
+            return _thread_payload(
+                thread_id="900", parent_id="222", name=" !LABS-staffing: Synthetic"
+            )
+        raise AssertionError(route.path)
+
+    patch_discord_http(monkeypatch, handler)
+    result = await _search_messages_impl(
+        _runtime_with_discord_token(), _auth(), content="candidate"
+    )
+    assert result.rows == []
+    assert live_requested == ["900"]
+    assert "private-candidate@example.test" not in result.model_dump_json()
+    assert "private-cv.pdf" not in result.model_dump_json()

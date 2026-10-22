@@ -520,23 +520,3 @@ async def invalidate_source(
             )
         )
         return thread.thread_id
-
-async def is_recruitment_source(
-    sessions: async_sessionmaker[AsyncSession],
-    tenant_id: UUID,
-    thread_id: str,
-    *,
-    title: str = "",
-    parent_id: str = "",
-) -> bool:
-    """Single privacy predicate, independent of feature enablement and crypto keys."""
-    from daimon.core.recruitment import enrollment_source
-
-    async with sessions() as session:
-        if await session.get(RecruitmentThreadRecord, (tenant_id, thread_id)):
-            return True
-        row = await session.get(RecruitmentConfigRecord, tenant_id)
-        return bool(
-            row
-            and enrollment_source(title, parent_id, RecruitmentConfig.model_validate(row.config))
-        )

@@ -1882,3 +1882,103 @@ class TestReplyTargets:
 
         assert "reply_to" in result.split("<user_query")[0]
         assert "not the latest one" in result.split("<user_query")[0]
+
+
+@pytest.mark.parametrize("surface", ["parent", "older_file", "reply", "thread", "delta"])
+async def test_recruitment_sources_never_serialize_text_or_cv(surface, monkeypatch) -> None:
+    from types import SimpleNamespace
+
+    from daimon.adapters.discord.recruitment_guard import recruitment_message_filter
+    from daimon.core.recruitment import RecruitmentConfig
+    from daimon.core.stores.recruitment_privacy import RecruitmentSources
+
+    sources = RecruitmentSources(RecruitmentConfig(guild_id="101"), frozenset({"20"}))
+    monkeypatch.setattr(
+        "daimon.adapters.discord.recruitment_guard.sources_for_task",
+        AsyncMock(return_value=sources),
+    )
+    channel = MagicMock(spec=discord.TextChannel)
+    channel.id, channel.name = 2, "general"
+    guild = MagicMock()
+    guild.id = 101
+    channel.guild = guild
+    current = _make_thread([], thread_id=900, parent_id=2)
+    current.guild = guild
+    guild.fetch_channel = AsyncMock(return_value=current)
+    cv = _make_attachment(
+        filename="candidate-private.pdf",
+        url="https://cdn.discord.com/candidate-private.pdf",
+        content_type="application/pdf",
+    )
+    candidate = _make_message(msg_id=20, content="candidate-private@example.test", attachments=[cv])
+    trigger = _make_message(
+        msg_id=50,
+        content="ordinary unrelated question",
+        reply_to=candidate if surface == "reply" else None,
+    )
+    filler = _make_message(msg_id=30, content="ordinary history")
+    for msg in (candidate, trigger, filler):
+        msg.channel, msg.guild = channel, guild
+        msg.flags.has_thread = False
+        msg.type = discord.MessageType.default
+    callback = await recruitment_message_filter(SimpleNamespace(sessionmaker=object()), "101")
+    assert not await callback(trigger)
+    if surface in {"thread", "delta"}:
+        current.history = MagicMock(return_value=_AsyncIter([candidate, filler]))
+        if surface == "delta":
+            xml, images = await build_delta_xml(
+                current, trigger, after_message_id=1, source_filter=callback
+            )
+        else:
+            current.starter_message = candidate
+            xml, images = await build_context_xml(current, trigger, source_filter=callback)
+    else:
+        channel.history = MagicMock(
+            side_effect=[
+                _AsyncIter([filler])
+                if surface == "older_file"
+                else _AsyncIter([candidate, filler]),
+                _AsyncIter([candidate]),
+            ]
+        )
+        xml, images = await build_channel_context_xml(
+            channel,
+            trigger,
+            thread=current,
+            limit=1 if surface == "older_file" else 25,
+            source_filter=callback,
+        )
+    assert "candidate-private@example.test" not in xml
+    assert "candidate-private.pdf" not in xml
+    assert cv not in images
+    assert "ordinary unrelated question" in xml
+
+
+async def test_queued_turn_rechecks_live_name_before_provider_admission(monkeypatch) -> None:
+    from types import SimpleNamespace
+    from uuid import uuid4
+
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.core.recruitment import RecruitmentConfig
+    from daimon.core.stores.recruitment_privacy import RecruitmentSources
+
+    sources = RecruitmentSources(RecruitmentConfig(guild_id="101"))
+    monkeypatch.setattr(
+        "daimon.adapters.discord.recruitment_guard.sources_for_task",
+        AsyncMock(return_value=sources),
+    )
+    message = _make_message(msg_id=50, content="candidate-private@example.test")
+    thread = _make_thread([], thread_id=20, parent_id=2)
+    guild = MagicMock()
+    guild.id = 101
+    thread.guild = guild
+    message.channel, message.guild = thread, guild
+    message.flags.has_thread = False
+    message.type = discord.MessageType.default
+    live = _make_thread([], thread_id=20, parent_id=2)
+    live.guild, live.name = guild, "!labs-staffing: Synthetic"
+    guild.fetch_channel = AsyncMock(return_value=live)
+    bot = SimpleNamespace(runtime=SimpleNamespace(sessionmaker=object()), _orchestrate=AsyncMock())
+    await DaimonBot._handle_mention(bot, message, "101", uuid4(), query_messages=(message,))
+    bot._orchestrate.assert_not_awaited()
+    guild.fetch_channel.assert_awaited_once_with(20)

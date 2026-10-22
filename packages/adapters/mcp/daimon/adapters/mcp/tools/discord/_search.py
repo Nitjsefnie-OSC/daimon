@@ -25,14 +25,16 @@ from daimon.adapters.mcp.tools.discord._client import (
     rest_client,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import AttachmentRow, MessageRow, SearchResult
-from daimon.adapters.mcp.tools.discord._recruitment import recruitment_thread
+from daimon.adapters.mcp.tools.discord._recruitment import source_channel
 from daimon.adapters.mcp.tools.discord._visibility import (
     _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
     _bot_read_error,  # pyright: ignore[reportPrivateUsage]
     _check_thread_view,  # pyright: ignore[reportPrivateUsage]
     _check_view_permission,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.permissions import any_readers_limited
+from daimon.core.stores.recruitment_privacy import SourceChannel, sources_for_task
 from fastmcp.exceptions import ToolError
 from pydantic import BaseModel, ConfigDict, ValidationError
 
@@ -340,42 +342,35 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
 
         # 10. Map visible hits → MessageRow
         rows: list[MessageRow] = []
-        recruitment_cache: dict[str, bool] = {}
+        sources = await sources_for_task(
+            runtime.session_factory,
+            derive_tenant_uuid(platform="discord", workspace_id=guild_id),
+            fresh=True,
+        )
+
+        async def resolve_source(id: str) -> SourceChannel:
+            raw = await _resolve_channel(c, id)
+            return source_channel(_require_guild_channel(raw, guild_id))
+
         for hit in visible_hits:
-            info = thread_by_id.get(hit.channel_id)
-            if await recruitment_thread(
-                runtime,
-                guild_id,
-                hit.channel_id,
-                title=info.name if info else "",
-                parent_id=info.parent_id or "" if info else "",
-            ) or await recruitment_thread(runtime, guild_id, hit.id):
+            if hit.id in sources.threads:
                 continue
-            if info is None and hit.channel_id not in view_by_channel_id:
-                if hit.channel_id not in recruitment_cache:
-                    raw = await _resolve_channel(c, hit.channel_id)
-                    recruitment_cache[hit.channel_id] = isinstance(
-                        raw, discord.Thread
-                    ) and await recruitment_thread(
-                        runtime, guild_id, str(raw.id), title=raw.name, parent_id=str(raw.parent_id)
-                    )
-                if recruitment_cache[hit.channel_id]:
-                    continue
+            # threads[] supplies visibility hints, never proof of privacy safety.
+            if hit.channel_id not in view_by_channel_id and await sources.thread(
+                hit.channel_id, resolve_source
+            ):
+                continue
             if hit.type == _THREAD_CREATED:
-                referenced = hit.message_reference.channel_id if hit.message_reference else ""
-                if await recruitment_thread(
-                    runtime, guild_id, referenced or "", title=hit.content, parent_id=hit.channel_id
+                referenced = hit.message_reference.channel_id if hit.message_reference else None
+                if (
+                    referenced is None
+                    and sources.active
+                    or referenced
+                    and await sources.thread(referenced, resolve_source)
                 ):
                     continue
-            if hit.flags & (1 << 5):
-                try:
-                    raw = await _resolve_channel(c, hit.id)
-                except (discord.NotFound, discord.Forbidden, ToolError):
-                    continue
-                if isinstance(raw, discord.Thread) and await recruitment_thread(
-                    runtime, guild_id, str(raw.id), title=raw.name, parent_id=str(raw.parent_id)
-                ):
-                    continue
+            if hit.flags & (1 << 5) and await sources.thread(hit.id, resolve_source):
+                continue
             rows.append(
                 MessageRow(
                     id=hit.id,
@@ -405,7 +400,9 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
         # existence/volume of messages in channels the caller cannot view.
         # Once anything is sealed, a scoped count could include hits in a sealed
         # thread under a scoped parent, so it reports only what is shown too.
-        exact_count = bool(channel_ids) and not any_readers_limited(read_policy.policy)
+        exact_count = (
+            bool(channel_ids) and not any_readers_limited(read_policy.policy) and not sources.active
+        )
         effective_total = parsed.total_results if exact_count else showing
         hint: str | None = None
         if any_readers_limited(read_policy.policy):
