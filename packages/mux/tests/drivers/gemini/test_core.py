@@ -987,3 +987,153 @@ async def test_worker_without_complete_prompt_counting_refuses_before_dispatch()
         await driver.events.send(SCOPE, session.ref, (MESSAGE,), key="uncounted")
     assert not transport.requests
     assert await state.get_operation(SCOPE, "uncounted") is None
+
+
+def high_demand() -> ProviderError:
+    return ProviderError("overloaded", retryable=True, native_code="high_demand")
+
+
+@pytest.fixture
+def instant_read_retries(monkeypatch: pytest.MonkeyPatch) -> None:
+    from mux.drivers.gemini import core
+
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", (0.0,) * 5)
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+async def test_high_demand_read_is_retried_without_another_create(setup: Setup) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [high_demand(), ProviderError("upstream", retryable=True), native()]
+    snapshot = await ma.events.reconcile(SCOPE, s.ref)
+    assert snapshot.state == "idle"
+    assert len(t.requests) == 1
+    assert t.read_requests == ["i1"] * 3
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+async def test_persistent_high_demand_read_is_bounded_then_surfaced(setup: Setup) -> None:
+    from mux.drivers.gemini.core import INTERACTION_READ_RETRY_DELAYS_S
+
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [high_demand() for _ in range(10)]
+    with pytest.raises(ProviderError) as exc:
+        await ma.events.reconcile(SCOPE, s.ref)
+    assert exc.value.category == "overloaded"
+    assert exc.value.native_code == "high_demand_read_retries_exhausted"
+    assert len(t.read_requests) == len(INTERACTION_READ_RETRY_DELAYS_S) + 1
+    assert len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+@pytest.mark.parametrize(
+    "failure",
+    [
+        ProviderError("invalid_request", retryable=False),
+        ProviderError("rate_limited", retryable=True),
+        ProviderError("upstream", retryable=False, native_code="malformed_interaction"),
+    ],
+)
+async def test_final_read_failures_are_not_retried(setup: Setup, failure: ProviderError) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [failure, native()]
+    with pytest.raises(ProviderError) as exc:
+        await ma.events.reconcile(SCOPE, s.ref)
+    assert exc.value is failure
+    assert t.read_requests == ["i1"]
+
+
+@pytest.mark.asyncio
+async def test_read_retry_stays_inside_the_caller_deadline(setup: Setup) -> None:
+    import asyncio
+
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [high_demand() for _ in range(10)]
+    with pytest.raises(TimeoutError):
+        async with asyncio.timeout(0.1):
+            await ma.events.reconcile(SCOPE, s.ref)
+    assert t.read_requests == ["i1"]
+
+
+@pytest.mark.asyncio
+async def test_read_backoff_releases_the_account_lock_between_attempts(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    import asyncio
+
+    from mux.drivers.gemini import core
+
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", (2.0,) * 5)
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.reads["i1"] = [high_demand(), native()]
+    backing_off = asyncio.create_task(ma.events.reconcile(SCOPE, s.ref))
+    while not t.read_requests:
+        await asyncio.sleep(0)
+    # A sibling on the same account gets the storage lock during the backoff
+    # (sleep >= 1s), instead of waiting it out or failing as busy.
+    async with asyncio.timeout(0.5):
+        await ma.events.list(SCOPE, s.ref, page=PageRequest())
+    assert not backing_off.done()
+    assert (await backing_off).state == "idle"
+    assert t.read_requests == ["i1", "i1"] and len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+async def test_cancel_wait_retries_a_high_demand_read(setup: Setup) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    sent = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    assert sent.turn_id is not None
+    receipt = await ma.events.cancel(SCOPE, s.ref, turn_id=sent.turn_id, key="cancel")
+    t.read_requests.clear()
+    t.reads["i1"] = [high_demand(), native(status="cancelled")]
+    deadline = datetime.now(UTC) + timedelta(seconds=5)
+    stop = await ma.events.wait_stopped(SCOPE, receipt, deadline=deadline)
+    assert stop.stopped and stop.outcome == "interrupted"
+    assert t.read_requests == ["i1", "i1"] and t.cancelled == ["i1"]
+    assert len(t.requests) == 1
+
+
+@pytest.mark.asyncio
+async def test_cancel_wait_backoff_respects_the_deadline(
+    setup: Setup, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    from mux.drivers.gemini import core
+
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", (10.0,) * 5)
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native(status="in_progress", steps=[]))
+    sent = await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="first")
+    assert sent.turn_id is not None
+    receipt = await ma.events.cancel(SCOPE, s.ref, turn_id=sent.turn_id, key="cancel")
+    t.read_requests.clear()
+    t.reads["i1"] = [high_demand() for _ in range(10)]
+    deadline = datetime.now(UTC) + timedelta(seconds=0.2)
+    stop = await ma.events.wait_stopped(SCOPE, receipt, deadline=deadline)
+    assert not stop.stopped
+    assert t.read_requests == ["i1"]
+
+
+@pytest.mark.asyncio
+@pytest.mark.usefixtures("instant_read_retries")
+async def test_usage_reconcile_retries_a_high_demand_read(setup: Setup) -> None:
+    ma, t, _, _, s, _ = setup
+    t.responses.append(native())
+    await ma.events.send(SCOPE, s.ref, (MESSAGE,), key="one")
+    t.read_requests.clear()
+    t.reads["i1"] = [high_demand(), native()]
+    assert await ma.usage.reconcile(SCOPE, s.ref)
+    assert t.read_requests == ["i1", "i1"] and len(t.requests) == 1
