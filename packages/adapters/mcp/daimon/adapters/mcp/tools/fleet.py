@@ -9,7 +9,7 @@ entry points retain their independent outside-chat restriction.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -23,7 +23,7 @@ from daimon.core.fleet_orchestration import FleetOrchestrator
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import BackendConfig
-from mux.contracts.ids import ResourceRef, Revision
+from mux.contracts.ids import Provider, ResourceRef, Revision
 from mux.contracts.resources import AgentPatch, AgentSpec, SessionSpec
 from pydantic import Field, JsonValue
 
@@ -69,6 +69,7 @@ class FleetToolService(Protocol):
         task: str | None = None,
         model: str | None = None,
         planned_workers: int | None = None,
+        planned_models: Sequence[str] | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
     async def status(
@@ -245,14 +246,23 @@ class HostFleetToolService:
         task: str | None = None,
         model: str | None = None,
         planned_workers: int | None = None,
+        planned_models: Sequence[str] | None = None,
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id
         )
-        from daimon.core.neutral_resources import task_worker_spec, worker_runtime_ceiling
+        from daimon.core.neutral_resources import (
+            planned_providers,
+            task_worker_spec,
+            worker_runtime_ceiling,
+        )
 
         if agent is None and clone is None and task is not None:
             agent = task_worker_spec(parent, role=role, task=task, model=model)
+        providers: list[Provider] | None = None
+        if planned_models is not None:
+            providers = planned_providers(parent, planned_models)
+            planned_workers = len(providers) if planned_workers is None else planned_workers
         provider = (
             backend.backend
             if backend is not None and backend.backend is not None
@@ -262,6 +272,7 @@ class HostFleetToolService:
             if overrides is not None and overrides.model is not None
             else parent.spec.model.provider
         )
+        planned_on_provider = providers.count(provider) if providers is not None else None
         now = datetime.now(UTC)
         limits = await self._orchestrator.spawn_limits(
             parent,
@@ -275,6 +286,7 @@ class HostFleetToolService:
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             planned_workers=planned_workers,
+            planned_on_provider=planned_on_provider,
             max_runtime_s=worker_runtime_ceiling(parent, provider, backend),
         )
         return await self._orchestrator.spawn(
@@ -420,6 +432,7 @@ def register_fleet_tools(
         task: str | None = None,
         model: str | None = None,
         planned_workers: int | None = None,
+        planned_models: list[str] | None = None,
     ) -> dict[str, JsonValue]:
         if sum(item is not None for item in (task, agent, clone)) != 1:
             raise ToolError("Give the worker a task, an agent spec or a pinned clone, exactly one.")
@@ -455,6 +468,7 @@ def register_fleet_tools(
                 task=task,
                 model=model,
                 planned_workers=planned_workers,
+                planned_models=planned_models,
             )
         )
 
@@ -466,6 +480,7 @@ def register_fleet_tools(
         task: str | None = None,
         model: str | None = None,
         planned_workers: PositiveCount | None = None,
+        planned_models: Annotated[list[str], Field(min_length=1)] | None = None,
         origin_context_id: uuid.UUID | None = None,
         backend: BackendConfig | None = None,
         budget_usd: PositiveMoney | None = None,
@@ -486,13 +501,16 @@ def register_fleet_tools(
         Usually pass only operation_key (unique per worker, e.g. "W1"), role,
         task (the worker's full instructions), model (a model id from the
         fleet grant, e.g. "gpt-6-luna"; omit it for your own model) and
-        planned_workers (how many workers you are starting in total, the same
-        number on every call), plus origin_context_id from your turn controls.
+        planned_models (the model id of every worker you are starting, e.g.
+        ["gpt-6-luna", "gemini-3.8-flash", "claude-sonnet-5-5"], the same list
+        on every call), plus origin_context_id from your turn controls.
         Leave everything else out: the host binds this turn's run (never
         invent a run_id), picks the granted backend, splits the budget left
-        evenly across your planned workers and uses the run's deadline (a
+        evenly across your planned workers (and each provider's cap across
+        the planned workers on that provider) and uses the run's deadline (a
         later deadline is shortened to it; a Gemini worker gets at most 120 s).
-        A worker on another model than yours runs at that model's default
+        planned_workers (a plain count) is the older form of the same hint. A
+        worker on another model than yours runs at that model's default
         effort. Budgets above the grant are refused. After spawning, end your
         turn; you are woken to fleet_collect.
         Advanced: an agent spec or an authorized clone with sparse overrides
@@ -503,6 +521,7 @@ def register_fleet_tools(
             task=task,
             model=model,
             planned_workers=planned_workers,
+            planned_models=planned_models,
             run_id=run_id,
             origin_context_id=origin_context_id,
             operation_key=operation_key,

@@ -1365,3 +1365,71 @@ async def test_fleet_r9_plain_gemini_spawn_fills_limits_only_when_none_are_given
     luna = resolver(task_worker_spec(root, role="W2", task="Compare.", model="gpt-6-luna"))
     other = luna(root.limits.model_copy(update={"max_turns": 1}))
     assert owner._bounded_gemini(other, luna, fill=True) is other  # pyright: ignore[reportPrivateUsage]
+
+
+def test_a_provider_line_is_shared_only_by_that_providers_planned_workers():
+    """Fleet r6: one worker per provider could use only a third of each provider line."""
+    from daimon.core.neutral_resources import default_worker_limits
+
+    skewed = CEILING.model_copy(
+        update={
+            "provider_limits_usd": {
+                "anthropic": Decimal("0.30"),
+                "openai": Decimal("0.15"),
+                "gemini": Decimal("1.55"),
+            }
+        }
+    )
+    run = _run()
+
+    def share(provider, on_provider, workers=()):
+        return default_worker_limits(
+            skewed,
+            run,
+            workers,
+            provider=provider,
+            planned_workers=3,
+            planned_on_provider=on_provider,
+        ).budget_usd
+
+    assert (share("anthropic", 1), share("openai", 1), share("gemini", 1)) == (
+        Decimal("0.30"),
+        Decimal("0.15"),
+        Decimal("0.66"),
+    )
+    # Without the per-provider count each line is still split three ways.
+    assert default_worker_limits(
+        skewed, run, (), provider="gemini", planned_workers=3
+    ).budget_usd == Decimal("0.51")
+    # Two planned on one provider share its line; one already admitted leaves its rest.
+    assert share("anthropic", 2) == Decimal("0.15")
+    assert share("anthropic", 2, (_worker("anthropic", "0.15"),)) == Decimal("0.15")
+
+
+@pytest.mark.parametrize(
+    "plan",
+    [
+        ("anthropic", "openai", "gemini"),
+        ("gemini", "gemini", "openai"),
+        ("anthropic", "anthropic", "anthropic", "openai"),
+    ],
+)
+def test_parallel_spawns_with_a_provider_plan_never_exceed_any_cap(plan):
+    from daimon.core.neutral_resources import default_worker_limits
+
+    run = _run()
+    spent = {provider: Decimal(0) for provider in CEILING.provider_limits_usd}
+    total = Decimal(0)
+    for provider in plan:
+        amount = default_worker_limits(
+            CEILING,
+            run,
+            (),
+            provider=provider,
+            planned_workers=len(plan),
+            planned_on_provider=plan.count(provider),
+        ).budget_usd
+        spent[provider] += amount
+        total += amount
+    assert total <= run.total_budget_usd
+    assert all(spent[p] <= CEILING.provider_limits_usd[p] for p in spent)

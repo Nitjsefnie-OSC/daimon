@@ -12,7 +12,7 @@ import io
 import json
 import uuid
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
@@ -1149,6 +1149,17 @@ def bounded_gemini_worker_tokens(
     return {"max_input_tokens": max_input, "max_output_tokens": max_output}
 
 
+def planned_providers(parent: WorkerPermissions, models: Sequence[str]) -> list[Provider]:
+    """The provider of each planned worker's model; every model must be granted."""
+    granted: dict[str, Provider] = {
+        model.id: model.provider for model in (*parent.models, parent.spec.model)
+    }
+    try:
+        return [granted[model] for model in models]
+    except KeyError:
+        raise WorkerSpecRefused("backend", "not_subset") from None
+
+
 def default_worker_limits(
     ceiling: WorkerLimits,
     run: FleetRun | None,
@@ -1163,6 +1174,7 @@ def default_worker_limits(
     planned_workers: int | None = None,
     now: datetime | None = None,
     max_runtime_s: int | None = None,
+    planned_on_provider: int | None = None,
 ) -> WorkerLimits:
     """Fill omitted worker limits from the frozen root, so a model need not guess them.
 
@@ -1174,7 +1186,8 @@ def default_worker_limits(
     parallel spawns reading the same snapshot never add up past either cap. A root that
     says how many workers it plans shares among those not yet admitted instead (still
     at most the free slots); spawning more at once than planned can only be refused
-    by admission, never exceed a cap. Supplied
+    by admission, never exceed a cap. When the root also says how many planned workers
+    use this provider, the provider line is shared among just those. Supplied
     budgets and every ceiling are still checked by the resolver and financial admission.
     """
     latest = ceiling.deadline
@@ -1192,8 +1205,13 @@ def default_worker_limits(
         slots = run.max_workers - len(workers)
         if slots <= 0:
             raise WorkerSpecRefused("budget", "exhausted")
+        free = slots
         if planned_workers is not None:
-            slots = min(slots, max(planned_workers - len(workers), 1))
+            slots = min(free, max(planned_workers - len(workers), 1))
+        provider_slots = slots
+        if planned_on_provider is not None:
+            on_provider = sum(1 for w in workers if w.backend == provider)
+            provider_slots = min(free, max(planned_on_provider - on_provider, 1))
 
         def held(provider_only: bool) -> Decimal:
             return sum(
@@ -1211,7 +1229,7 @@ def default_worker_limits(
         )
         if ceiling.provider_limits_usd is not None:
             line = ceiling.provider_limits_usd.get(provider, Decimal(0))
-            share = min(share, (line - held(True)) / slots)
+            share = min(share, (line - held(True)) / provider_slots)
         budget_usd = max(share, Decimal(0)).quantize(Decimal("0.01"), rounding=ROUND_DOWN)
         if budget_usd <= 0:
             # Refuse before admission, so an exhausted run never spends a worker slot.

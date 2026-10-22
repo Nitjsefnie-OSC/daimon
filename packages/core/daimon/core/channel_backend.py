@@ -25,6 +25,7 @@ import uuid
 from collections.abc import Awaitable, Callable, Iterator, Mapping
 from dataclasses import dataclass
 from datetime import UTC, datetime
+from decimal import Decimal
 from functools import partial
 from typing import Literal, Protocol, cast, get_args
 
@@ -371,6 +372,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "drops_required",
         "feature_disabled",
         "invalid_fleet_grant",
+        "fleet_provider_limits_exceed_budget",
         "no_previous_revision",
         "re_confirm",
         "revision_busy",
@@ -940,6 +942,10 @@ class AgentBackendService:
                     value.limits.require_profile(get_profile(choice.profile))
             except (ValueError, DaimonError, UnsupportedCapability):
                 raise AgentBackendRefused("invalid_fleet_grant") from None
+            lines = value.limits.provider_limits_usd
+            if lines is not None and sum(lines.values(), Decimal(0)) > value.limits.budget_usd:
+                # Financial admission refuses every spawn of such a run; say so now.
+                raise AgentBackendRefused("fleet_provider_limits_exceed_budget")
             normalized = value.model_copy(update={"epoch": local + 1}).model_dump(mode="json")
         preview = compatibility_preview(
             agent,

@@ -1182,6 +1182,9 @@ existing serialized intent.
 An authenticated parent's optional `provider_limits_usd` fences each provider's
 sibling worker exposure within the run. A missing or zero line refuses that
 provider; a funded reservation cannot borrow unused capacity from another line.
+Provider lines must not add up to more than the grant's run budget: financial
+admission refuses every spawn of such a run, so the fleet grant preview refuses
+the grant first (`fleet provider limits exceed budget`).
 The same financial producer sums whole unknown reservations and measured
 overruns before admission, under its existing lock and exact decimal context.
 These worker sublimits do not reserve root inference or install credential-line

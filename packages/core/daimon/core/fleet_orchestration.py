@@ -333,6 +333,7 @@ class FleetOrchestrator:
         max_input_tokens: int | None = None,
         max_output_tokens: int | None = None,
         planned_workers: int | None = None,
+        planned_on_provider: int | None = None,
         max_runtime_s: int | None = None,
     ) -> WorkerLimits:
         """Limits for a spawn, with omitted ones defaulted from the frozen root.
@@ -367,6 +368,7 @@ class FleetOrchestrator:
             max_input_tokens=max_input_tokens,
             max_output_tokens=max_output_tokens,
             planned_workers=planned_workers,
+            planned_on_provider=planned_on_provider,
             now=now,
             max_runtime_s=max_runtime_s,
         )
