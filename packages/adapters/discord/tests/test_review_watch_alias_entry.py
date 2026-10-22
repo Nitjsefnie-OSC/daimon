@@ -27,6 +27,7 @@ from daimon.testing.ma import (
 from .harness import make_bot
 from .test_continuation_dispatch_entry import _make_guild, _make_member, _make_runtime, _make_thread
 from .watch_fixtures import (
+    WatchDiscordRest,
     cached_watch_session,
     enrolled_page_watch,
     watch_admission_patches,
@@ -159,6 +160,7 @@ async def test_review_actual_watch_removes_management_alias(db_session_factory, 
     )
     runtime = replace(runtime, anthropic=fake_client, turn_deps=deps)
     bot = make_bot(runtime)
+    WatchDiscordRest(bot)
     guild = _make_guild(member=_make_member(admin=False))
     guild.id = 710000099
     thread = _make_thread(guild=guild)
