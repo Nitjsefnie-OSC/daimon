@@ -2634,6 +2634,23 @@ def _matching_rows(
     ]
 
 
+def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
+    """The matching rows naming the most scope fields exactly (fewest `_WILDCARD`s).
+
+    A row pinned to one channel for every account is narrower than a
+    deployment-wide default, so it serves that channel; equally specific
+    overlapping rows all remain and refuse as ambiguous.
+    """
+
+    def exact_fields(row: dict[str, JsonValue]) -> int:
+        return sum(row.get(field) != _WILDCARD for field in _WILDCARDABLE_FIELDS)
+
+    if not rows:
+        return rows
+    best = max(exact_fields(row) for row in rows)
+    return [row for row in rows if exact_fields(row) == best]
+
+
 def select_runtime_manifest[Plan: CounterpartPlan](
     request: ProviderPreparationRequest, plan_type: type[Plan]
 ) -> Plan:
@@ -2642,8 +2659,10 @@ def select_runtime_manifest[Plan: CounterpartPlan](
     A deployment-wide default is one row with `_WILDCARD` ("*") on `platform`,
     `channel_id` and/or `account_id` — never on `tenant_id` or `profile`. An
     exact match always wins over a wildcard row (computed first, tried first);
-    wildcard rows are only consulted when no exact row matches, and the
-    existing "exactly one candidate or refuse" rule is unchanged for each pass.
+    wildcard rows are only consulted when no exact row matches. Among those,
+    the rows naming the most scope fields exactly win (a channel's own row,
+    even with `"*"` accounts, beats a deployment-wide default), and the
+    existing "exactly one candidate or refuse" rule applies to what remains.
     The resolved plan always carries the request's real platform/channel_id/
     account_id — a wildcard row is a template, never a literal "*" identity.
     """
@@ -2662,7 +2681,7 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         rows = _ROWS.validate_json(raw)
         selected = _matching_rows(rows, revision, request, allow_wildcard=False)
         if not selected:
-            selected = _matching_rows(rows, revision, request, allow_wildcard=True)
+            selected = _most_specific(_matching_rows(rows, revision, request, allow_wildcard=True))
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")
         resolved = dict(selected[0])

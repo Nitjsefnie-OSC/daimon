@@ -140,6 +140,46 @@ def test_two_overlapping_wildcard_rows_refuse_as_ambiguous(
     assert denied.value.reason == "backend_unsupported"
 
 
+def test_a_channel_row_for_every_account_wins_over_a_deployment_wide_default(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_manifest(
+        tmp_path,
+        monkeypatch,
+        [
+            row(platform="*", channel_id="*", account_id="*", agent_id="agent-default"),
+            row(channel_id="channel-1", account_id="*", agent_id="agent-channel"),
+        ],
+    )
+    pinned = fake_request(
+        tenant_id="tenant-a", account_id="account-7", platform="slack", channel_id="channel-1"
+    )
+    assert select_runtime_manifest(pinned, OpenAIDeployment).agent_id == "agent-channel"
+    other = fake_request(
+        tenant_id="tenant-a", account_id="account-7", platform="slack", channel_id="channel-2"
+    )
+    assert select_runtime_manifest(other, OpenAIDeployment).agent_id == "agent-default"
+
+
+def test_equally_specific_overlapping_wildcard_rows_still_refuse(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    write_manifest(
+        tmp_path,
+        monkeypatch,
+        [
+            row(channel_id="channel-1", account_id="*", agent_id="agent-channel"),
+            row(channel_id="*", account_id="account-1", agent_id="agent-account"),
+        ],
+    )
+    request = fake_request(
+        tenant_id="tenant-a", account_id="account-1", platform="slack", channel_id="channel-1"
+    )
+    with pytest.raises(AdmissionDenied) as denied:
+        select_runtime_manifest(request, OpenAIDeployment)
+    assert denied.value.reason == "backend_unsupported"
+
+
 @pytest.mark.parametrize("field", ["tenant_id", "profile"])
 def test_wildcard_tenant_id_or_profile_refuses_at_startup_validation(
     tmp_path: Path, monkeypatch: pytest.MonkeyPatch, field: str
