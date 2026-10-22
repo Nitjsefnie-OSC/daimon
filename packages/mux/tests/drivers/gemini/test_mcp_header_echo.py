@@ -186,7 +186,7 @@ def test_a_token_outside_the_header_names_its_path_only() -> None:
             completed(text="leaked Bearer " + TOKEN), protected=False, mcp_tokens={TOKEN}
         )
     assert refused.value.native_code == "mcp_token_echo"
-    assert refused.value.native_param == "$.steps[0].content[0].text"
+    assert refused.value.native_param == "$.steps[0].content[0].<key>"  # non-schema keys redacted
     assert refused.value.native_message == "token_outside_header"
 
 
