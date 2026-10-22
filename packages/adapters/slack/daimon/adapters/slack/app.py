@@ -25,7 +25,7 @@ import aiohttp
 import anthropic
 import structlog
 from cryptography.fernet import InvalidToken
-from daimon.adapters.slack.admin import resolve_admin_status, resolve_requester
+from daimon.adapters.slack.admin import resolve_requester
 from daimon.adapters.slack.agent_setup.actions import (
     handle_agent_setup_action,
     handle_agent_setup_command,
@@ -105,6 +105,7 @@ from daimon.adapters.slack.direct_messages import (
     is_direct_message_event,
 )
 from daimon.adapters.slack.errors import (
+    NON_MEMBER_NOTICE,
     NOT_SET_UP_NOTICE,
     SETUP_OUT_OF_DATE_NOTICE,
     generate_request_id,
@@ -1565,19 +1566,7 @@ class SlackApp:
 
             # (5) SLACK CONNECT GATE — reject external-workspace senders.
             if is_slack_connect_external(event, team_id=team_id):
-                await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
-                    channel=channel,
-                    user=event.get("user") or "",
-                    # Without thread_ts an in-thread mention's rejection lands at
-                    # channel root while the sender watches the thread. Only the real
-                    # thread_ts — never a ts fallback, which would tuck the notice
-                    # into a thread that does not exist yet. None is dropped by the SDK.
-                    thread_ts=event.get("thread_ts"),
-                    text=(
-                        "Sorry, I can only respond to members of this workspace. "
-                        "Please ask a workspace member to mention me instead."
-                    ),
-                )
+                await self._refuse_non_member(client, event, channel=channel)
                 return
 
             # (6) TENANT RESOLVE — derived above, before the may-post check.
@@ -1641,6 +1630,21 @@ class SlackApp:
             "SlackApp requires slack settings (entrypoint validates at boot)"
         )
         return slack_settings.history_page_limit
+
+    async def _refuse_non_member(
+        self, client: AsyncWebClient, event: dict[str, Any], *, channel: str
+    ) -> None:
+        """Tell a sender who is not a member of this workspace that no turn will run."""
+        await client.chat_postEphemeral(  # pyright: ignore[reportUnknownMemberType]  # slack_sdk **kwargs: Unknown
+            channel=channel,
+            user=event.get("user") or "",
+            # Without thread_ts an in-thread mention's rejection lands at
+            # channel root while the sender watches the thread. Only the real
+            # thread_ts — never a ts fallback, which would tuck the notice
+            # into a thread that does not exist yet. None is dropped by the SDK.
+            thread_ts=event.get("thread_ts"),
+            text=NON_MEMBER_NOTICE,
+        )
 
     async def _orchestrate(
         self,
@@ -2058,13 +2062,20 @@ class SlackApp:
         # the local values the context builders also consume — a second lookup
         # would violate the one-call-per-turn constraint.
         author_id = str(event.get("user") or "")
-        requester = await resolve_requester(web_client, user_id=author_id)
+        requester = await resolve_requester(web_client, user_id=author_id, host_team_id=team_id)
         if requester is None:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]  # SDK kwargs
                 channel=channel,
                 thread_ts=thread_id,
                 text="I couldn't verify your workspace role, so I didn't reply. Please retry.",
             )
+            return
+        if not requester.is_host_member:
+            # The event may omit the sender's workspace fields, so the gate
+            # above can miss an external member; users.info is authoritative.
+            # No admit(): no account or role is written for them.
+            log.info("slack.non_member_refused", team_id=team_id, channel_id=channel)
+            await self._refuse_non_member(web_client, event, channel=channel)
             return
         is_admin = requester.is_admin
         author_name = requester.display_name
@@ -3085,12 +3096,23 @@ class SlackApp:
             )
             account = None
         # The follow-up runs as the requester, so it carries their role as it
-        # stands NOW, read from Slack the way a mention reads it. A failed
-        # lookup runs the turn as USER -- never more than the requester holds.
-        admin_status = await resolve_admin_status(
-            web_client, user_id=row.requester_external_user_id
+        # stands NOW, read from Slack the way a mention reads it. Only a
+        # verified member of this workspace runs. An external member is denied,
+        # and so is a failed lookup: a release would retry without bound while
+        # Slack stays down (a release refunds the attempt count and a wake has
+        # no expiry), so the row settles as denied instead.
+        requester = await resolve_requester(
+            web_client, user_id=row.requester_external_user_id, host_team_id=team_id
         )
-        role = Role.ADMIN if admin_status is True else Role.USER
+        if requester is None or not requester.is_host_member:
+            log.info(
+                "slack.continuation.requester_not_member",
+                team_id=team_id,
+                thread_id=thread_id,
+                lookup_failed=requester is None,
+            )
+            raise AdmissionDenied(reason="invoker_not_allowed")
+        role = Role.ADMIN if requester.is_admin else Role.USER
         follow_admission = await admit(
             self.runtime.turn_deps,
             tenant_id=tenant_id,

@@ -53,6 +53,11 @@ def bound_request_id() -> str:
 NOT_SET_UP_NOTICE = (
     "Daimon isn't set up in this channel yet.\n\nAsk an admin to run `/agent-setup`."
 )
+# Said to a sender who belongs to another Slack workspace (Slack Connect).
+NON_MEMBER_NOTICE = (
+    "Sorry, I can only respond to members of this workspace. "
+    "Please ask a workspace member to mention me instead."
+)
 SETUP_OUT_OF_DATE_NOTICE = (
     "This channel's setup is out of date.\n\nAsk an admin to check `/agent-setup`."
 )

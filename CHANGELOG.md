@@ -7,6 +7,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Slack: an external (Slack Connect) member's role is never taken from their own workspace, a mention from one is refused before anything is stored, and their queued follow-ups no longer run.
+
 - A conversation that moves to a different memory store starts clean: nothing from the old session is carried over, and the old session is not handed back while a turn is still running in it.
 
 - **The "Working on it…" card shows more of the agent's progress.** On Discord,

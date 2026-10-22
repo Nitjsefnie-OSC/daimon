@@ -155,7 +155,7 @@ async def test_resolve_admin_status_returns_none_and_does_not_raise_on_transport
             exception=aiohttp.ClientConnectionError("connection refused"),
         )
         client = AsyncWebClient(token="xoxb-test")
-        result = await resolve_admin_status(client, user_id="U_TEST")
+        result = await resolve_admin_status(client, user_id="U_TEST", host_team_id="T_HOST")
 
     assert result is None, (
         "resolve_admin_status should return None (lookup failed) on a transport error, not raise"
@@ -181,7 +181,9 @@ async def test_resolve_is_admin_returns_false_and_does_not_raise_on_transport_er
     )
 
 
-async def _requester_for(user: dict[str, object]) -> SlackRequester | None:
+async def _requester_for(
+    user: dict[str, object], *, host_team_id: str = "T_HOST"
+) -> SlackRequester | None:
     from slack_sdk.web.async_client import AsyncWebClient
 
     with AioResponsesMock() as mock:
@@ -189,7 +191,7 @@ async def _requester_for(user: dict[str, object]) -> SlackRequester | None:
             _USERS_INFO_PATTERN, payload={"ok": True, "user": user}
         )
         client = AsyncWebClient(token="xoxb-test")
-        result = await resolve_requester(client, user_id="U_TEST")
+        result = await resolve_requester(client, user_id="U_TEST", host_team_id=host_team_id)
         requests = sum(len(r) for r in mock.requests.values())  # pyright: ignore[reportUnknownMemberType, reportUnknownVariableType, reportUnknownArgumentType]
     assert requests == 1, "resolve_requester must make exactly one users.info call"
     return result
@@ -217,8 +219,14 @@ async def _requester_for(user: dict[str, object]) -> SlackRequester | None:
 async def test_resolve_requester_picks_display_name_then_real_name_then_name(
     user: dict[str, object], expected: str | None
 ) -> None:
-    result = await _requester_for({**user, "is_admin": True})
-    assert result == SlackRequester(is_admin=True, display_name=expected)
+    result = await _requester_for({**user, "team_id": "T_HOST", "is_admin": True})
+    assert result == SlackRequester(
+        is_admin=True,
+        display_name=expected,
+        team_id="T_HOST",
+        is_stranger=False,
+        host_team_id="T_HOST",
+    )
 
 
 @pytest.mark.asyncio
@@ -229,5 +237,50 @@ async def test_resolve_requester_returns_none_when_the_lookup_fails() -> None:
         mock.get(  # pyright: ignore[reportUnknownMemberType]
             _USERS_INFO_PATTERN, payload={"ok": False, "error": "ratelimited"}
         )
-        result = await resolve_requester(AsyncWebClient(token="xoxb-test"), user_id="U_TEST")
+        result = await resolve_requester(
+            AsyncWebClient(token="xoxb-test"), user_id="U_TEST", host_team_id="T_HOST"
+        )
     assert result is None
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["is_admin", "is_owner", "is_primary_owner"])
+async def test_resolve_requester_external_team_is_never_admin_or_host_member(flag: str) -> None:
+    result = await _requester_for({"team_id": "T_OTHER", flag: True})
+    assert result is not None
+    assert result.is_admin is False
+    assert result.is_host_member is False
+
+
+@pytest.mark.asyncio
+async def test_resolve_requester_stranger_is_not_a_host_member_even_with_host_team_id() -> None:
+    result = await _requester_for({"team_id": "T_HOST", "is_stranger": True, "is_admin": True})
+    assert result is not None
+    assert result.is_admin is False
+    assert result.is_host_member is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("user", [{"is_admin": True}, {"team_id": "", "is_admin": True}])
+async def test_resolve_requester_missing_team_id_is_not_verified(user: dict[str, object]) -> None:
+    result = await _requester_for(user)
+    assert result is not None
+    assert result.team_id is None
+    assert result.is_admin is False
+    assert result.is_host_member is False
+
+
+@pytest.mark.asyncio
+@pytest.mark.parametrize("flag", ["is_admin", "is_owner", "is_primary_owner"])
+async def test_resolve_requester_host_admin_is_admin_and_host_member(flag: str) -> None:
+    result = await _requester_for({"team_id": "T_HOST", flag: True})
+    assert result is not None
+    assert result.is_admin is True
+    assert result.is_host_member is True
+
+
+@pytest.mark.asyncio
+async def test_resolve_requester_host_plain_member_is_member_not_admin() -> None:
+    result = await _requester_for({"team_id": "T_HOST"})
+    assert result is not None
+    assert (result.is_admin, result.is_host_member) == (False, True)
