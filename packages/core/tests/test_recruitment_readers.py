@@ -342,3 +342,21 @@ async def test_thread_listing_filters_actual_returned_parent_before_names(monkey
     )
     auth = SimpleNamespace(platform_user_id="7", external_id="101")
     assert await _read._list_threads_impl(runtime, auth, channel_id="3") == []
+
+
+async def test_actual_partial_messageable_refuses_before_gateway_or_naming():
+    from daimon.adapters.discord.bot import DaimonBot
+    from daimon.adapters.discord.recruitment_guard import protected
+
+    channel = discord.PartialMessageable(state=MagicMock(), id=20, guild_id=101)
+    settings = policy()
+    assert protected(settings, channel, "101")
+    assert not protected(RecruitmentSettings(), channel, "101")
+    message = MagicMock(spec=discord.Message)
+    message.channel, message.guild = channel, SimpleNamespace(id=101)
+    bot = SimpleNamespace(
+        runtime=SimpleNamespace(settings=SimpleNamespace(recruitment=settings)),
+        _orchestrate=AsyncMock(side_effect=AssertionError("provider/naming")),
+    )
+    await DaimonBot._handle_mention(bot, message, "101", uuid4())
+    bot._orchestrate.assert_not_awaited()

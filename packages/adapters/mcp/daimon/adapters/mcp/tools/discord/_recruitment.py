@@ -13,9 +13,9 @@ def protected(
         str(channel.id),
         str(channel.parent_id)
         if isinstance(channel, discord.Thread) and channel.parent_id
-        else None
-        if isinstance(channel, discord.Thread)
-        else "",
+        else ""
+        if isinstance(channel, discord.abc.GuildChannel)
+        else None,
     )
 
 
