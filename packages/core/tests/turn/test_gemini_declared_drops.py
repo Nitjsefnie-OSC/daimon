@@ -411,3 +411,273 @@ def test_ordinary_compiler_runs_a_picked_model_only_when_target_and_admission_ag
     with pytest.raises(AdmissionDenied):
         plan.deployment(replace(canonical, admission=picked.admission))
     assert calls == posts == []
+
+
+def _as_template(plan, tmp_path, monkeypatch):
+    """The same deployment as a tenant-wide agent template: no source or counterpart pins."""
+    template = plan.model_copy(
+        update={
+            "platform": "*",
+            "channel_id": "*",
+            "account_id": "*",
+            "agent_id": None,
+            "source_agent_id": None,
+            "source_agent_version": None,
+            "counterpart_catalog_id": None,
+            "counterpart_catalog_revision": None,
+            "root_materialization": True,
+        }
+    )
+    row = GeminiPlan.model_validate(template.model_dump(mode="json"))
+    path = tmp_path / "template.json"
+    path.write_text(json.dumps([row.model_dump(mode="json")]))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    return row
+
+
+async def test_a_template_row_publishes_the_agent_version_once_and_runs_a_real_turn(
+    ordinary, tmp_path, monkeypatch
+):
+    from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
+
+    request, plan, canonical, native, calls, posts, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    _as_template(plan, tmp_path, monkeypatch)
+    await service.clear_backend(source, accepted.local, actor)
+
+    def agent_posts():
+        return [c for c in calls if c.method == "POST" and c.url.path.startswith("/v1beta/agents")]
+
+    scoped, lookup = scope_channel_runtimes(request)
+    first = await read_preparation_counterpart(scoped)
+    assert first.verified_counterpart == first.counterpart
+    assert first.counterpart.catalog_id == root_counterpart_catalog_id(first)
+    assert first.counterpart.agent.spec == canonical.target_spec
+    assert len(agent_posts()) == 1
+    again, _ = scope_channel_runtimes(request)
+    second = await read_preparation_counterpart(again)
+    assert second.counterpart == first.counterpart
+    assert len(agent_posts()) == 1, "a second turn reuses the published counterpart"
+    prepared = await bind_session_impl(
+        request.deps,
+        request.admission,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        external_user_id=request.external_user_id,
+        thread_id=request.thread_id,
+        session_account_id=request.session_account_id,
+        reuse_existing=True,
+    )
+    assert prepared.runtime.journal.deployment.native_agent.spec == canonical.target_spec
+
+    async def no_recovery():
+        pytest.fail("the template turn changed its admitted source/session")
+
+    outcome = await run_prepared_turn(
+        request.deps,
+        prepared,
+        tenant_id=request.tenant_id,
+        platform=request.platform,
+        thread_id=request.thread_id,
+        external_user_id=request.external_user_id,
+        user_message="Question",
+        lifecycle=RecordingLifecycle(),
+        cancel=asyncio.Event(),
+        reseed_user_message=no_recovery,
+        recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+        operation_key="template:0",
+    )
+    assert outcome.state.error is None and extract_final_response(outcome.state.content) == "answer"
+    assert len(agent_posts()) == 1
+
+
+def test_root_catalog_ids_change_with_version_model_and_target(ordinary):
+    from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
+
+    canonical = ordinary[2]
+    base = root_counterpart_catalog_id(canonical)
+    agent = canonical.admission.agent
+    bumped = replace(
+        canonical,
+        admission=replace(
+            canonical.admission, agent=agent.model_copy(update={"version": agent.version + 1})
+        ),
+    )
+    revision = canonical.admission.backend_revision
+    argon = replace(
+        canonical,
+        admission=replace(
+            canonical.admission,
+            backend_revision=revision.model_copy(update={"model": "gemini-4-argon"}),
+        ),
+    )
+    other = replace(
+        canonical, target_spec=canonical.target_spec.model_copy(update={"system": "Other"})
+    )
+    ids = {
+        base,
+        root_counterpart_catalog_id(bumped),
+        root_counterpart_catalog_id(argon),
+        root_counterpart_catalog_id(other),
+    }
+    assert len(ids) == 4 and root_counterpart_catalog_id(canonical) == base
+
+
+@pytest.mark.parametrize(
+    "pin",
+    [
+        {"source_agent_id": "00000000-0000-0000-0000-000000000001"},
+        {"source_agent_version": 3},
+        {"counterpart_catalog_id": "pinned"},
+        {"agent_id": "native"},
+        {"worker_materialization": True},
+    ],
+)
+def test_a_template_row_can_pin_no_identity(ordinary, tmp_path, monkeypatch, pin):
+    from pydantic import ValidationError
+
+    row = _as_template(ordinary[1], tmp_path, monkeypatch)
+    with pytest.raises(ValidationError):
+        GeminiPlan.model_validate({**row.model_dump(mode="json"), **pin})
+
+
+def test_openai_rows_refuse_the_template_flag():
+    from daimon.core.turn.openai_deployment import OpenAIDeployment
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError, match="not available for OpenAI"):
+        OpenAIDeployment.model_validate(
+            {
+                "profile": "openai.conversation_only",
+                "tenant_id": "t",
+                "platform": "*",
+                "channel_id": "*",
+                "account_id": "*",
+                "configuration_grant": {
+                    "profiles": ["openai.conversation_only"],
+                    "models": ["gpt-6-luna"],
+                    "thread_modes": ["per_caller"],
+                    "requires": {},
+                },
+                "project": "p",
+                "agent_id": "a",
+                "api_key_env": "DAIMON_CHANNEL_OPENAI_KEY",
+                "root_materialization": True,
+            }
+        )
+
+
+async def test_two_concurrent_first_turns_publish_one_counterpart(ordinary, tmp_path, monkeypatch):
+    from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
+
+    request, plan, canonical, native, calls, posts, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    _as_template(plan, tmp_path, monkeypatch)
+    await service.clear_backend(source, accepted.local, actor)
+    first, _ = scope_channel_runtimes(request)
+    second, _ = scope_channel_runtimes(request)
+    a, b = await asyncio.gather(
+        read_preparation_counterpart(first), read_preparation_counterpart(second)
+    )
+    assert a.counterpart == b.counterpart
+    assert a.counterpart.catalog_id == root_counterpart_catalog_id(a)
+    creates = [c for c in calls if c.method == "POST" and c.url.path.startswith("/v1beta/agents")]
+    native_ids = {json.loads(c.content)["id"] for c in creates}
+    assert len(native_ids) == 1, "one native agent, whatever the race"
+    assert a.counterpart.local_revision == 1
+
+
+async def test_a_template_never_serves_another_tenant(ordinary, tmp_path, monkeypatch):
+    request, plan, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    row = _as_template(plan, tmp_path, monkeypatch)
+    foreign = row.model_copy(update={"tenant_id": "00000000-0000-0000-0000-00000000000b"})
+    (tmp_path / "template.json").write_text(json.dumps([foreign.model_dump(mode="json")]))
+    await service.clear_backend(source, accepted.local, actor)
+    scoped, _ = scope_channel_runtimes(request)
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(scoped)
+
+
+async def test_an_entry_holding_another_agents_spec_refuses(ordinary, tmp_path, monkeypatch):
+    from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
+
+    request, plan, canonical, native, calls, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    _as_template(plan, tmp_path, monkeypatch)
+    await service.clear_backend(source, accepted.local, actor)
+    scoped, lookup = scope_channel_runtimes(request)
+    prepared = await prepare_source(scoped)
+    backend = lookup.resolved  # noqa: F841 - the scoped runtime the preparation uses
+    foreign = canonical.target_spec.model_copy(update={"system": "Another agent's instructions"})
+    gemini = GeminiManagedAgents(
+        configured_transport(api_key="offline-declared-source"),
+        storage=SQLiteGeminiStorage(
+            tmp_path / "records.sqlite",
+            namespace=json.dumps(
+                [request.scope.tenant_id, request.scope.account_id, "project"],
+                separators=(",", ":"),
+            ),
+        ),
+        state_store=request.deps.state_store,
+        account_scope_id="project",
+        resource_catalog_enabled=True,
+        resource_catalog_transport=configured_catalog_transport(api_key="offline-declared-source"),
+    )
+    host = NeutralResourceHost(
+        gemini,
+        request.deps.sessionmaker,
+        scope=request.scope,
+        account_scope_id="project",
+        operation_key="foreign-publication",
+        resource_catalog_enabled=True,
+        catalog_adapter=gemini.catalog_adapter,
+    )
+    catalog_id = root_counterpart_catalog_id(prepared)
+    await host.publish(catalog_id, foreign, expected_revision=0, key="foreign-publication")
+    again, _ = scope_channel_runtimes(request)
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(again)
+
+
+@pytest.mark.parametrize("consent", ["valid", "missing", "stale"])
+async def test_missing_or_stale_consent_refuses_before_publication(
+    ordinary, tmp_path, monkeypatch, consent
+):
+    from daimon.core.stores import agent_backends
+
+    request, plan, canonical, native, calls, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    _as_template(plan, tmp_path, monkeypatch)
+    drop = None
+    if consent == "valid":
+        drop = accepted.drop_consent.model_dump(mode="json")
+    if consent == "stale":
+        drop = {**accepted.drop_consent.model_dump(mode="json"), "source_pin": "0" * 64}
+    current = request.admission.backend_revision
+    linked = ConfigRevision.create(current.channel, current.local + 1, current)
+    async with request.deps.sessionmaker.begin() as db:
+        bad = await agent_backends.put_revision(
+            db,
+            tenant_id=accepted.tenant_id,
+            agent_id=accepted.agent_id,
+            agent_name=accepted.agent_name,
+            local=accepted.local + 1,
+            backend="gemini",
+            previous_local=accepted.local,
+            digest="test-" + consent,
+            preview_digest=accepted.preview_digest,
+            drop_consent=drop,
+        )
+        # The turn's agent-origin revision binds the bad consent, as a real switch would.
+        await mux_state.put_config_revision(db, linked, origin="agent", agent_revision=bad)
+    request = replace(request, admission=replace(request.admission, backend_revision=linked))
+    calls.clear()
+    scoped, _ = scope_channel_runtimes(request)
+    if consent == "valid":
+        # The same construction with the confirmed consent publishes: the refusals are consent's.
+        assert (await read_preparation_counterpart(scoped)).verified_counterpart is not None
+        return
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(scoped)
+    assert not [c for c in calls if c.method == "POST"], "nothing published without consent"

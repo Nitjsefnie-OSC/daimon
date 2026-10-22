@@ -2245,6 +2245,35 @@ existing confirmation flow. Admin Details omit unavailable backend controls,
 and stale selections refuse without applying a change. Clear previews and their
 labels derive from the shared default backend.
 
+### Agent template rows (Gemini)
+
+A Gemini agent-origin turn normally needs a manifest row pinned to the exact
+source agent, its MA version and a pre-installed native counterpart. A
+**template row** serves every agent of one tenant instead: `"root_materialization":
+true`, with no `source_agent_id`, `source_agent_version`, `counterpart_catalog_id`,
+`counterpart_catalog_revision` or `agent_id`, and usually `"*"` on platform,
+channel and account. `tenant_id` and `profile` stay exact, and a
+`configuration_grant` lists the models it serves (Flash and Argon).
+
+On an agent's first turn after the switch is confirmed, source preparation
+proves the drop consent, then the host publishes the confirmed target spec
+into the tenant's catalog once per user (catalog entries are scoped to the
+caller's account), at
+`root:<agent>:<MA version>:<profile>:<model>:<target digest>`. Every later
+turn for that agent version reuses it; editing the agent, changing the model
+or a different derived target publishes a new entry. A concurrent first turn
+loses the catalog compare-and-set and reads the winner's entry, and native
+creation uses the catalog id as its key. Readback then verifies the entry like
+an operator-installed counterpart. A template row carries no operator
+capability inputs, so its turns run the agent's own instructions with the
+confirmed drops (tools, skills and connections are declared drops for now).
+OpenAI rows refuse the flag.
+
+Selection only offers a row to the turn origin it serves: an agent's turn
+considers template and source-pinned rows; a channel's turn considers fixed
+plans with neither. A tenant-wide channel row and a template row therefore
+coexist without ambiguity.
+
 ### Output delivery pagination
 
 Delivery follows every Files API page through the authorized output port, so
