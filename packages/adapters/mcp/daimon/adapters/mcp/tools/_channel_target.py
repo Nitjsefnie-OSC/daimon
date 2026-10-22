@@ -90,7 +90,9 @@ async def _visible_slack_channel(runtime: McpRuntime, auth: AuthIdentity, channe
     except SlackApiError as err:
         raise ToolError(f"Slack could not find {channel_id} here") from err
     channel = cast("dict[str, object]", info["channel"])
-    await check_channel_access(client, channel=channel, user_id=_require_slack_identity(auth))
+    await check_channel_access(
+        client, channel=channel, user_id=_require_slack_identity(auth), is_client=auth.client
+    )
     return channel_id
 
 

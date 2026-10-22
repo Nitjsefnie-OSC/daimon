@@ -1140,7 +1140,14 @@ worker event after its admission transaction commits. It fans out
 these decisions at four Hz by default, including producer time in the interval,
 and remains active across completed or cancelled cohorts until the run owner
 sets the run-finished event. Unavailable usage fails closed and cancels all
-registered workers. The watcher has no separate worker
+registered workers. A busy tenant fleet lock is not by itself unavailable usage:
+on each busy poll the watcher logs the holding transaction
+(`fleet.budget_lock_busy`) and decides from `read_fleet_budget_snapshot`, the same
+producer read from a REPEATABLE READ, READ ONLY snapshot with no tenant or row
+locks and no writes, so contention never stops overrun cancellation. It still
+fails closed when one transaction holds the lock for `BUDGET_LOCK_BUSY_LIMIT_S`
+(10 s) or the lock stays busy for `BUDGET_LOCK_CONTENDED_LIMIT_S` (60 s), and
+after `BUDGET_READ_TIMEOUT_LIMIT` consecutive slow reads. The watcher has no separate worker
 deadline: `run_prepared_turn` owns it. Complete native execution, operator-funded
 admission, replacement inventory and exact final settlement remain unavailable
 here. These interfaces create no ledger charge or provider-native hard cap;
@@ -1175,6 +1182,9 @@ existing serialized intent.
 An authenticated parent's optional `provider_limits_usd` fences each provider's
 sibling worker exposure within the run. A missing or zero line refuses that
 provider; a funded reservation cannot borrow unused capacity from another line.
+Provider lines must not add up to more than the grant's run budget: financial
+admission refuses every spawn of such a run, so the fleet grant preview refuses
+the grant first (`fleet provider limits exceed budget`).
 The same financial producer sums whole unknown reservations and measured
 overruns before admission, under its existing lock and exact decimal context.
 These worker sublimits do not reserve root inference or install credential-line
@@ -1250,6 +1260,10 @@ were checked on 2026-10-14 against the official OpenAI model/Agents usage pages
 and Gemini pricing/Antigravity pages listed in `PROVIDER_PRICING_SOURCES`.
 Coverage is `gpt-6-luna`, `gemini-3.5-flash-lite`, and `gemini-3.8-flash`;
 unsupported models stay unpriced. Flash promotional rates expire at 2027-01-01.
+`gemini-4-argon` carries only its introductory rate (checked 2026-10-22: input
+$2, output $10, cached input $0.10 = 95% off, per 1M tokens), valid through
+2026-11-30. No post-intro rate is checked in. From 2026-12-01 Argon is unpriced
+and its turns are refused at admission until a new dated row lands.
 These token rates exclude tool, cache-storage and container/session charges.
 The runtime still needs complete measured infrastructure before exact billing.
 

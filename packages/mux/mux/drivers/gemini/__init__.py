@@ -31,6 +31,9 @@ from mux.state.store import StateStore
 
 class GeminiUsage(Base):
     async def reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
+        return await self.retrying(lambda: self._reconcile(scope, session))
+
+    async def _reconcile(self, scope: Scope, session: ResourceRef) -> tuple[UsageObservation, ...]:
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
             for interaction, root in record.interactions.items():

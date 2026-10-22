@@ -7,7 +7,11 @@ from typing import Any, cast
 import discord
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, token_channel_id
 from daimon.adapters.mcp.runtime import McpRuntime
-from daimon.adapters.mcp.tools._channel_policy import caller_is_foreign
+from daimon.adapters.mcp.tools._channel_policy import (
+    OPEN_READ_POLICY,
+    caller_is_foreign,
+    load_read_policy,
+)
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import load_isolation_view
 from daimon.adapters.mcp.tools.discord._client import (
@@ -97,25 +101,32 @@ async def _require_thread_in_channel(
 async def _where_am_i_impl(
     runtime: McpRuntime, auth: AuthIdentity, channel_id: str | None, thread_id: str | None
 ) -> HereCard:
-    channel_id = channel_id or token_channel_id(auth)
+    channel_id = channel_id or (auth.hold.channel_id if auth.hold else token_channel_id(auth))
     if channel_id is None:
         raise ToolError("The current channel is unknown; pass its parent channel id.")
+    # A held credential describes and lists only the channel it is held to.
+    read = (
+        await load_read_policy(runtime, auth, origin_context_id=None)
+        if auth.hold is not None
+        else OPEN_READ_POLICY
+    )
+    read.require(channel_id)
     caller = await load_isolation_view(runtime, auth)
     if caller.home_place(channel_id) != caller.inside_channel_id:
         raise ToolError("That channel is outside this conversation's home.")
     category_id: str | None = None
     if auth.platform == "discord":
-        rows = await _list_channels_impl(runtime, auth)
+        rows = await _list_channels_impl(runtime, auth, read)
         visible = {row.id for row in rows}
         if channel_id not in visible:
             raise ToolError("missing channel access")
         category_id = next(row.category_id for row in rows if row.id == channel_id)
     elif auth.platform == "slack":
-        visible = {row.id for row in await _slack_list_channels_impl(runtime, auth)}
+        visible = {row.id for row in await _slack_list_channels_impl(runtime, auth, read)}
         if channel_id not in visible:
             raise ToolError("missing channel access")
     elif auth.platform == "teams":
-        visible = {row.id for row in await _teams_list_channels_impl(runtime, auth)}
+        visible = {row.id for row in await _teams_list_channels_impl(runtime, auth, read)}
         if channel_id not in visible:
             raise ToolError("missing channel access")
     else:

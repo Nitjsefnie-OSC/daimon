@@ -16,6 +16,7 @@ from daimon.core.turn import selfhosted_host
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, prepare_selfhosted
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ModelRef, ResourceRef, Revision
@@ -239,6 +240,20 @@ async def composed(request, db_committing_engine, db_clean, monkeypatch):
             lambda: datetime.now(UTC),
         )
         yield request, wire, store, observations
+
+
+async def test_a_held_admission_is_refused_before_any_io(composed):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, wire, _, _ = composed
+    held = TurnHold(platform="slack", channel_id="C-SYN-1", client=True)
+    request = replace(request, admission=replace(request.admission, hold=held))
+
+    with pytest.raises(AdmissionDenied) as refused:
+        await prepare_selfhosted(request)
+
+    assert refused.value.reason == "backend_unsupported"
+    assert wire.posts == 0 and wire.turns == {}
 
 
 async def test_prepare_reuses_same_tenant_bound_session_without_a_turn(composed):
@@ -514,6 +529,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     from daimon.core.turn.outcomes import drain_outcomes
     from daimon.core.turn.persistence import current_persistence
     from daimon.core.turn.runtimes import build_channel_runtime, ensure_channel_runtime
+    from daimon.core.turn_hold import RequesterOrg
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant_config
     from mux.contracts.extensions import ExtensionConfig
     from mux.contracts.ids import SkillRef, ThreadRef
@@ -1053,6 +1069,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     admitted = await admit(
         request.deps,
         tenant_id=TENANT,
+        requester_org=RequesterOrg.HOST,
         platform="slack",
         external_user_id="caller",
         channel_id=REVISION.channel.channel_id,
