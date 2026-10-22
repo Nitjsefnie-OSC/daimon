@@ -2272,6 +2272,24 @@ deployment's default agent says it affects new conversations in every channel
 on the server (workspace on Slack, team on Teams); a lost capability (memory
 on Gemini and OpenAI) is listed before Confirm.
 
+An agent also states its own **settings** on the same revision: its thread
+mode (`shared` is the agent's intent to share threads), its required
+capabilities and, rarely, a profile of its backend. Unset is the backend's
+default. Turns that follow the agent's setting use them. A channel that pins a
+backend stays an override and keeps its own thread mode, but it is
+tighten-only for the agent: when the pinned profile lacks a capability the
+agent requires, the turn is refused (`channel_pin_lacks_capability`) rather
+than run without it. A provider switch keeps the settings that still apply
+(a profile belongs to one backend); a provider that can't share threads
+refuses a switch of an agent that shares them. In chat,
+`request_agent_backend_switch` takes `thread_mode` and
+`required_capabilities` (stated together; an omitted one returns to the
+default) and the card shows them; on the CLI, `daimon agents backend settings
+NAME [--thread-mode MODE] [--profile PROFILE] [--require CAPABILITY ...]`.
+
+The agent's owner may make every change in this section that an admin may,
+except the tenant allowlist (see [Permissions](permissions.md#changing-agent-setup)).
+
 The CLI exposes `daimon agents backend set NAME BACKEND [--model MODEL]` and
 `daimon agents backend clear NAME`, using the existing tenant selector and
 confirmation prompt. `--yes` skips that prompt; machine-readable `--json`
@@ -2445,12 +2463,12 @@ replacements for the dependency under test.
 
 ### Confirm an agent backend change from chat
 
-With the neutral turn path and backend selection enabled, a workspace admin can
-ask `@Daimon switch Researcher to openai`. The chat tool first returns the current
+With the neutral turn path and backend selection enabled, a workspace admin or
+the agent's owner can ask `@Daimon switch Researcher to openai`. The chat tool first returns the current
 compatibility preview, including unsupported skills, MCPs and capabilities,
 shared-thread limits and the cost line. The confirmation card shows those same
-server-side facts. Only the requesting admin may Confirm; permission is checked
-again on the click.
+server-side facts. Only the requester may Confirm, and only while they are
+still the agent's owner or an admin; permission is checked again on the click.
 
 The card binds the current setting revision and complete preview digest. An
 expired card, a changed agent or policy, or a newer setting requires a fresh
