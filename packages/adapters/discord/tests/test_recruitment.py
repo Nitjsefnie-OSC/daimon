@@ -158,3 +158,56 @@ async def test_ambiguous_card_recovery_never_posts_elsewhere() -> None:
         await cog.publish(thread, service)
     thread.send.assert_not_awaited()
     bot.fetch_user.assert_not_called()
+
+
+async def test_expired_card_redaction_runs_when_feature_is_disabled(monkeypatch) -> None:
+    from uuid import uuid4
+
+    from daimon.core.recruitment import RecruitmentConfig
+    from pydantic import SecretStr
+
+    state = ThreadState(thread_id="20", parent_id="2", phase="expired", card_id="30")
+    config = RecruitmentConfig(guild_id="101", enabled=False)
+    store = SimpleNamespace(
+        configuration=AsyncMock(return_value=config),
+        list_threads=AsyncMock(return_value=["20"]),
+        get=AsyncMock(return_value=state),
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.discord.recruitment.configured_tenants", AsyncMock(return_value=[uuid4()])
+    )
+    monkeypatch.setattr(
+        "daimon.adapters.discord.recruitment.RecruitmentStore", MagicMock(return_value=store)
+    )
+    port = SimpleNamespace(check_access=AsyncMock(), bot_id=AsyncMock(return_value="bot"))
+    monkeypatch.setattr(
+        "daimon.adapters.discord.recruitment.RecruitmentDiscord", MagicMock(return_value=port)
+    )
+    runtime = SimpleNamespace(
+        turn_deps=SimpleNamespace(fernet=object()),
+        sessionmaker=object(),
+        settings=SimpleNamespace(
+            recruitment=SimpleNamespace(enabled=False),
+            discord=SimpleNamespace(bot_token=SecretStr("fake")),
+        ),
+    )
+    bot = MagicMock()
+    thread = MagicMock(spec=discord.Thread)
+    bot.fetch_channel = AsyncMock(return_value=thread)
+    cog = RecruitmentCog(bot, runtime)
+    cog.redact_expired = AsyncMock()
+    await cog.recover()
+    cog.redact_expired.assert_awaited_once_with(thread, card_id="30")
+
+
+async def test_expired_card_redaction_uses_retained_id_outside_recent_history() -> None:
+    bot = MagicMock()
+    card = MagicMock(spec=discord.Message)
+    card.author = bot.user
+    card.edit = AsyncMock()
+    thread = MagicMock(spec=discord.Thread)
+    thread.fetch_message = AsyncMock(return_value=card)
+    cog = RecruitmentCog(bot, MagicMock())
+    await cog.redact_expired(thread, card_id="30")
+    card.edit.assert_awaited_once_with(content="Recruitment data expired.", embeds=[], view=None)
+    thread.history.assert_not_called()

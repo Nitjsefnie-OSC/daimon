@@ -125,8 +125,13 @@ class RecruitmentStore:
             row = await session.get(RecruitmentThreadRecord, (self.tenant_id, thread_id))
             if row is None:
                 return None
-            if row.encrypted_state is None:
-                return ThreadState(thread_id=thread_id, parent_id=row.parent_id, phase="expired")
+            if row.encrypted_state is None or row.expires_at <= datetime.now(UTC):
+                return ThreadState(
+                    thread_id=thread_id,
+                    parent_id=row.parent_id,
+                    phase="expired",
+                    card_id=row.card_id,
+                )
             return ThreadState.model_validate_json(self.fernet.decrypt(row.encrypted_state))
 
     async def save(
@@ -146,6 +151,7 @@ class RecruitmentStore:
                 tenant_id=self.tenant_id,
                 thread_id=state.thread_id,
                 parent_id=state.parent_id,
+                card_id=state.card_id,
                 phase=state.phase,
                 revision=state.revision,
                 encrypted_state=self.seal(state),
@@ -156,7 +162,7 @@ class RecruitmentStore:
             changes = {
                 k: v
                 for k, v in values.items()
-                if k in {"phase", "revision", "encrypted_state"}
+                if k in {"phase", "revision", "encrypted_state", "card_id"}
                 or activity
                 and k in {"raw_expires_at", "expires_at"}
             }
@@ -265,6 +271,8 @@ class RecruitmentStore:
             if not configured:
                 raise PermissionError("recruitment_unconfigured")
             config = RecruitmentConfig.model_validate(configured.config)
+            if not config.enabled:
+                raise PermissionError("recruitment_disabled")
             await session.execute(
                 insert(RecruitmentMessageRecord)
                 .values(
@@ -301,7 +309,11 @@ class RecruitmentStore:
                 parent = await session.get(
                     RecruitmentThreadRecord, (self.tenant_id, item.thread_id), with_for_update=True
                 )
-                if parent is None or parent.claim_token != claim[1]:
+                if (
+                    parent is None
+                    or parent.claim_token != claim[1]
+                    or parent.expires_at <= datetime.now(UTC)
+                ):
                     raise RecruitmentBusy("claim_expired")
             result = await session.execute(
                 update(RecruitmentOutboxRecord)
@@ -317,35 +329,42 @@ class RecruitmentStore:
                 raise LookupError("outbox_not_found")
 
     async def purge(self, now: datetime) -> None:
-        async with self.sessions.begin() as session:
-            expired = select(RecruitmentThreadRecord.thread_id).where(
-                RecruitmentThreadRecord.tenant_id == self.tenant_id,
-                RecruitmentThreadRecord.expires_at <= now,
+        await purge_expired(self.sessions, self.tenant_id, now)
+
+
+async def purge_expired(
+    sessions: async_sessionmaker[AsyncSession], tenant_id: UUID, now: datetime
+) -> None:
+    """Erasure needs neither backend access nor a working decryption key."""
+    async with sessions.begin() as session:
+        expired = select(RecruitmentThreadRecord.thread_id).where(
+            RecruitmentThreadRecord.tenant_id == tenant_id,
+            RecruitmentThreadRecord.expires_at <= now,
+        )
+        await session.execute(
+            update(RecruitmentMessageRecord)
+            .where(
+                RecruitmentMessageRecord.tenant_id == tenant_id,
+                RecruitmentMessageRecord.raw_expires_at <= now,
             )
-            await session.execute(
-                update(RecruitmentMessageRecord)
-                .where(
-                    RecruitmentMessageRecord.tenant_id == self.tenant_id,
-                    RecruitmentMessageRecord.raw_expires_at <= now,
-                )
-                .values(encrypted_source=None)
+            .values(encrypted_source=None)
+        )
+        await session.execute(
+            update(RecruitmentOutboxRecord)
+            .where(
+                RecruitmentOutboxRecord.tenant_id == tenant_id,
+                RecruitmentOutboxRecord.thread_id.in_(expired),
             )
-            await session.execute(
-                update(RecruitmentOutboxRecord)
-                .where(
-                    RecruitmentOutboxRecord.tenant_id == self.tenant_id,
-                    RecruitmentOutboxRecord.thread_id.in_(expired),
-                )
-                .values(encrypted_request=None, state="expired")
+            .values(encrypted_request=None, state="expired")
+        )
+        await session.execute(
+            update(RecruitmentThreadRecord)
+            .where(
+                RecruitmentThreadRecord.tenant_id == tenant_id,
+                RecruitmentThreadRecord.thread_id.in_(expired),
             )
-            await session.execute(
-                update(RecruitmentThreadRecord)
-                .where(
-                    RecruitmentThreadRecord.tenant_id == self.tenant_id,
-                    RecruitmentThreadRecord.thread_id.in_(expired),
-                )
-                .values(encrypted_state=None, phase="expired", claim_token=uuid4().hex)
-            )
+            .values(encrypted_state=None, phase="expired", claim_token=uuid4().hex)
+        )
 
 
 async def configured_tenants(sessions: async_sessionmaker[AsyncSession]) -> list[UUID]:

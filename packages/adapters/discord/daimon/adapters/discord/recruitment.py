@@ -116,14 +116,7 @@ class RecruitmentCog(commands.Cog):
             if state is None:
                 return
             if state.phase == "expired":
-                # Recover a redacted card by opaque marker; candidate state is gone.
-                async for message in thread.history(limit=200):
-                    if message.author == self.bot.user and any(
-                        (e.footer.text or "").startswith("recruitment:") for e in message.embeds
-                    ):
-                        await message.edit(
-                            content="Recruitment data expired.", embeds=[], view=None
-                        )
+                await self.redact_expired(thread, card_id=state.card_id)
                 return
             item = await service.store.outbox(state.outbox_id) if state.outbox_id else None
             signature = hashlib.sha256(
@@ -292,17 +285,48 @@ class RecruitmentCog(commands.Cog):
     async def on_ready(self) -> None:
         await self.recover()
 
+    async def redact_expired(self, thread: discord.Thread, *, card_id: str | None = None) -> None:
+        # The non-content card ID survives erasure, so cleanup does not depend
+        # on the candidate card remaining in the recent history window.
+        if card_id:
+            with suppress(discord.NotFound):
+                message = await thread.fetch_message(int(card_id))
+                if message.author == self.bot.user:
+                    await message.edit(content="Recruitment data expired.", embeds=[], view=None)
+            return
+        async for message in thread.history(limit=200):
+            if message.author == self.bot.user and any(
+                (e.footer.text or "").startswith("recruitment:") for e in message.embeds
+            ):
+                await message.edit(content="Recruitment data expired.", embeds=[], view=None)
+
     async def recover(self) -> None:
         fernet = self.runtime.turn_deps.fernet
-        if not self.runtime.settings.recruitment.enabled or fernet is None:
+        settings = self.runtime.settings
+        if fernet is None or settings.discord is None:
             return
         for tenant in await configured_tenants(self.runtime.sessionmaker):
             store = RecruitmentStore(self.runtime.sessionmaker, fernet, tenant)
             config = await store.configuration()
-            if not config or not config.enabled:
+            if not config:
                 continue
             for id in await store.list_threads():
                 try:
+                    state = await store.get(id)
+                    if state and state.phase == "expired":
+                        async with httpx.AsyncClient() as http:
+                            port = RecruitmentDiscord(
+                                http, settings.discord.bot_token.get_secret_value()
+                            )
+                            await port.check_access(
+                                config, id, await port.bot_id(), recruiter=False
+                            )
+                            channel = await self.bot.fetch_channel(int(id))
+                            if isinstance(channel, discord.Thread):
+                                await self.redact_expired(channel, card_id=state.card_id)
+                        continue
+                    if not settings.recruitment.enabled or not config.enabled:
+                        continue
                     async with self.service(int(config.guild_id)) as (service, port):
                         await port.check_access(config, id, await port.bot_id(), recruiter=False)
                         channel = await self.bot.fetch_channel(int(id))

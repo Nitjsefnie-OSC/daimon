@@ -26,6 +26,7 @@ def upgrade() -> None:
     tenant_id UUID NOT NULL, 
     thread_id TEXT NOT NULL, 
     parent_id TEXT NOT NULL, 
+    card_id TEXT,
     claim_token TEXT,
     phase TEXT NOT NULL, 
     revision TEXT NOT NULL, 

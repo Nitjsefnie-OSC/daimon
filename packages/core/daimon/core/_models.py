@@ -4278,6 +4278,7 @@ class RecruitmentThreadRecord(Base):
     )
     thread_id: Mapped[str] = mapped_column(Text, primary_key=True)
     parent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    card_id: Mapped[str | None] = mapped_column(Text)
     claim_token: Mapped[str | None] = mapped_column(Text)
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     revision: Mapped[str] = mapped_column(Text, nullable=False)

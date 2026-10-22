@@ -104,7 +104,8 @@ Defaults retain raw source data for seven days and derived state/approved
 payloads for thirty days after thread activity; both are configurable per tenant.
 The scheduler erases expired data even when recruitment is disabled, retaining
 minimal enrollment/idempotency tombstones to prevent replay and keep expired
-sources out of agent reads. Expiry invalidates approval and retry. Redacting
+sources out of agent reads. Expiry invalidates approval and retry. The Discord recovery loop also redacts expired cards while recruitment is
+disabled, using the retained non-content message ID. Redacting
 Discord cards requires the bot to retain access; Discord source messages and
 backend records have their own retention policies.
 

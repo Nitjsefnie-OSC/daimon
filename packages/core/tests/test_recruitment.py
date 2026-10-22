@@ -70,7 +70,10 @@ async def test_synthetic_runtime_extracts_updates_without_provider_calls() -> No
     from daimon.core.config import Settings
     from daimon.core.recruitment_runtime import backend_client, build_service
 
-    settings = Settings(_env_file=None)
+    settings = Settings(
+        database={"url": "postgresql+asyncpg://unused:unused@localhost/daimon_test_nc_staffing"},
+        _env_file=None,
+    )
     settings.recruitment.enabled = True
     settings.recruitment.synthetic = True
     model = AsyncMock()

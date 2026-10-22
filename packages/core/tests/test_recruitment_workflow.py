@@ -98,7 +98,7 @@ async def test_stale_confirm_nonrecruiter_and_restart_retry(store: RecruitmentSt
 
 async def test_tenant_filter_and_retention_tombstones(store: RecruitmentStore) -> None:
     await store.save(
-        ThreadState(thread_id="20", parent_id="2"),
+        ThreadState(thread_id="20", parent_id="2", card_id="30"),
         await store.configuration(),
     )
     await store.ingest("20", message())
@@ -114,7 +114,7 @@ async def test_tenant_filter_and_retention_tombstones(store: RecruitmentStore) -
     await store.purge(datetime.now(UTC) + timedelta(days=31))
     assert await store.messages("20") == []
     state = await store.get("20")
-    assert state and state.phase == "expired"
+    assert state and state.phase == "expired" and state.card_id == "30"
     assert await is_recruitment_source(store.sessions, store.tenant_id, "20")
 
 
@@ -343,8 +343,14 @@ async def test_disabled_scheduler_still_erases_expired_state(store: RecruitmentS
             text("UPDATE recruitment_threads SET expires_at=:expired WHERE tenant_id=:tenant"),
             {"expired": datetime.now(UTC) - timedelta(days=1), "tenant": store.tenant_id},
         )
-    settings = Settings(_env_file=None)
+    settings = Settings(
+        database={"url": "postgresql+asyncpg://unused:unused@localhost/daimon_test_nc_staffing"},
+        _env_file=None,
+    )
     assert not settings.recruitment.enabled
-    await reconcile_recruitment(store.sessions, settings, store.fernet, AsyncMock())
+    # Cleanup remains independent of both enablement and missing crypto keys.
+    expired = await store.get("20")
+    assert expired and expired.phase == "expired"
+    await reconcile_recruitment(store.sessions, settings, None, AsyncMock())
     state = await store.get("20")
     assert state and state.phase == "expired" and state.candidate is None

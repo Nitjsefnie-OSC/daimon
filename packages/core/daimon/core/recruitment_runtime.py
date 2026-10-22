@@ -19,7 +19,12 @@ from daimon.core.recruitment_api import RecruitmentAPI, SyntheticRecruitmentTran
 from daimon.core.recruitment_discord import RecruitmentDiscord
 from daimon.core.recruitment_extraction import extract_candidate
 from daimon.core.recruitment_service import RecruitmentService
-from daimon.core.stores.recruitment import RecruitmentBusy, RecruitmentStore, configured_tenants
+from daimon.core.stores.recruitment import (
+    RecruitmentBusy,
+    RecruitmentStore,
+    configured_tenants,
+    purge_expired,
+)
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -147,13 +152,11 @@ async def reconcile_recruitment(
     fernet: MultiFernet | None,
     anthropic: AsyncAnthropic,
 ) -> None:
-    if fernet is None:
-        return
     tenants = await configured_tenants(sessions)
     # Erasure is independent of feature enablement, backend availability and Discord.
     for tenant in tenants:
-        await RecruitmentStore(sessions, fernet, tenant).purge(datetime.now(UTC))
-    if not settings.recruitment.enabled or settings.discord is None:
+        await purge_expired(sessions, tenant, datetime.now(UTC))
+    if fernet is None or not settings.recruitment.enabled or settings.discord is None:
         return
     async with httpx.AsyncClient() as discord_http, backend_client(settings) as api_http:
         discord = RecruitmentDiscord(discord_http, settings.discord.bot_token.get_secret_value())

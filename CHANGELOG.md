@@ -9,7 +9,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
-- Opt-in recruiter-reviewed Discord staffing threads with a tenant-scoped encrypted ledger and durable recruitment API outbox.
+- Opt-in recruiter-reviewed Discord staffing threads with a tenant-scoped encrypted ledger,
+  revision-bound confirmation, durable recruitment API outbox, candidate privacy guards,
+  configurable retention and a synthetic QA backend.
 
 ### Added
 
