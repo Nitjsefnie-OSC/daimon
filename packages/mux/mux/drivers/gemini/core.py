@@ -271,8 +271,16 @@ class Base:
                 native_code=f"{error.native_code or error.category}_read_retries_exhausted",
             ) from error
 
+    def _bind_mount_echo(self, record: SessionRecord, interaction: str) -> None:
+        """Before reading `interaction`, let the transport clear only its own echo."""
+        bind = getattr(self._transport, "bind_mount_echo", None)
+        digests = record.mount_echo_digests.get(interaction)
+        if bind is not None and digests:
+            bind(interaction, frozenset(digests))
+
     async def _get(self, record: SessionRecord, interaction: str) -> Object:
         """Callers run inside `retrying`, so a transient failure leaves the lock first."""
+        self._bind_mount_echo(record, interaction)
         try:
             raw = await self._transport.get(interaction)
         except ProviderError as exc:
@@ -1092,6 +1100,10 @@ class GeminiEvents(Base):
                 resource=session,
                 result=receipt.model_dump(mode="json"),
             )
+            # Persist the mount-header digests with the acceptance, before any read.
+            dispatched = getattr(self._transport, "mount_echo_digests", None)
+            if dispatched is not None and (sent := dispatched(interaction)):
+                record.mount_echo_digests[interaction] = sorted(sent)
             self._accept(record, raw, root, events)
             record.unknown_delivery = False
             records.sends[(*owner(scope), key)] = scope.principal_id, digest, receipt
@@ -1108,6 +1120,8 @@ class GeminiEvents(Base):
         async with self._storage.transaction() as records:
             record = self._record(records, scope, session)
             interaction, root = record.current, record.root
+            if interaction is not None:
+                self._bind_mount_echo(record, interaction)
         if interaction is None or root is None:
 
             async def empty() -> AsyncIterator[Event]:
@@ -1255,6 +1269,7 @@ class GeminiEvents(Base):
             await self._state_store.claim_send(scope, key, now=now(), fence=None)
             if status == "requested":
                 try:
+                    self._bind_mount_echo(record, record.current)
                     await self._transport.cancel(record.current)
                 except ProviderError as exc:
                     if exc.category != "transient_network":
