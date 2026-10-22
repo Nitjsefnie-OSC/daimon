@@ -1245,11 +1245,29 @@ async def _tightened_hold(
     """
     shared = admission.shared_channel
     external_id = grant.subject.platform_user_id
-    if grant.platform is None or grant.is_dm or external_id is None:
+    if grant.platform is None or external_id is None:
         return grant, shared
     principal = await find_platform_principal(
         session, tenant_id=grant.tenant_id, platform=grant.platform, external_id=external_id
     )
+    if grant.is_dm:
+        # A DM is never held, so what was learned since admission refuses it:
+        # its requester is now known to be from another organisation, or the
+        # channel it was moved from is now known to be shared.
+        if principal is not None and principal.foreign_home_id is not None:
+            raise AdmissionDenied(reason="client_requester")
+        # A DM moved from a channel is budgeted to it, so that is its source
+        # even when the DM path has not attached the source's seal facts.
+        source = (
+            grant.dm_source.channel_id
+            if grant.dm_source is not None
+            else admission.budget_channel_id
+        )
+        if source is not None and await is_channel_shared(
+            session, tenant_id=grant.tenant_id, platform=grant.platform, channel_id=source
+        ):
+            raise DmSourceSealedError("dm_source_shared")
+        return grant, shared
     client = grant.subject.client or (
         principal is not None and principal.foreign_home_id is not None
     )

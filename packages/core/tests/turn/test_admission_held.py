@@ -440,3 +440,64 @@ async def test_reauthorize_never_relaxes_a_hold(
     current = await reauthorize(deps, admission)
 
     assert current.hold == admission.hold and current.shared_channel is True
+
+
+async def _admit_dm(deps: TurnDeps, tenant: TenantRow) -> Admission:
+    return await admit(
+        deps,
+        tenant_id=tenant.id,
+        platform=PLATFORM,
+        external_user_id=USER,
+        channel_id=CHANNEL,
+        now=_NOW,
+        role=Role.USER,
+        is_dm=True,
+        dm_source_channel_id=CHANNEL,
+        requester_org=RequesterOrg.HOST,
+    )
+
+
+async def test_reauthorize_refuses_a_dm_whose_requester_was_marked_foreign_since_admission(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps_for(db_session_factory, tmp_path, tenant)
+    admission = await _admit_dm(deps, tenant)
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform=PLATFORM, external_id=USER
+    )
+    await mark_principal_foreign(db_session, principal_id=principal.id, home_id=HOME)
+    await db_session.commit()
+
+    with pytest.raises(AdmissionDenied) as denied:
+        await reauthorize(deps, admission)
+    assert denied.value.reason == "client_requester"
+
+
+async def test_reauthorize_refuses_a_dm_whose_source_channel_was_marked_shared_since_admission(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    from daimon.core.turn.errors import DmSourceSealedError
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps_for(db_session_factory, tmp_path, tenant)
+    admission = await _admit_dm(deps, tenant)
+    await mark_channel_shared(
+        db_session, tenant_id=tenant.id, platform=PLATFORM, channel_id=CHANNEL, source="client"
+    )
+    await db_session.commit()
+
+    with pytest.raises(DmSourceSealedError):
+        await reauthorize(deps, admission)
+
+
+async def test_reauthorize_keeps_an_ordinary_member_dm(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps_for(db_session_factory, tmp_path, tenant)
+    admission = await _admit_dm(deps, tenant)
+
+    current = await reauthorize(deps, admission)
+
+    assert current.hold is None
