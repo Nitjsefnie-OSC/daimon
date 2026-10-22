@@ -61,6 +61,9 @@ class AuthIdentity:
     # The channel this turn is held to, from the signed claim the verifier checked
     # against the token row; None for every unheld credential.
     hold: TurnHold | None = None
+    # The principal was verified to belong to another organisation (read live from
+    # the principal by the verifier): a client on every call, held credential or not.
+    foreign_home_id: str | None = None
     # Signed execution grant; never supplied as a tool parameter.
     slack_turn_context_id: uuid.UUID | None = None
     # Set from the token's `mcp_tokens` row by the verifier; None for jti-less tokens.
@@ -80,8 +83,9 @@ class AuthIdentity:
 
     @property
     def client(self) -> bool:
-        """The requester is from another organisation (or unknown); False when unheld."""
-        return self.hold is not None and self.hold.client
+        """The caller is from another organisation (or unknown for this turn): its held
+        credential says so, or its principal is marked foreign."""
+        return (self.hold is not None and self.hold.client) or self.foreign_home_id is not None
 
 
 def token_channel_id(auth: AuthIdentity) -> str | None:

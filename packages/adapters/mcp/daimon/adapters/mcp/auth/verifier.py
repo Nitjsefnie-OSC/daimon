@@ -44,6 +44,7 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 TOKEN_KIND_CLAIM = "daimon_token_kind"
 TOKEN_JTI_CLAIM = "daimon_token_jti"
 SCOPES_CLAIM = "daimon_scopes"
+FOREIGN_HOME_CLAIM = "daimon_foreign_home"
 
 REFUSAL_AUDIT_TOOL = "auth/verify"
 """The audit row's tool name for a refusal: the verifier never sees the tool."""
@@ -231,6 +232,7 @@ class DaimonJWTVerifier(JWTVerifier):
             SCOPES_CLAIM,
             "bound_channel_id",
             "platform_role_ids",
+            FOREIGN_HOME_CLAIM,
         ):
             access.claims.pop(key, None)
         sub = access.claims.get("sub")
@@ -301,6 +303,9 @@ class DaimonJWTVerifier(JWTVerifier):
         access.claims["external_id"] = identity_row.external_id
         if identity_row.platform_user_id is not None:
             access.claims["platform_user_id"] = identity_row.platform_user_id
+        if identity_row.foreign_home_id is not None:
+            # Read live from the principal, so a client is restricted on every call.
+            access.claims[FOREIGN_HOME_CLAIM] = identity_row.foreign_home_id
         if row is not None:
             access.claims[TOKEN_KIND_CLAIM] = row.kind
             access.claims[TOKEN_JTI_CLAIM] = str(row.jti)

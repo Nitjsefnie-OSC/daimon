@@ -30,6 +30,7 @@ from typing import TypedDict, cast
 import structlog
 from daimon.adapters.mcp.auth.resolver import AuthIdentity, resolve_role
 from daimon.adapters.mcp.auth.verifier import (
+    FOREIGN_HOME_CLAIM,
     SCOPES_CLAIM,
     TOKEN_JTI_CLAIM,
     TOKEN_KIND_CLAIM,
@@ -339,8 +340,11 @@ class IdentityMiddleware(Middleware):
         # Gate: DB role == ADMIN  OR  (is_admin claim AND internal claim).
         is_admin = (role == Role.ADMIN) or (is_admin_claim and internal_claim)
         hold = _hold_from_claims(_token.claims if _token else {})
-        if hold is not None:
-            # The stored role is never relied on for a held credential.
+        raw_foreign_home = _token.claims.get(FOREIGN_HOME_CLAIM) if _token else None
+        foreign_home_id = raw_foreign_home if isinstance(raw_foreign_home, str) else None
+        if hold is not None or foreign_home_id is not None:
+            # The stored role is never relied on for a held credential or for a
+            # principal verified to belong to another organisation.
             is_admin = False
         slack_turn_context_id: uuid.UUID | None = None
         raw_slack_context = _token.claims.get("slack_turn_context_id") if _token else None
@@ -365,6 +369,7 @@ class IdentityMiddleware(Middleware):
             platform_user_id=platform_user_id,
             is_admin=is_admin,
             hold=hold,
+            foreign_home_id=foreign_home_id,
             # Set by the verifier from the token's row; an agent key's only.
             bound_channel_id=(
                 raw_bound_channel

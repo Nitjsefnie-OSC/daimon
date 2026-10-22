@@ -256,6 +256,15 @@ is never cleared, so they stay a client when a later lookup cannot say. A
 channel found to be shared, by the platform's own signal or by a verified
 client asking there, is remembered, so every later turn in it is held.
 
+A held turn's MCP credential carries the hold itself, so the tools never rely
+on what other turns are running. It sees a short list of tools (channel reads
+and posts, timers, its own sessions, publishing), and each applies the hold
+before any rule: channel lists, search hits and where-am-I name only the held
+channel, timers and sessions are limited to it, and posting into the
+requester's own DM is refused. A client's credential that carries no hold is
+refused every channel tool, and a model-supplied `origin_context_id` can only
+narrow what the credential allows, never widen it.
+
 The hold is separate from agent rules: the default agent and an agent
 bound to several channels still run, read and post inside a held channel.
 
