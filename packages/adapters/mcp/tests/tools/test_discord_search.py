@@ -930,3 +930,15 @@ async def test_search_rows_carry_author_username_and_role(
     assert result.rows[0].author_username == "caller"
     assert result.rows[0].role == "user"
     assert result.rows[1].role == "assistant", "bot author must have role 'assistant'"
+
+
+@pytest.fixture(autouse=True)
+def ordinary_sources_without_recruitment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These transport fixtures have no database. Recruitment privacy is tested
+    # separately with persisted tenant configuration and enrollments.
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools.discord._recruitment.is_recruitment_source",
+        AsyncMock(return_value=False),
+    )

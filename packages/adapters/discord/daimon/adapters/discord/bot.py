@@ -1257,6 +1257,7 @@ class DaimonBot(commands.Bot):
         from daimon.adapters.discord.commands.privacy import PrivacyCog
         from daimon.adapters.discord.commands.routines import RoutinesCog
         from daimon.adapters.discord.feedback_reactions import FeedbackReactionCog
+        from daimon.adapters.discord.recruitment import RecruitmentCog
 
         await self.add_cog(HelpCog(self))
         await self.add_cog(HereCog(self))
@@ -1265,6 +1266,7 @@ class DaimonBot(commands.Bot):
         await self.add_cog(GitHubCog(self))
         await self.add_cog(RoutinesCog(self))
         await self.add_cog(LeadsCog(self))
+        await self.add_cog(RecruitmentCog(self, self.runtime))
         await self.add_cog(BillingCog(self))
         await self.add_cog(PrivacyCog(self))
         await self.add_cog(MemoryCog(self))
@@ -1861,6 +1863,11 @@ class DaimonBot(commands.Bot):
             try:
                 await self._retire_orphaned_turns(retry=True)
                 await self._recover_stopped_worker_cards()
+                from daimon.adapters.discord.recruitment import RecruitmentCog
+
+                recruitment = self.get_cog("RecruitmentCog")
+                if isinstance(recruitment, RecruitmentCog):
+                    await recruitment.recover()
                 if asyncio.get_running_loop().time() >= next_aged_sweep:
                     await self._sweep_aged_turn_cards()
                     await self._prune_message_admissions()
@@ -2848,6 +2855,10 @@ class DaimonBot(commands.Bot):
         """Gate on mention, resolve TenantContext once + run the non-ready self-heal gate,
         then orchestrate a turn in a thread."""
         if not self._allows_guild(message.guild.id if message.guild else None):
+            return
+        from daimon.adapters.discord.recruitment_guard import recruitment_message_blocked
+
+        if await recruitment_message_blocked(self.runtime, message):
             return
         if startup_replay:
             # Its admission may run later (queued); it must stay as quiet as here.

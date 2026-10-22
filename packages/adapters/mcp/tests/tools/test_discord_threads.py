@@ -806,3 +806,15 @@ async def test_rename_thread_maps_generic_discord_refusal_to_tool_error(
             thread_id="444",
             name="Renamed Title",
         )
+
+
+@pytest.fixture(autouse=True)
+def ordinary_sources_without_recruitment(monkeypatch: pytest.MonkeyPatch) -> None:
+    # These transport fixtures have no database. Recruitment privacy is tested
+    # separately with persisted tenant configuration and enrollments.
+    from unittest.mock import AsyncMock
+
+    monkeypatch.setattr(
+        "daimon.adapters.mcp.tools.discord._recruitment.is_recruitment_source",
+        AsyncMock(return_value=False),
+    )

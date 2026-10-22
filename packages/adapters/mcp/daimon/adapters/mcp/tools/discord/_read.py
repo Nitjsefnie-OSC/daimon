@@ -12,6 +12,7 @@ Every impl follows the locked sequence:
 from __future__ import annotations
 
 import re
+from collections.abc import Awaitable, Callable
 from typing import Literal
 
 import discord
@@ -36,6 +37,7 @@ from daimon.adapters.mcp.tools.discord._models import (
     ThreadRow,  # pyright: ignore[reportPrivateUsage]
     _to_message_row,  # pyright: ignore[reportPrivateUsage]
 )
+from daimon.adapters.mcp.tools.discord._recruitment import recruitment_message, recruitment_thread
 from daimon.adapters.mcp.tools.discord._visibility import (
     _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
     _bot_read_error,  # pyright: ignore[reportPrivateUsage]
@@ -97,6 +99,7 @@ async def _history_page(
     read_policy: ChannelReadPolicy = OPEN_READ_POLICY,
     parent_id: str = "",
     poll_humans_only: bool = False,
+    recruitment_guard: Callable[[discord.Message], Awaitable[bool]] | None = None,
 ) -> tuple[list[MessageRow], str | None, str | None]:
     """Fetch one history page; return oldest-first rows, cursor, and hint.
 
@@ -128,6 +131,7 @@ async def _history_page(
                 _to_message_row(message)
                 for message in reversed(page)
                 if _sealed_thread_named(message, read_policy, parent_id=parent_id) is None
+                and not (recruitment_guard and await recruitment_guard(message))
             ],
             None,
             None,
@@ -137,6 +141,7 @@ async def _history_page(
         _to_message_row(m)
         for m in reversed(page)
         if _sealed_thread_named(m, read_policy, parent_id=parent_id) is None
+        and not (recruitment_guard and await recruitment_guard(m))
     ]
     next_before = str(page[-1].id) if len(page) == limit else None
     hint = (
@@ -205,6 +210,7 @@ async def _read_channel_impl(  # pyright: ignore[reportUnusedFunction]
                 read_policy=read_policy,
                 parent_id=str(channel.id),
                 poll_humans_only=poll_humans_only,
+                recruitment_guard=lambda message: recruitment_message(runtime, guild_id, message),
             )
         except discord.Forbidden as exc:
             if exc.code == 50001:
@@ -297,6 +303,8 @@ async def _get_message_impl(  # pyright: ignore[reportUnusedFunction]
             if exc.code == 50001:
                 raise _bot_read_error(channel) from exc
             raise
+        if await recruitment_message(runtime, guild_id, message):
+            raise ToolError("Recruitment sources are available only through human review.")
         sealed_thread = _sealed_thread_named(message, read_policy, parent_id=str(channel.id))
         if sealed_thread:
             read_policy.require(sealed_thread, str(channel.id))  # refuses: it's sealed
@@ -395,6 +403,10 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
         if not isinstance(channel, discord.Thread):
             raise ToolError("not a thread — use read_channel for channels")
 
+        if await recruitment_thread(
+            runtime, guild_id, str(channel.id), title=channel.name, parent_id=str(channel.parent_id)
+        ):
+            raise ToolError("Recruitment sources are available only through human review.")
         await _check_thread_view(c, channel, member, _require_discord_identity(auth))
         read_policy.require(str(channel.id), str(channel.parent_id))
 
@@ -412,6 +424,7 @@ async def _read_thread_impl(  # pyright: ignore[reportUnusedFunction]
                 read_policy=read_policy,
                 parent_id=str(channel.id),
                 poll_humans_only=poll_humans_only,
+                recruitment_guard=lambda message: recruitment_message(runtime, guild_id, message),
             )
         except discord.Forbidden as exc:
             if exc.code == 50001:
@@ -471,12 +484,16 @@ async def _list_threads_impl(  # pyright: ignore[reportUnusedFunction]
                 except ToolError:
                     continue  # silently omit (no existence leak)
             # A thread sealed on its own keeps even its name from outside turns.
-            if read_policy.allows(str(t.id), str(parent.id)):
+            if read_policy.allows(str(t.id), str(parent.id)) and not await recruitment_thread(
+                runtime, guild_id, str(t.id), title=t.name, parent_id=str(parent.id)
+            ):
                 result.append(_to_thread_row(t))
 
         # Archived public threads (private=False is default)
         async for t in parent.archived_threads(limit=50):
-            if read_policy.allows(str(t.id), str(parent.id)):
+            if read_policy.allows(str(t.id), str(parent.id)) and not await recruitment_thread(
+                runtime, guild_id, str(t.id), title=t.name, parent_id=str(parent.id)
+            ):
                 result.append(_to_thread_row(t))
 
         return result

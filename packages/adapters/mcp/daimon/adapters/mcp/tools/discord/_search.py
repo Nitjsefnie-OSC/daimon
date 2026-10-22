@@ -25,6 +25,7 @@ from daimon.adapters.mcp.tools.discord._client import (
     rest_client,  # pyright: ignore[reportPrivateUsage]
 )
 from daimon.adapters.mcp.tools.discord._models import AttachmentRow, MessageRow, SearchResult
+from daimon.adapters.mcp.tools.discord._recruitment import recruitment_thread
 from daimon.adapters.mcp.tools.discord._visibility import (
     _bot_lacks_read_permission,  # pyright: ignore[reportPrivateUsage]
     _bot_read_error,  # pyright: ignore[reportPrivateUsage]
@@ -73,6 +74,7 @@ class _SearchHit(BaseModel):
     timestamp: str = ""
     attachments: list[_SearchAttachment] = []
     hit: bool = False
+    flags: int = 0
     # Kept so a THREAD_CREATED notice (type 18, content = the thread's name) can
     # be withheld when the thread it references is sealed.
     type: int = 0
@@ -94,6 +96,7 @@ def _names_a_withheld_thread(hit: _SearchHit, read_policy: ChannelReadPolicy) ->
 
 
 class _SearchThread(BaseModel):
+    name: str = ""
     model_config = ConfigDict(extra="ignore")
 
     id: str
@@ -337,7 +340,42 @@ async def _search_messages_impl(  # pyright: ignore[reportUnusedFunction]
 
         # 10. Map visible hits → MessageRow
         rows: list[MessageRow] = []
+        recruitment_cache: dict[str, bool] = {}
         for hit in visible_hits:
+            info = thread_by_id.get(hit.channel_id)
+            if await recruitment_thread(
+                runtime,
+                guild_id,
+                hit.channel_id,
+                title=info.name if info else "",
+                parent_id=info.parent_id or "" if info else "",
+            ) or await recruitment_thread(runtime, guild_id, hit.id):
+                continue
+            if info is None and hit.channel_id not in view_by_channel_id:
+                if hit.channel_id not in recruitment_cache:
+                    raw = await _resolve_channel(c, hit.channel_id)
+                    recruitment_cache[hit.channel_id] = isinstance(
+                        raw, discord.Thread
+                    ) and await recruitment_thread(
+                        runtime, guild_id, str(raw.id), title=raw.name, parent_id=str(raw.parent_id)
+                    )
+                if recruitment_cache[hit.channel_id]:
+                    continue
+            if hit.type == _THREAD_CREATED:
+                referenced = hit.message_reference.channel_id if hit.message_reference else ""
+                if await recruitment_thread(
+                    runtime, guild_id, referenced or "", title=hit.content, parent_id=hit.channel_id
+                ):
+                    continue
+            if hit.flags & (1 << 5):
+                try:
+                    raw = await _resolve_channel(c, hit.id)
+                except (discord.NotFound, discord.Forbidden, ToolError):
+                    continue
+                if isinstance(raw, discord.Thread) and await recruitment_thread(
+                    runtime, guild_id, str(raw.id), title=raw.name, parent_id=str(raw.parent_id)
+                ):
+                    continue
             rows.append(
                 MessageRow(
                     id=hit.id,
