@@ -562,7 +562,7 @@
         For Linear or other bearer-authenticated endpoints, use
         ``request_mcp_token`` instead;
         ``detach_mcp_server`` disconnects it. Fork Daimon with ``fork_agent`` before
-        directly changing its setup. Channel or workspace defaults need admin.
+        directly changing its setup. Needs the agent's owner or an admin.
         <blank line>
         Connects the server; its tools are available from the agent's next message,
         not the one running now. Reusing a server name replaces the URL; the same
@@ -6039,7 +6039,8 @@
         for Opus unless an older version is explicitly requested. List fields
         (``tools``, ``mcp_servers``, ``skills``) are added to, never replaced; shorter
         lists remove nothing. Use ``remove_skill`` or ``detach_mcp_server`` to remove.
-        Daimon requires ``fork_agent`` first; channel/workspace defaults require admin.
+        Daimon requires ``fork_agent`` first. Needs the agent's owner (whoever created it
+        in chat, or whom an admin named) or an admin.
         <blank line>
         Prompt, model and skill changes reach a conversation on its next message, not the
         one running now. ``skills`` accepts names such as

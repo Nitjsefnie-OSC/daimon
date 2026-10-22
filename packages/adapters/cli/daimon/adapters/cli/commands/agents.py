@@ -90,7 +90,7 @@ agents_app = typer.Typer(
 agents_app.add_typer(agent_rule_app, name="rule")
 backend_app = typer.Typer(help="Set or clear an agent's model backend.")
 agents_app.add_typer(backend_app, name="backend")
-owner_app = typer.Typer(help="Show, assign or clear the person who may edit an agent.")
+owner_app = typer.Typer(help="Show, set or clear an agent's owner.")
 agents_app.add_typer(owner_app, name="owner")
 tool_rules_app = typer.Typer(help="List, set or clear an agent's MCP tool rules.")
 agents_app.add_typer(tool_rules_app, name="tool-rules")

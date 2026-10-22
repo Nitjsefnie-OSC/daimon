@@ -542,7 +542,7 @@ def settings_line(settings: Mapping[str, object]) -> str:
         parts.append("requires " + ", ".join(sorted(names)))
     if settings.get("profile"):
         parts.append(f"profile {settings['profile']}")
-    return "; ".join(parts) or "backend defaults"
+    return "; ".join(parts) or "the model provider's defaults"
 
 
 def backend_switch_callbacks(
