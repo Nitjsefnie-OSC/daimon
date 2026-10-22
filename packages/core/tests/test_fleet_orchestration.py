@@ -1294,7 +1294,9 @@ async def test_partial_result_whose_journal_fails_verification_stays_blocked():
 async def test_settle_ends_a_run_with_no_worker_left_to_wake_it(rows, expected):
     owner = ports()
     owner.read_run.return_value = (run(), rows)
-    owner.settle_run.side_effect = lambda _parent, current, status: replace(current, status=status)
+    owner.settle_run.side_effect = lambda _parent, current, status, **_: replace(
+        current, status=status
+    )
     settled = await FleetOrchestrator(owner).settle(permissions(), POLICY, run_id=RUN)
     assert settled is not None and settled.status == expected
     owner.settle_run.assert_awaited_once()
@@ -1316,3 +1318,40 @@ async def test_settle_requires_the_controller():
     with pytest.raises(FleetRefused, match="controller_required"):
         await FleetOrchestrator(owner).settle(stranger, POLICY, run_id=RUN)
     owner.settle_run.assert_not_awaited()
+
+
+async def test_settle_keeps_an_owed_wake_and_reports_no_move():
+    owner = ports(worker())
+    owner.settle_run.side_effect = FleetRefused("wake_pending")
+    wake = UUID(int=99)
+    settled = await FleetOrchestrator(owner).settle(
+        permissions(), POLICY, run_id=RUN, wake_id=wake, unless_waking=True
+    )
+    assert settled is None
+    assert owner.settle_run.await_args.kwargs == {"wake_id": wake, "unless_waking": True}
+
+
+@pytest.mark.parametrize("pending", [0, 1])
+async def test_defer_owes_the_root_one_wake_for_finished_workers(pending):
+    owner = ports(worker(), failed_worker())
+    owner.pending_wakes.return_value = pending
+    assert await FleetOrchestrator(owner).defer(permissions(), POLICY, run_id=RUN)
+    assert owner.wait.await_count == (0 if pending else 1)
+    if not pending:
+        _, _, cohort = owner.wait.await_args.args
+        assert {row.id for row in cohort} == {WORKER, FAILED_WORKER}
+
+
+@pytest.mark.parametrize("case", ["active", "ended", "empty", "wait_refused"])
+async def test_defer_reports_when_no_wake_can_be_owed(case):
+    rows = (worker(), failed_worker(status="running", error_code=None))
+    owner = ports(*rows) if case == "active" else ports(worker(), failed_worker())
+    owner.pending_wakes.return_value = 0
+    if case == "ended":
+        owner.read_run.return_value = (replace(run(), status="failed"), (worker(),))
+    if case == "empty":
+        owner.read_run.return_value = (run(), ())
+    if case == "wait_refused":
+        owner.wait.side_effect = FleetRefused("wait_unavailable")
+    assert not await FleetOrchestrator(owner).defer(permissions(), POLICY, run_id=RUN)
+    assert owner.wait.await_count == (case == "wait_refused")

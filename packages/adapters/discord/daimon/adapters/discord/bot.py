@@ -909,6 +909,7 @@ class DaimonBot(commands.Bot):
         turn_card_intent_id: uuid.UUID | None = None,
         recorded_post: AgentPostRow | None = None,
         on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
+        wake_id: uuid.UUID | None = None,
     ) -> DiscordFleetCard | None:
         factory = getattr(self.runtime, "fleet_card_factory", None)
         settings = getattr(self.runtime.settings, "fleet", None)
@@ -923,6 +924,7 @@ class DaimonBot(commands.Bot):
             turn_card_intent_id=turn_card_intent_id,
             recorded_post=recorded_post,
             on_replacement=on_replacement,
+            wake_id=wake_id,
         )
 
     async def recover_fleet_card(
@@ -4087,6 +4089,7 @@ class DaimonBot(commands.Bot):
                     on_replacement=lambda msg: recorder.message(
                         thread, msg, turn_card_intent_id=turn_id
                     ),
+                    wake_id=row.id if row.reason == "worker_finished" else None,
                 ),
                 send=recorder.sender(thread, turn_card_intent_id=turn_id, transport=transport),
                 edit=_edit_message,

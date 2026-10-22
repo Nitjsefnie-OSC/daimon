@@ -183,9 +183,26 @@ class FleetPorts(Protocol):
         ...
 
     async def settle_run(
-        self, parent: WorkerPermissions, run: FleetRun, status: SettledStatus
+        self,
+        parent: WorkerPermissions,
+        run: FleetRun,
+        status: SettledStatus,
+        *,
+        wake_id: uuid.UUID | None,
+        unless_waking: bool,
     ) -> FleetRun:
-        """Move a run with no active worker to its terminal status (version CAS)."""
+        """Move a run with no active worker to its terminal status (version CAS).
+
+        Retires the run's other wakes; keeps `wake_id`, the wake whose turn ends
+        the run. `unless_waking` refuses (wake_pending) while another wake of
+        this run is pending or claimed, in the same transaction as the move.
+        """
+        ...
+
+    async def pending_wakes(
+        self, parent: WorkerPermissions, run: FleetRun, *, exclude: uuid.UUID | None
+    ) -> int:
+        """Count this run's pending or claimed worker_finished wakes, except `exclude`."""
         ...
 
 
@@ -720,13 +737,21 @@ class FleetOrchestrator:
         return {"partial": True, "results": results, "failed": failed}
 
     async def settle(
-        self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, run_id: uuid.UUID
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        *,
+        run_id: uuid.UUID,
+        wake_id: uuid.UUID | None = None,
+        unless_waking: bool = True,
     ) -> FleetRun | None:
-        """End a run whose root turn finished with no worker left to wake it.
+        """End a run whose root turn delivered its final answer.
 
         Zero workers cancel the run; all-terminal workers complete it when every
-        result is collectable, else fail it. An active worker or a run already
-        ended leaves it unchanged (None). Money and native work keep their owners.
+        result is collectable, else fail it. An active worker, a run already
+        ended, or (with `unless_waking`) a wake still owed to the root other
+        than `wake_id` leaves it unchanged (None). Money and native work keep
+        their owners.
         """
         run, workers = await self.read_snapshot(parent, policy, run_id)
         await self._controller_authorize(parent)
@@ -740,7 +765,49 @@ class FleetOrchestrator:
         else:
             reply = await self.collect(parent, policy, run_id=run.id)
             status = "completed" if reply.get("status") == "ready" else "failed"
-        return await self._owner().settle_run(parent, run, status)
+        try:
+            return await self._owner().settle_run(
+                parent, run, status, wake_id=wake_id, unless_waking=unless_waking
+            )
+        except FleetRefused as error:
+            if error.reason == "wake_pending":
+                return None
+            raise
+
+    async def defer(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        *,
+        run_id: uuid.UUID,
+        wake_id: uuid.UUID | None = None,
+    ) -> bool:
+        """Owe the root a wake for finished workers whose result it has not seen.
+
+        The root's answer predates the result, so the wake turn delivers it.
+        An existing wake (other than `wake_id`) already owes that turn; an
+        active worker is armed by collect. True when a wake is owed.
+        """
+        run, workers = await self.read_snapshot(parent, policy, run_id)
+        await self._controller_authorize(parent)
+        if (
+            not workers
+            or run.status != "running"
+            or any(worker.status in _ACTIVE for worker in workers)
+        ):
+            return False
+        if await self._owner().pending_wakes(parent, run, exclude=wake_id):
+            return True
+        # The newest cohort: reviewers of one target, or the initial workers.
+        cohort = max(workers, key=lambda row: row.ordinal).reviewer_of
+        try:
+            await self._owner().wait(
+                parent, run, tuple(worker for worker in workers if worker.reviewer_of == cohort)
+            )
+        except FleetRefused:
+            # No wake can be owed (an ended origin or run): the caller delivers now.
+            return False
+        return True
 
 
 class HostFleetPorts:
@@ -1027,30 +1094,56 @@ class HostFleetPorts:
         return run, workers
 
     async def settle_run(
-        self, parent: WorkerPermissions, run: FleetRun, status: SettledStatus
+        self,
+        parent: WorkerPermissions,
+        run: FleetRun,
+        status: SettledStatus,
+        *,
+        wake_id: uuid.UUID | None,
+        unless_waking: bool,
     ) -> FleetRun:
         from daimon.core.fleet import FleetConflict
-        from daimon.core.stores import fleet
+        from daimon.core.stores import fleet, task_continuations
 
         _scope(parent, run)
         try:
-            if status == "completed" and run.status == "running":
-                run = await fleet.set_run_status(
-                    self.sessions,
+            async with self.sessions.begin() as db:
+                if unless_waking and await task_continuations.count_run_wakes(
+                    db, run=run, exclude_id=wake_id
+                ):
+                    raise FleetRefused("wake_pending")
+                if status == "completed" and run.status == "running":
+                    run = await fleet.set_run_status(
+                        db,
+                        tenant_id=run.tenant_id,
+                        run_id=run.id,
+                        expected_version=run.version,
+                        status="collecting",
+                    )
+                # The move locks the run row, which wake arming locks first;
+                # the recount under that lock closes the race with a new wake.
+                return await fleet.set_run_status(
+                    db,
                     tenant_id=run.tenant_id,
                     run_id=run.id,
                     expected_version=run.version,
-                    status="collecting",
+                    status=status,
+                    wake_id=wake_id,
+                    unless_waking=unless_waking,
                 )
-            return await fleet.set_run_status(
-                self.sessions,
-                tenant_id=run.tenant_id,
-                run_id=run.id,
-                expected_version=run.version,
-                status=status,
-            )
-        except FleetConflict:
-            raise FleetRefused("run_changed") from None
+        except FleetConflict as error:
+            raise FleetRefused(
+                "wake_pending" if error.reason == "wake_pending" else "run_changed"
+            ) from None
+
+    async def pending_wakes(
+        self, parent: WorkerPermissions, run: FleetRun, *, exclude: uuid.UUID | None
+    ) -> int:
+        from daimon.core.stores import task_continuations
+
+        _scope(parent, run)
+        async with self.sessions() as db:
+            return await task_continuations.count_run_wakes(db, run=run, exclude_id=exclude)
 
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision

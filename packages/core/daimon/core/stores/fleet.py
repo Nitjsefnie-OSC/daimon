@@ -714,7 +714,16 @@ async def set_run_status(
     run_id: uuid.UUID,
     expected_version: int,
     status: RunStatus,
+    wake_id: uuid.UUID | None = None,
+    unless_waking: bool = False,
 ) -> FleetRun:
+    """Compare-and-set the run's status; an ended run withdraws its wakes.
+
+    `wake_id` is the wake whose turn makes this move; its own claim is kept for
+    the wake owner to settle. With `unless_waking`, another pending or claimed
+    wake of this run refuses the move in the same transaction (FleetConflict),
+    so a turn already owed to the root is never cancelled under it.
+    """
     finished = {"finished_at": func.now()} if status not in RUN_TRANSITIONS else {}
     async with _transaction(sessionmaker) as session:
         row = (
@@ -740,8 +749,12 @@ async def set_run_status(
                 f"run {run_id} cannot become {status} at version {expected_version}"
             )
         run = _run(row)
+        if unless_waking and await task_continuations.count_run_wakes(
+            session, run=run, exclude_id=wake_id
+        ):
+            raise FleetConflict(f"run {run_id} has a pending wake", reason="wake_pending")
         if finished:
-            await task_continuations.retire_worker_finished_rows(session, run=run)
+            await task_continuations.retire_worker_finished_rows(session, run=run, keep_id=wake_id)
     return run
 
 

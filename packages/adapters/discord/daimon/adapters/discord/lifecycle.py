@@ -1247,7 +1247,9 @@ class DiscordTurnLifecycle:
                 self._skip_terminal()
                 return
             if self._fleet_card is not None:
-                allowed, notice = await self._fleet_card.summary_gate()
+                from daimon.adapters.discord.posted_controls.fleet import fleet_result_seen
+
+                allowed, notice = await self._fleet_card.summary_gate(seen=fleet_result_seen(state))
                 if not allowed:
                     if notice is None:
                         self._terminal = True
@@ -1584,6 +1586,12 @@ class DiscordTurnLifecycle:
                 self._skip_terminal()
                 return
             await self._deliver_failure(state, err)
+            if self._fleet_card is not None:
+                # The error card is up; the fleet card must not stay "running".
+                try:
+                    await self._fleet_card.end_after_error()
+                except Exception:
+                    log.warning("turn.fleet_card_error_end_failed", exc_info=True)
         finally:
             self._mark_ended()
             self._card_writes.queue_repair()

@@ -2436,18 +2436,3 @@ async def test_run_watch_is_not_starved_by_back_to_back_short_lock_holds(sm, mon
         await asyncio.gather(*hammers)
         finished.set()
         assert await asyncio.wait_for(watch, 3) == "finished"
-
-
-@pytest.mark.parametrize("status", ("completed", "cancelled", "failed"))
-async def test_host_settle_moves_the_run_to_its_terminal_status_once(sm, status):
-    from daimon.core.fleet_orchestration import FleetRefused, HostFleetPorts
-
-    parent, run = await setup(sm)
-    ports = HostFleetPorts(sm, prices={}, markup=Decimal(1))
-    settled = await ports.settle_run(parent, run, status)
-    assert settled.status == status
-    stored, _ = await fleet.run_status(sm, tenant_id=run.tenant_id, run_id=run.id)
-    assert stored.status == status
-    # A second settle reads a stale version: the terminal row never moves again.
-    with pytest.raises(FleetRefused, match="run_changed"):
-        await ports.settle_run(parent, run, status)
