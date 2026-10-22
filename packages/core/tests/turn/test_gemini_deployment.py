@@ -1691,15 +1691,17 @@ async def test_argon_after_its_intro_tariff_refuses_before_runtime_discovery(
     assert refused.value.reason == "backend_unsupported"
 
 
-async def test_cheap_model_does_not_enable_an_ordinary_channel_runtime(
+@pytest.mark.parametrize("model", ["gemini-3.8-pro", "gemini-2.5-flash"])
+async def test_an_unselectable_model_does_not_enable_an_ordinary_runtime(
     selected: ProviderPreparationRequest,
     monkeypatch: pytest.MonkeyPatch,
+    model: str,
 ) -> None:
-    from mux.profiles.gemini import WORKER_MODEL
-
+    # Ordinary turns run the selectable models (Flash, Flash-Lite, Argon); others,
+    # Pro included, refuse before any runtime discovery.
     revision = selected.admission.backend_revision
     assert revision is not None and selected.worker is None
-    changed = revision.model_copy(update={"model": WORKER_MODEL})
+    changed = revision.model_copy(update={"model": model})
     selected = replace(selected, admission=replace(selected.admission, backend_revision=changed))
     getter = os.environ.get
 

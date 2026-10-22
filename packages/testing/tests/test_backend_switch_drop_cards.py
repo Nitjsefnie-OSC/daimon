@@ -338,6 +338,7 @@ class Card:
             turn_deps=chat.turn_deps,
             sessionmaker=chat.runtime.session_factory,
             anthropic=chat.runtime.client,
+            deployment_default=chat.runtime.deployment_default,
         )
         ids = {"tenant_id": chat.auth.tenant_id, "account_id": chat.auth.account_id}
         builder = getattr(self, f"_{chat.platform}")

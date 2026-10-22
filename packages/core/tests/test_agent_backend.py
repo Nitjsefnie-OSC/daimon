@@ -426,11 +426,17 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
     assert consent_spec is not None and consent_spec.loader is not None
     consent_module = importlib.util.module_from_spec(consent_spec)
     consent_spec.loader.exec_module(consent_module)
+    model_path = path.with_name("0118_agent_backend_model.py")
+    model_spec = importlib.util.spec_from_file_location("backend_model_restore", model_path)
+    assert model_spec is not None and model_spec.loader is not None
+    model_module = importlib.util.module_from_spec(model_spec)
+    model_spec.loader.exec_module(model_module)
     async with sessions.begin() as session:
         connection = await session.connection()
 
         def downgrade(sync):
             with Operations.context(MigrationContext.configure(sync)):
+                model_module.downgrade()
                 consent_module.downgrade()
                 module.downgrade()
             schema = sync.scalar(text("SELECT current_schema()"))
@@ -458,6 +464,7 @@ async def test_downgrade_prior_reader_accepts_real_nondefault_allowlist_write(ow
                     fleet_spec.loader.exec_module(fleet_module)
                     fleet_module.upgrade()
                     consent_module.upgrade()
+                    model_module.upgrade()
 
             await connection.run_sync(upgrade)
     async with sessions() as session:
@@ -928,3 +935,54 @@ async def test_legacy_selfhosted_agent_revision_cannot_materialize(owned):
         assert not await agent_backends.has_backend_preference_by_name(
             db, tenant_id=agent.tenant_id, agent_name=agent.name, backend="selfhosted"
         )
+
+
+async def test_a_picked_model_is_stored_previewed_reverted_and_resolved(owned) -> None:
+    from daimon.core.channel_backend import agent_selection, picked_model, resolve_agent_backend
+
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    default = await service.preview(agent, "gemini")
+    argon = await service.preview(agent, "gemini", "gemini-4-argon")
+    assert default.target_model is None and argon.target_model == "gemini-4-argon"
+    assert argon.digest != default.digest
+    assert "gemini-4-argon" in argon.cost_line
+    # Naming the default is the same preview as naming none.
+    assert await service.preview(agent, "gemini", "gemini-3.8-flash") == default
+    assert picked_model("gemini", "gemini-3.8-flash") is None
+    first = await service.set_backend(
+        agent,
+        "gemini",
+        0,
+        actor,
+        expected_preview_digest=argon.digest,
+        model="gemini-4-argon",
+    )
+    assert (first.backend, first.model) == ("gemini", "gemini-4-argon")
+    assert resolve_agent_backend(None, first).model == "gemini-4-argon"
+    channel = ChannelRef(tenant_id=str(agent.tenant_id), platform="discord", channel_id="any")
+    async with sessions.begin() as session:
+        resolved, _, source = await resolve_turn_backend(session, channel, agent, enabled=True)
+    assert resolved is not None and source == "agent"
+    assert (resolved.backend, resolved.model) == ("gemini", "gemini-4-argon")
+    assert resolved.content_digest() == agent_selection("gemini", "gemini-4-argon").content_digest()
+    second = await service.set_backend(agent, "gemini", 1, actor, model="gemini-3.8-flash")
+    assert second.model is None
+    third = await service.revert(agent, actor, expected_revision=2)
+    assert (third.backend, third.model) == ("gemini", "gemini-4-argon")
+    cleared = await service.clear_backend(agent, 3, actor)
+    assert (cleared.backend, cleared.model) == (None, None)
+
+
+@pytest.mark.parametrize(
+    ("backend", "model"),
+    [("gemini", "gemini-3.8-pro"), ("openai", "gemini-4-argon"), ("anthropic", "claude-opus-5-5")],
+)
+async def test_an_unselectable_model_is_refused_before_any_write(owned, backend, model) -> None:
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    with pytest.raises(AgentBackendRefused, match="model not selectable"):
+        await service.preview(agent, backend, model)
+    with pytest.raises(AgentBackendRefused, match="model not selectable"):
+        await service.set_backend(agent, backend, 0, actor, model=model)
+    assert await service.current(agent) is None

@@ -692,6 +692,10 @@ def agents_backend_set_command(
     as_json: Annotated[bool, JSON_OPTION] = False,
     accept_drops: Annotated[str | None, typer.Option("--accept-drops")] = None,
     dry_run: Annotated[bool, typer.Option("--dry-run")] = False,
+    model: Annotated[
+        str | None,
+        typer.Option("--model", help="One of the backend's selectable models; default if unset."),
+    ] = None,
 ) -> None:
     """Preview and set an enabled backend for new threads using this agent."""
     settings = load_settings()
@@ -709,6 +713,7 @@ def agents_backend_set_command(
                 selector=ctx.obj,
                 accept_drops=accept_drops,
                 dry_run=dry_run,
+                model=model,
             )
 
     run_cli(work(), console=console)
@@ -783,6 +788,7 @@ async def agents_backend_change(
     accept_drops: str | None = None,
     dry_run: bool = False,
     revert: bool = False,
+    model: str | None = None,
 ) -> None:
     from mux.contracts.config import BackendConfig
 
@@ -853,10 +859,14 @@ async def agents_backend_change(
             if previous is None:
                 raise channel_backend.AgentBackendRefused("no_previous_revision")
             target = previous.backend
-    preview = await service.preview(agent, target)
+    preview = await service.preview(agent, target, model)
     preview_json = TypeAdapter(type(preview)).dump_json(preview).decode()
     if not as_json:
-        console.print(f"Model backend: {preview.target_backend}", markup=False)
+        console.print(
+            f"Model backend: {preview.target_backend}"
+            + (f" ({preview.target_model})" if preview.target_model else ""),
+            markup=False,
+        )
         for label, items in (
             ("Unsupported skills", preview.unsupported_skills),
             ("Unsupported MCPs", preview.unsupported_mcps),
@@ -925,6 +935,7 @@ async def agents_backend_change(
             preview.setting_revision,
             actor,
             expected_preview_digest=preview.digest,
+            model=preview.target_model,
             **({"accepted_drops": accepted} if accepted is not None else {}),
         )
     if as_json:
@@ -933,6 +944,7 @@ async def agents_backend_change(
                 {
                     "agent": name,
                     "backend": revision.backend,
+                    "model": revision.model,
                     "revision": revision.local,
                     "preview": json.loads(preview_json),
                 }

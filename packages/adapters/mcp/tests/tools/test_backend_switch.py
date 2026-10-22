@@ -512,3 +512,56 @@ async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat)
     revision = await service.current(source)
     assert revision.drop_consent is not None and revision.declared_drops == ()
     assert not trace.replies and not trace.violations
+
+
+async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(active_chat):
+    from daimon.core.channel_backend import load_backend_agent
+
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    _without_own_tools(payload)
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
+        model="gemini-4-argon",
+        origin_context_id=str(origin.id),
+    )
+    assert preview.status == "preview" and preview.model == "gemini-4-argon"
+    assert preview.models == ("gemini-3.8-flash", "gemini-3.5-flash-lite", "gemini-4-argon")
+    assert "gemini-4-argon" in preview.cost_line
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
+        model="gemini-4-argon",
+        origin_context_id=str(origin.id),
+        expected_revision=0,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    assert changed.status == "changed" and changed.model == "gemini-4-argon"
+    agent()
+    actual = await load_backend_agent(
+        runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
+    )
+    current = await service.current(actual)
+    assert (current.backend, current.model) == ("gemini", "gemini-4-argon")
+    assert not trace.violations
+
+
+@pytest.mark.parametrize(("backend", "model"), [("gemini", "gemini-3.8-pro"), ("openai", "x")])
+async def test_an_unknown_model_names_the_choices_before_any_lookup(backend, model) -> None:
+    from daimon.adapters.mcp.tools.agents import _require_selectable_model
+
+    with pytest.raises(ToolError, match="isn't available") as refused:
+        _require_selectable_model(backend, model)
+    assert "Pick one of:" in str(refused.value)
+    _require_selectable_model("gemini", None)
+    _require_selectable_model("gemini", "gemini-4-argon")
