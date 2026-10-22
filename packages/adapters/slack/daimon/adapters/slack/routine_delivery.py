@@ -39,6 +39,7 @@ from daimon.core.routine_delivery import (
     resolve_routine_identity,
     slack_creator_may_post,
 )
+from daimon.core.routine_hold import result_is_held
 from daimon.core.rule_views import keeps_routine_inside
 from daimon.core.stores.domain import RoutineRow
 from daimon.core.stores.tenants import get_tenant
@@ -174,10 +175,13 @@ def make_slack_routine_poster(
         if not isinstance(cleared, TenantAccessPolicy):
             log.info("routine.delivery_refused", routine_id=str(row.id), reason=cleared)
             return DeliveryOutcome(status="skipped", note=cleared)
-        keep_inside = keeps_routine_inside(cleared, row)
+        # An isolated or shared channel's result never leaves it, not even by DM.
+        keep_inside = keeps_routine_inside(cleared, row) or await result_is_held(
+            runtime.sessionmaker, row, platform="slack"
+        )
 
         async def fallback(reason: str) -> DeliveryOutcome:
-            if keep_inside:  # an isolated channel's result never leaves it, not even by DM
+            if keep_inside:
                 return DeliveryOutcome(status="skipped", note=reason)
             return await _dm_fallback(
                 client, row, reason, team_id=tenant.external_id, policy=dm_policy

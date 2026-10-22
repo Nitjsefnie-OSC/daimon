@@ -45,7 +45,7 @@ from daimon.core.stores.domain import Platform
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.shared_channels import is_channel_shared
-from daimon.core.turn_hold import TurnHold
+from daimon.core.turn_hold import RequesterOrg, TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -70,16 +70,26 @@ async def held_place(
     platform: str,
     channel_id: str,
     foreign_home_id: str | None,
+    requester_org: RequesterOrg,
+    channel_shared: bool | None,
 ) -> TurnHold | None:
-    """The hold a turn here would get, from what is recorded; None when unheld.
+    """The hold a turn here would get; None only when the place is proven unheld.
 
-    The same facts as admission's, minus the live platform signal a command does
-    not carry: the channel was recorded as shared, or the person asking is
-    recorded as from another organisation. `channel_id` is the parent channel.
+    Unheld needs all of: the platform vouched the asker is a member of the
+    workspace (`RequesterOrg.HOST`), nothing records them as from another
+    organisation, the platform's live signal does not say the channel is shared
+    (None is no signal) and the channel is not recorded as shared. Anything
+    else, an unknown asker included, is held: reading memory fails closed.
+    Nothing is recorded here, so an `UNKNOWN` asker marks nothing.
+    `channel_id` is the parent channel.
     """
-    client = foreign_home_id is not None
-    if client or await is_channel_shared(
-        session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+    client = requester_org is not RequesterOrg.HOST or foreign_home_id is not None
+    if (
+        client
+        or channel_shared is True
+        or await is_channel_shared(
+            session, tenant_id=tenant_id, platform=platform, channel_id=channel_id
+        )
     ):
         return TurnHold(platform, channel_id, client)
     return None
@@ -94,6 +104,8 @@ async def resolve_channel_agent(
     user_id: str,
     channel_id: str,
     default: DeploymentDefault,
+    requester_org: RequesterOrg,
+    channel_shared: bool | None,
     thread_id: str | None = None,
 ) -> ChannelAgent | None:
     """The agent answering in `channel_id` (or `thread_id` under it) for `user_id`.
@@ -122,6 +134,8 @@ async def resolve_channel_agent(
             platform=platform,
             channel_id=channel_id,
             foreign_home_id=principal.foreign_home_id,
+            requester_org=requester_org,
+            channel_shared=channel_shared,
         )
     if config.agent_name is None:
         return None
@@ -172,6 +186,8 @@ async def get_channel_memory_store(
     user_id: str,
     channel_id: str,
     default: DeploymentDefault,
+    requester_org: RequesterOrg,
+    channel_shared: bool | None,
     thread_id: str | None = None,
 ) -> tuple[str, str] | None:
     """`(agent_name, memory_store_id)` of the store shown for the agent answering in `channel_id`.
@@ -180,6 +196,8 @@ async def get_channel_memory_store(
 
     With `thread_id`, the agent answering in that thread under it, so a thread
     bound to another agent shows that agent's memory.
+    `requester_org` and `channel_shared` are the live facts the adapter has about the
+    asker and the channel (`held_place`); a place not proven unheld is held.
     None when no agent is configured there, it has no memory store yet, or its
     pin or channel isolation hides it from that place.
     Raises DaimonError when the configured agent is missing on the MA side.
@@ -192,6 +210,8 @@ async def get_channel_memory_store(
         user_id=user_id,
         channel_id=channel_id,
         default=default,
+        requester_org=requester_org,
+        channel_shared=channel_shared,
         thread_id=thread_id,
     )
     if agent is None:

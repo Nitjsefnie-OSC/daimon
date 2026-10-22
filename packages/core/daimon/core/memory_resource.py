@@ -57,6 +57,7 @@ from daimon.core.stores.agent_memory_stores import (
     list_personal_memory_stores_for_agent,
     mark_personal_memory_store_archived,
 )
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -204,6 +205,17 @@ async def _ensure_store(
     else:
         _log.info("memory_store.provisioned", memory_store_id=store_id, name=name)
     return store_id
+
+
+def memory_scope(hold: TurnHold | None) -> str | None:
+    """The memory isolation scope a session is built for: None unheld, else its channel.
+
+    Recorded in the session snapshot whether or not a store mounted, so a held
+    session whose store failed to provision is still known to be the place's.
+    """
+    if hold is None:
+        return None
+    return f"channel:{hold.platform}:{hold.channel_id}"
 
 
 def memory_instructions(*, read_only: bool, personal_mounted: bool = False) -> str:

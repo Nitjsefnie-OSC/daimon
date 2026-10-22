@@ -87,6 +87,7 @@ from daimon.core.memory_resource import (
     ensure_personal_memory_store_and_mount,
     memory_instructions,
     memory_mount,
+    memory_scope,
 )
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import (
@@ -1354,6 +1355,7 @@ async def create_session(
                         sent_skills=session_skills(agent, channel_skills),
                         github_mode="app",
                         mcp_hold=hold_key(hold) if account_id is not None else None,
+                        memory_scope=memory_scope(memory_hold),
                     )
                     if app_session_unmapped
                     else None

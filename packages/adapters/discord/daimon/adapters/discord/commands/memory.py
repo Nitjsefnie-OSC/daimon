@@ -37,6 +37,7 @@ from daimon.core.scope import ScopeContext
 from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
+from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -87,6 +88,10 @@ async def _resolve_agent(
             # A thread is held with its parent channel.
             channel_id=str(parent if parent is not None else interaction.channel_id),
             foreign_home_id=principal.foreign_home_id,
+            # Discord has no other-organisation members and no live shared-channel
+            # signal: a member of the guild, and the recorded registry decides.
+            requester_org=RequesterOrg.HOST,
+            channel_shared=None,
         )
     if config.agent_name is None:
         return None

@@ -4,6 +4,7 @@ from __future__ import annotations
 
 from unittest.mock import AsyncMock, MagicMock, patch
 
+import pytest
 from daimon.adapters.slack.memory import handle_memory_command
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.ma_identity import derive_agent_uuid, derive_tenant_uuid
@@ -17,6 +18,7 @@ from daimon.testing.ma import (
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
+from slack_sdk.errors import SlackApiError
 
 TEAM_ID = "T123"
 
@@ -54,6 +56,8 @@ async def _setup(db_session, db_session_factory, *, seed: dict[str, str]):
     runtime.deployment_default = DeploymentDefault(agent_name="daimon", environment_name="default")
     web = MagicMock()
     web.chat_postEphemeral = AsyncMock()
+    web.users_info = AsyncMock(return_value={"user": {"team_id": TEAM_ID}})
+    web.conversations_info = AsyncMock(return_value={"channel": {"is_ext_shared": False}})
     return runtime, web
 
 
@@ -215,8 +219,10 @@ async def test_memory_mine_and_forget_act_only_on_the_invokers_own_store(
     assert await paths(mine) == [] and await paths(theirs) == ["/x.md"]
 
 
-async def _hold_channel(db_session, runtime, *, shared_files: dict[str, str]) -> None:
-    """Mark C1 shared and bind a channel store holding `shared_files` for the agent."""
+async def _hold_channel(
+    db_session, runtime, *, shared_files: dict[str, str], mark: bool = True
+) -> None:
+    """Bind a channel store holding `shared_files` for the agent; mark C1 shared if `mark`."""
     from daimon.core.stores.agent_memory_stores import insert_channel_memory_store
     from daimon.core.stores.shared_channels import mark_channel_shared
 
@@ -233,9 +239,10 @@ async def _hold_channel(db_session, runtime, *, shared_files: dict[str, str]) ->
         channel_id="C1",
         memory_store_id=store.id,
     )
-    await mark_channel_shared(
-        db_session, tenant_id=tenant_id, platform="slack", channel_id="C1", source="platform"
-    )
+    if mark:
+        await mark_channel_shared(
+            db_session, tenant_id=tenant_id, platform="slack", channel_id="C1", source="platform"
+        )
     await db_session.commit()
 
 
@@ -264,3 +271,45 @@ async def test_personal_memory_commands_say_it_is_not_used_in_a_shared_channel(
             await handle_memory_command(runtime, _payload(text))
     for call in web.chat_postEphemeral.call_args_list:
         assert "Personal memory isn't used in this channel." in call.kwargs["text"]
+
+
+def _lookup_failure() -> SlackApiError:
+    return SlackApiError("boom", {"ok": False, "error": "ratelimited"})
+
+
+@pytest.mark.parametrize(
+    "unproven",
+    ["other-team", "users-info-fails", "no-team-in-reply", "live-shared-channel"],
+)
+async def test_memory_for_an_asker_not_proven_a_member_never_shows_agent_wide_memory(
+    unproven: str, db_session, db_session_factory
+) -> None:
+    """Nothing is recorded about the asker or the channel yet, so the live Slack
+    facts decide: only a workspace member in a channel Slack does not call shared
+    sees agent-wide memory."""
+    runtime, web = await _setup(db_session, db_session_factory, seed={"/wide.md": "internal"})
+    await _hold_channel(db_session, runtime, shared_files={"/channel.md": "agreed"}, mark=False)
+    if unproven == "other-team":
+        web.users_info.return_value = {"user": {"team_id": "T-OTHER"}}
+    elif unproven == "users-info-fails":
+        web.users_info.side_effect = _lookup_failure()
+    elif unproven == "no-team-in-reply":
+        web.users_info.return_value = {"user": {}}
+    else:
+        web.conversations_info.return_value = {"channel": {"is_ext_shared": True}}
+    with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+        await handle_memory_command(runtime, _payload())
+        await handle_memory_command(runtime, _payload("mine"))
+    listing, mine = (call.kwargs["text"] for call in web.chat_postEphemeral.call_args_list)
+    assert "/channel.md" in listing and "/wide.md" not in listing
+    assert "Personal memory isn't used in this channel." in mine
+
+
+async def test_memory_for_a_member_when_slack_lookups_fail_on_the_channel_uses_the_registry(
+    db_session, db_session_factory
+) -> None:
+    runtime, web = await _setup(db_session, db_session_factory, seed={"/wide.md": "internal"})
+    web.conversations_info.side_effect = _lookup_failure()
+    with patch("daimon.adapters.slack.memory.resolve_web_client", AsyncMock(return_value=web)):
+        await handle_memory_command(runtime, _payload())
+    assert "/wide.md" in web.chat_postEphemeral.call_args.kwargs["text"]

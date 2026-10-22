@@ -38,6 +38,7 @@ from daimon.core.credential_env import (
 )
 from daimon.core.github_app_session import effective_repo_plan
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.memory_resource import memory_scope
 from daimon.core.session_compat import valid_unavailable_repo_urls
 from daimon.core.session_fence_retry import try_fence
 from daimon.core.session_ports_compat import retrieve_session_record, session_scope
@@ -432,6 +433,7 @@ async def desired_snapshot_for(
         channel_skills=channel_skills,
         system_override=system_override,
         mcp_hold=mcp_hold,
+        memory_scope=memory_scope(memory_hold),
         tool_safety=tool_safety,
         public_url=public_url,
     )

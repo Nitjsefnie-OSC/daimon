@@ -31,7 +31,7 @@ from daimon.core.stores.identity import (
 )
 from daimon.core.stores.shared_channels import mark_channel_shared
 from daimon.core.stores.thread_agent_bindings import create_binding
-from daimon.core.turn_hold import TurnHold
+from daimon.core.turn_hold import RequesterOrg, TurnHold
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import (
     FakeMemoryStoreState,
@@ -76,6 +76,8 @@ async def test_channel_store_resolves_the_configured_agent_and_reads_its_memorie
         user_id="user-1",
         channel_id="chat-1",
         default=_DEFAULT,
+        requester_org=RequesterOrg.HOST,
+        channel_shared=False,
     )
 
     assert resolved == ("daimon", store.id), "the deployment default agent's store answers"
@@ -109,6 +111,8 @@ async def test_channel_store_is_none_before_the_agent_has_a_store(
         user_id="user-1",
         channel_id="chat-1",
         default=_DEFAULT,
+        requester_org=RequesterOrg.HOST,
+        channel_shared=False,
     )
 
     assert resolved is None, "an agent that never ran has no memory to show"
@@ -129,6 +133,8 @@ async def test_channel_store_raises_when_the_configured_agent_is_missing(
             user_id="user-1",
             channel_id="chat-1",
             default=_DEFAULT,
+            requester_org=RequesterOrg.HOST,
+            channel_shared=False,
         )
 
 
@@ -173,6 +179,8 @@ async def test_thread_store_follows_the_agent_the_thread_is_handed_to(
         "user_id": "user-1",
         "channel_id": channel,
         "default": _DEFAULT,
+        "requester_org": RequesterOrg.HOST,
+        "channel_shared": False,
     }
 
     in_thread = await get_channel_memory_store(
@@ -233,6 +241,8 @@ async def _show(
         user_id=user_id,
         channel_id=channel_id,
         default=_DEFAULT,
+        requester_org=RequesterOrg.HOST,
+        channel_shared=False,
     )
 
 
@@ -309,6 +319,8 @@ async def test_personal_memory_is_not_used_in_a_held_place(
             user_id="U-SYN-1",
             channel_id=channel_id,
             default=_DEFAULT,
+            requester_org=RequesterOrg.HOST,
+            channel_shared=False,
         )
         assert agent is not None
         return agent
@@ -331,3 +343,48 @@ async def test_personal_memory_is_not_used_in_a_held_place(
         assert reply.title == "Personal memory isn't used in this channel."
         assert reply.paths == () and reply.content is None
         assert reply.hint is not None and "/memory" in reply.hint
+
+
+@pytest.mark.parametrize(
+    ("requester_org", "channel_shared"),
+    [
+        (RequesterOrg.UNKNOWN, False),
+        (RequesterOrg.UNKNOWN, None),
+        (RequesterOrg.OTHER, False),
+        (RequesterOrg.HOST, True),
+    ],
+    ids=["unknown", "unknown-no-signal", "other", "host-in-live-shared-channel"],
+)
+async def test_an_asker_not_proven_a_member_of_an_unshared_channel_never_reads_agent_wide_memory(
+    requester_org: RequesterOrg,
+    channel_shared: bool | None,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """With nothing recorded yet (no marker, no registry row), the live facts alone
+    decide: only HOST in a channel not live-signalled shared reads agent-wide memory."""
+    tenant = await make_tenant(db_session)
+    client, wide, own, _ = await _agent_with_stores(db_session, tenant.id)
+    await db_session.commit()
+
+    async def show(org: RequesterOrg, shared: bool | None) -> tuple[str, str] | None:
+        return await get_channel_memory_store(
+            db_session_factory,
+            client,
+            tenant_id=tenant.id,
+            platform="slack",
+            user_id="U-SYN-1",
+            channel_id="C-SYN-1",
+            default=_DEFAULT,
+            requester_org=org,
+            channel_shared=shared,
+        )
+
+    assert await show(requester_org, channel_shared) == ("daimon", own)
+    assert await show(RequesterOrg.HOST, False) == ("daimon", wide)
+    assert await show(RequesterOrg.HOST, None) == ("daimon", wide), "no signal, nothing recorded"
+    async with db_session_factory() as session:
+        principal = await find_platform_principal(
+            session, tenant_id=tenant.id, platform="slack", external_id="U-SYN-1"
+        )
+        assert principal is None, "nothing is recorded about an asker from here"

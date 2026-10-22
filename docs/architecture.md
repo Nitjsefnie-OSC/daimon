@@ -1926,7 +1926,13 @@ its parent channel's store, and a shared-thread session (no caller account, so n
 credential) mounts the place's store too. `desired_snapshot_for` takes the same store, so
 a session still on the shared store when its channel turns shared (or the reverse) is
 replaced, with nothing carried over and refused while a turn is active (the memory
-boundary above); a session already on the channel store is reused. A fleet worker
+boundary above); a session already on the channel store is reused. The session snapshot
+also records the isolation scope (`memory_scope`: absent when unheld, else
+`channel:<platform>:<id>`), whether or not a store mounted, so a held place whose store
+failed to provision is still told apart from an unheld one and from another place. Any
+scope change is a boundary, a permitted handoff to another agent included: it carries
+nothing across, though a handoff that stays on one side of the boundary keeps its carry
+rule. The field is omitted when unset, so the previous build reads the stored snapshot. A fleet worker
 captures exactly one memory resource, the shared store, so a held admission never reaches
 that capture. Archiving an agent archives its channel stores with the others. Rolling back
 to a build without channel stores replaces those sessions with shared-store ones (again
@@ -1946,7 +1952,15 @@ and reads memories; deciding what to do with them is left to the operator.
 
 `/memory` (Discord, Slack) and `memory` (Teams) still show the shared store read-only,
 or in a held place (the channel is recorded as shared, or the person asking is recorded
-as from another organisation) the channel's own store. In a held place `mine` and
+as from another organisation) the channel's own store. The command takes the live facts
+from its adapter, not only the recorded ones: who the asker is (a workspace member, from
+another organisation, or unknown) and whether the platform calls the channel shared. Only
+a verified member in a channel neither the platform nor the registry calls shared reads the
+agent-wide store; an unknown asker is held, and nothing is recorded about them. Slack asks
+`users.info` and `conversations.info`; Teams reads the activity's tenant evidence (no
+evidence is unknown) and its channel type; Discord has no other-organisation members and
+uses the registry. In Teams the answer to a command typed in a held channel is never moved
+to the sender's 1:1 chat when the private reply is refused. In a held place `mine` and
 `forget-mine` answer that personal memory is not used there and touch nothing.
 `mine` lists the caller's own personal store and `mine /<path>` shows one file;
 `forget-mine` shows what would be deleted and a six-character code, and

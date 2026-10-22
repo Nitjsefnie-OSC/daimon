@@ -25,6 +25,7 @@ from daimon.core.memory_view import (
     get_channel_memory_store,
     get_memory_content,
     get_own_personal_memory_store,
+    held_place,
     list_memory_paths,
     parse_memory_args,
     personal_memory_reply,
@@ -34,6 +35,8 @@ from daimon.core.message_split import split_fenced
 from daimon.core.mux_backend import resource_scope
 from daimon.core.permissions import readers_limited_at
 from daimon.core.stores.access_policy import load_access_policy
+from daimon.core.stores.identity import get_or_create_platform_principal
+from daimon.core.turn_hold import RequesterOrg
 from microsoft_teams.cards import AdaptiveCard, CardElement, TextBlock
 
 log = structlog.get_logger()
@@ -41,6 +44,10 @@ log = structlog.get_logger()
 EMPTY = "No memory to show here."
 KEPT_INSIDE = (
     "This channel's rules keep its agent's memory out of this chat.\n\n"
+    "Ask the agent in that channel."
+)
+HELD_INSIDE = (
+    "This channel is shared with another organisation, so its memory stays in the channel.\n\n"
     "Ask the agent in that channel."
 )
 _FAILED = "Couldn't load the memory.\n\nTry again in a minute."
@@ -61,15 +68,55 @@ def _card(title: str, text: str | None = None, hint: str | None = None) -> Adapt
     return AdaptiveCard(body=body, fallback_text=title)
 
 
-async def _kept_inside(context: CommandContext, asked: TeamsInbound) -> bool:
-    """Whether the answer would carry a limited-readers channel's memory to the 1:1 chat.
+def _requester_org(asked: TeamsInbound) -> RequesterOrg:
+    """Which organisation the sender is from, as far as the activity alone proves.
 
+    HOST needs the activity to name this workspace's tenant for the sender
+    (`member_verified`); a sender the activity marks foreign is OTHER; anything
+    else, no tenant evidence included, is UNKNOWN and reads as held.
+    """
+    if asked.is_foreign:
+        return RequesterOrg.OTHER if asked.home_tenant_id else RequesterOrg.UNKNOWN
+    return RequesterOrg.HOST if asked.member_verified else RequesterOrg.UNKNOWN
+
+
+def _channel_shared(asked: TeamsInbound) -> bool | None:
+    """Teams' own word: a shared channel names its type; anything else is no signal."""
+    return True if asked.channel_type == "shared" else None
+
+
+async def _place_is_held(context: CommandContext, asked: TeamsInbound) -> bool:
+    async with context.runtime.sessionmaker() as session:
+        principal = await get_or_create_platform_principal(
+            session, tenant_id=context.tenant_id, platform="teams", external_id=asked.user_id
+        )
+        return (
+            await held_place(
+                session,
+                tenant_id=context.tenant_id,
+                platform="teams",
+                channel_id=asked.channel_id,
+                foreign_home_id=principal.foreign_home_id,
+                requester_org=_requester_org(asked),
+                channel_shared=_channel_shared(asked),
+            )
+            is not None
+        )
+
+
+async def _kept_inside(context: CommandContext, asked: TeamsInbound) -> str | None:
+    """Why the answer must not be carried to the 1:1 chat, None when it may be.
+
+    A limited-readers channel's memory stays in it, and so does a held channel's,
+    host members included: it is shared with people from another organisation.
     A private answer in the channel itself (`asked_in` None) stays inside it."""
     if context.asked_in is None:
-        return False
+        return None
     async with context.runtime.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=context.tenant_id)
-    return readers_limited_at(policy, channel_id=asked.channel_id, thread_id=asked.thread_id)
+    if readers_limited_at(policy, channel_id=asked.channel_id, thread_id=asked.thread_id):
+        return KEPT_INSIDE
+    return HELD_INSIDE if await _place_is_held(context, asked) else None
 
 
 def _list_cards(title: str, paths: tuple[str, ...], hint: str | None) -> list[AdaptiveCard]:
@@ -100,6 +147,8 @@ async def _personal_cards(context: CommandContext, asked: TeamsInbound) -> list[
         user_id=asked.user_id,
         channel_id=asked.channel_id,
         default=context.runtime.deployment_default,
+        requester_org=_requester_org(asked),
+        channel_shared=_channel_shared(asked),
         thread_id=asked.thread_id if asked.thread_id != asked.channel_id else None,
     )
     if agent is None:
@@ -123,8 +172,8 @@ async def _personal_cards(context: CommandContext, asked: TeamsInbound) -> list[
 async def _memory_card(context: CommandContext) -> AdaptiveCard | list[AdaptiveCard]:
     runtime, path = context.runtime, context.args
     asked = context.asked_in or context.inbound
-    if await _kept_inside(context, asked):
-        return _card(KEPT_INSIDE)
+    if (kept := await _kept_inside(context, asked)) is not None:
+        return _card(kept)
     if parse_memory_args(path).kind not in ("shared_list", "shared_show"):
         return await _personal_cards(context, asked)
     resolved = await get_channel_memory_store(
@@ -135,6 +184,8 @@ async def _memory_card(context: CommandContext) -> AdaptiveCard | list[AdaptiveC
         user_id=asked.user_id,
         channel_id=asked.channel_id,
         default=runtime.deployment_default,
+        requester_org=_requester_org(asked),
+        channel_shared=_channel_shared(asked),
         # A plain 1:1 chat is its own thread; only a post or a setup conversation is one.
         thread_id=asked.thread_id if asked.thread_id != asked.channel_id else None,
     )
