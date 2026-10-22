@@ -140,15 +140,37 @@ def scrub_mount_echo(value: Object, tokens: set[RedactedCredential]) -> Object:
     return result
 
 
+# Diagnostic paths name only these schema keys; any other key (which model
+# output can choose, even a credential) renders as "<key>".
+_SCHEMA_KEYS = frozenset(
+    {
+        "interaction",
+        "environment",
+        "network",
+        "allowlist",
+        "transform",
+        "steps",
+        "tools",
+        "headers",
+        "sources",
+        "arguments",
+        "content",
+        "result",
+        "agent_config",
+    }
+)
+
+
 def transform_paths(value: JsonValue, path: str = "$", *, in_network: bool = False) -> list[str]:
-    """Key paths of network transforms (presence only, for diagnostics)."""
+    """Redacted key paths of network transforms (presence only, for diagnostics)."""
     found: list[str] = []
     if isinstance(value, dict):
         if in_network and "transform" in value:
             found.append(path + ".transform")
         for key, child in value.items():
+            name = key if key in _SCHEMA_KEYS else "<key>"
             found += transform_paths(
-                child, f"{path}.{key}", in_network=in_network or key == "network"
+                child, f"{path}.{name}", in_network=in_network or key == "network"
             )
     elif isinstance(value, list):
         for index, child in enumerate(value):
@@ -164,14 +186,15 @@ def checked_storage_response(
         return value
     known = tokens or set()
     value = scrub_mount_echo(value, known)
-    if network_transform_present(value):
-        _refuse_transform(",".join(transform_paths(value)), "outside_mount_location")
-    # The token anywhere else (model output, a tool result, another field) is a
-    # leak: check decoded values and the re-encoded bytes of the scrubbed payload.
+    # The token anywhere else (model output, a tool result, another field, a
+    # key) is a leak: check decoded keys/values and the re-encoded bytes of the
+    # scrubbed payload FIRST, before any diagnostic path is built or logged.
     encoded = json.dumps(value).encode()
     if any(contains_secret(value, t) or t.encode() in encoded for t in known):
         log.warning("gemini mount token echo refused: reason=token_outside_mount_location")
         raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
+    if network_transform_present(value):
+        _refuse_transform(",".join(transform_paths(value)), "outside_mount_location")
     return value
 
 
