@@ -43,6 +43,7 @@ from mux.contracts.resources import (
 )
 from mux.drivers.gemini.bundles import inline_files, skill_sources, target_path, validate_targets
 from mux.drivers.gemini.mcp_auth import (
+    LEGACY_SERVER_NAME,
     GCSSecretResolver,
     MCPSecretResolver,
     authenticated_template,
@@ -884,9 +885,20 @@ class GeminiEvents(Base):
             expected = self._mcp_request(records, scope, record.spec)
             agent = records.agents[record.spec.agent.id]
             connections = agent.spec.mcp_servers or ()
-            validate_intent(
-                record.request, expected, connections, enabled=self._mcp_secrets is not None
-            )
+            try:
+                validate_intent(
+                    record.request, expected, connections, enabled=self._mcp_secrets is not None
+                )
+            except UnsupportedCapability as exc:
+                if exc.missing != (LEGACY_SERVER_NAME,):
+                    raise
+                raise ContinuityLost(
+                    record.session.binding.id,
+                    (
+                        "This Gemini conversation was saved with an MCP server name Gemini "
+                        "no longer accepts (mcp_server_name); start a new thread.",
+                    ),
+                ) from None
             prior = records.sends.get((*owner(scope), key))
             if prior is not None:
                 if prior[0] != scope.principal_id:
