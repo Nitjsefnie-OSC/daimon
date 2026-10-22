@@ -82,7 +82,7 @@ The full description is [docs/mux.md](../../docs/mux.md). Tests:
 `uv run pytest packages/mux`.
 
 OpenAI probe holds can be proposed for reconciliation by the host's offline
-`daimon.testing.conformance.usage_reconciliation` command using captured Admin Usage/Costs
+`mux.testing.conformance.usage_reconciliation` command using captured Admin Usage/Costs
 exports. Only an externally audited isolated project/day window with one run and
 finalized billing qualifies. Unknown or mixed attribution keeps the hold. The
 captured effective requests must cover the full project, and billed line-item
@@ -122,7 +122,7 @@ The C12 conformance fixture requires a host accounting evidence hook with actual
 usage rows, Decimal ledger amounts, correction totals and rollback/restart facts;
 a transport without that hook remains pending for host billing certification.
 
-`daimon.testing.conformance.budget.BudgetGuard` provides standalone `reserve`/`settle` spend
+`mux.testing.conformance.budget.BudgetGuard` provides standalone `reserve`/`settle` spend
 receipts for authorized manual probes. It requires an explicitly initialized,
 pinned ledger with checkpoint and retained sequence lock, and refuses past 80%
 of provider/total caps. It imports no recorder or provider SDK.
@@ -132,7 +132,7 @@ native version ID, omitting the skills beta header on that request. The ordinary
 pinned-version port and generic recovery download keep their existing SDK requests. Both paths enforce the same
 host-provided scope and skill grant before I/O.
 
-`daimon.testing.conformance.budget` provides standalone manual budget admission and spend
+`mux.testing.conformance.budget` provides standalone manual budget admission and spend
 receipts without recorder or SDK imports. Its pinned ledger, checkpoint and
 stable sequence lock refuse reset/rollback attempts. Authorized operators supply
 reviewed model prices and enforce token bounds across the whole probe. Admission
@@ -151,14 +151,14 @@ output $2.50 per million tokens. Its flat price schema cannot select a tier per
 request, so shorter prompts are overestimated. See the official
 [pricing table](https://platform.claude.com/docs/en/about-claude/pricing#model-pricing).
 
-`daimon.testing.conformance.recording` retains only normalized mux events and request
+`mux.testing.conformance.recording` retains only normalized mux events and request
 metadata, excluding raw HTTP bodies, body values and opaque native provenance.
 Tool/action argument mappings become a fixed omission sentinel; export and replay
 refuse arbitrary mappings outside the closed normalized payload schema.
 An offline event fake re-runs fixture checks with the same credential audit;
 unsupported opaque event content refuses recording. Native codec replay is
 outside this format. `live_probe.run_probe` optionally combines reservation,
-callback, settlement and normalized export. See `../testing/docs/conformance/README.md`.
+callback, settlement and normalized export. See `docs/conformance/README.md`.
 
 ### Anthropic turn event translation
 
@@ -286,7 +286,7 @@ The native session-resources extension adds lazy `walk` and identity-returning
 the first `.env` mount without fetching later pages and records the one add
 response identity without a retrieve. Session and file grants are checked before I/O.
 OpenAI's opt-in offline conformance registration lives in
-`daimon.testing.drivers.openai.conformance`. It exercises the actual pinned SDK and driver
+`mux.testing.drivers.openai.conformance`. It exercises the actual pinned SDK and driver
 over synthetic HTTP/SSE replies, with fresh state per shared fixture. Six probes
 pass; twelve declare typed pending dependencies or unsupported capabilities.
 Broken driver variants must fail shared fixture checks. Registration adds no
@@ -382,7 +382,7 @@ spend ledger. It records the offline C-matrix separately from its narrow SDK
 smoke and cannot issue a full live certificate. Live mode uses the pinned key
 file and reviewed shared-ledger budget configuration ($30 allocation, $24 stop).
 It requires exactly `gemini-3.5-flash-lite` before reading a key or creating a client.
-See `../testing/docs/drivers/gemini/LIVE-CERT.md` for the prepared command and remaining gates.
+See `docs/drivers/gemini/LIVE-CERT.md` for the prepared command and remaining gates.
 MCP repository binding and vault summaries use the verified tenant/account scope
 and an exact account/agent-derived vault-name grant. Repository writes retain
 create-before-commit, compensation and old-credential revocation ordering.
@@ -405,7 +405,7 @@ configuration snapshot backfill, including null channel and thread metadata.
 
 ### Default capability conformance
 
-The supplementary F1 scenario in `daimon.testing.conformance.default_capability` provisions
+The supplementary F1 scenario in `mux.testing.conformance.default_capability` provisions
 the authored Daimon default's eleven skill bundles and immutable pins, mapped
 builtin tools and reserved `daimon-mcp` attachment. One scripted turn loads the
 pinned file-handling skill, invokes the real read-only `describe_agent` and
@@ -421,7 +421,7 @@ typed PENDING before provider I/O. `atomic_revision_pin=False` provisions withou
 a native session revision precondition and adds an explicit capability gap to a
 passing result; immutable skill pins remain mandatory. Replay checks pairings
 and recorded results, while free-form tool arguments remain omitted. See
-`../testing/docs/conformance/README.md` for the contract and offline reproduction command.
+`docs/conformance/README.md` for the contract and offline reproduction command.
 dispatch. Responder identity uses `anthropic.session_reads@1` with the authorized
 row's tenant/account scope, retaining the SDK response for configuration snapshot
 backfill, including null channel and thread metadata, without binding projection
@@ -438,7 +438,7 @@ Gemini's supplementary F1 default-capability adapter is replay-only and returns
 typed PENDING before provisioning until an authorized GCS bundle publisher and
 authenticated MCP/session adapters are supplied. All eleven full bundles have
 offline GCS compilation evidence; that does not certify a live default. See
-`../testing/docs/drivers/gemini/DEFAULT-CAPABILITY.md` for the explicit adapter entry.
+`docs/drivers/gemini/DEFAULT-CAPABILITY.md` for the explicit adapter entry.
 
 Gemini F1 maps bash, read, edit, grep, glob and write through its native
 `code_execution` tool. Native scripted records exercise each route in normalized
@@ -449,14 +449,14 @@ The Gemini live smoke pins `gemini-3.8-flash` and advances to the two reviewed
 Flash fallbacks only after a definite create HTTP 503. Separate reservations,
 fallback receipts and per-response usage counters preserve failed holds and
 settle known cumulative usage once. The moving alias remains estimated until
-its resolved tariff is verified. See `../testing/docs/drivers/gemini/PRICING.md` and
+its resolved tariff is verified. See `docs/drivers/gemini/PRICING.md` and
 `LIVE-CERT.md`; MockTransport preparation reads no real key.
 ### Offline Anthropic C01–C18 registration
 
 The test adapter in `tests/drivers/anthropic/conformance_adapter.py` explicitly
 registers `anthropic.offline` with the shared conformance `Registry`. It creates
 fresh, unmodified `AnthropicManagedAgents` drivers using the real Anthropic SDK
-and `daimon.testing.ma_transport.ScriptedTransport`. The adapter stays in the
+and `mux.testing.drivers.anthropic.ma_transport.ScriptedTransport`. The adapter stays in the
 test tree so production mux does not depend on `daimon.testing`. It does not
 load credentials, discover providers or fall back to a network transport.
 
@@ -497,14 +497,14 @@ reconciliation appends a new receipt and preserves the full ledger history.
 Anthropic MA settlement requires a session allowance and measured runtime;
 missing or empty measurements retain the hold. Known request bounds still
 detect overruns when other usage is missing and block subsequent dispatch.
-See `../testing/docs/conformance/README.md` for the offline settlement and approval API.
+See `docs/conformance/README.md` for the offline settlement and approval API.
 
 ### OpenAI session resource controls
 
 The opt-in OpenAI driver accepts driver-owned `SessionControls` for an explicit
 hosted container size and a strictly positive integer USD-cent session spend
 limit. Omitted controls retain the existing provider/template defaults and request
-bytes. The [driver README](../testing/docs/drivers/openai/README.md) records the official
+bytes. The [driver README](docs/drivers/openai/README.md) records the official
 2026-10-10 protocol audit, SDK binding boundary, nullable usage and separate Admin
 cost-accounting requirements. These controls do not register a host backend.
 
@@ -752,7 +752,7 @@ The explicit Gemini `offline_sdk_adapter` component proves the unchanged
 C06/C07 cancellation and usage oracles through actual SDK request/response bytes.
 It retains C08/C09 refusals, declares other component envelopes PENDING and leaves
 the standard offline matrix unchanged. No live settlement or host factory is
-installed. See [SDK conformance component](../testing/docs/drivers/gemini/CONFORMANCE-SDK.md).
+installed. See [SDK conformance component](docs/drivers/gemini/CONFORMANCE-SDK.md).
 The host can register a deployment constructor through
 `daimon.core.turn.runtimes.register_channel_runtime(profile, factory)`. The factory
 receives `ProviderPreparationRequest` only when the selected provider preparer
@@ -776,7 +776,7 @@ pins after publication. The host owns authorized GCS publication/access and
 retention; no publisher or credentials are selected implicitly. Without that
 adapter, binary/oversize bundles refuse `skill_bundle_gcs_deployment`; normal
 text bundles retain inline mounts. See
-[the capability notes](../testing/docs/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
+[the capability notes](docs/drivers/gemini/DEFAULT-CAPABILITY.md) for limits and
 offline evidence. A scripted publisher does not certify a live full default.
 
 The Gemini F2 offline proof retains the full default skill bundle and maps the
@@ -837,7 +837,7 @@ token/runtime bound; disjoint complete native evidence settles each claimed
 cell exactly once, using decimal precision 80 from measurement through totals.
 Terminal closure releases never-started cells and retains
 unknown usage as held. Runner adoption and native spending controls remain
-separate from this offline API. See the [column admission contract](../testing/docs/conformance/README.md#whole-column-admission).
+separate from this offline API. See the [column admission contract](docs/conformance/README.md#whole-column-admission).
 
 Gemini resource administration can explicitly select
 `resource_catalog_enabled=True` with an owned `AgentCatalogTransport`. The
@@ -851,7 +851,7 @@ requires its explicit default-false capability and the same enabled agent
 adapter with exact Gemini profile/workspace routing; the guard remains effective
 when off or mismatched. Independent readback uses the public verification edge.
 Named-agent turns refuse the inline session plan. Whole D14/D5 cells remain
-PENDING. See [resource catalog capability](../testing/docs/drivers/gemini/RESOURCE-CATALOG.md).
+PENDING. See [resource catalog capability](docs/drivers/gemini/RESOURCE-CATALOG.md).
 
 Manual probes may use `BudgetGuard.reserve_with_hold(..., minimum_hold_usd=Decimal(...))`
 to reserve the larger of a priced token/runtime bound and an explicit cash
@@ -885,7 +885,7 @@ runtime, manifest or credential is discovered for an unconfigured channel.
 Explicit OpenAI deployment transports refuse ambient `OPENAI_*` overrides by
 name before SDK construction and copies. They retain the selected credential,
 project and origin, with request-owned HTTP clients using explicit TLS roots and
-no environment proxies; see [the driver policy](../testing/docs/drivers/openai/README.md).
+no environment proxies; see [the driver policy](docs/drivers/openai/README.md).
 The private Gemini deployment constructor refuses ambient `GOOGLE_`/`GEMINI_`
 settings and TLS/proxy overrides by name before SDK or HTTP allocation. Its
 explicit key uses the Developer API with owned sync/async HTTP clients, an
@@ -905,7 +905,7 @@ Gemini native credential offers have a separate, default-off operator adapter
 and MCP registration edge. They verify the authorized resource scope, durable
 caller/binding/catalog identity and native target readback before posting shared
 cards. Production native origin/registry wiring and timed expiry remain pending;
-see `../testing/docs/drivers/gemini/NATIVE-CREDENTIAL-TARGET.md`.
+see `docs/drivers/gemini/NATIVE-CREDENTIAL-TARGET.md`.
 
 ### Tool-only post history checks
 
@@ -947,16 +947,16 @@ retain mandatory native usage reconciliation.
 Explicit Gemini conformance recovery and inline-skill preparation hooks have
 actual-SDK offline crash and request-byte proofs. They preserve unknown delivery
 and required-action occupancy; C04/C11 remain typed PENDING in the shared matrix.
-See [driver conformance hooks](../testing/docs/drivers/gemini/CONFORMANCE-HOOKS.md). These hooks
+See [driver conformance hooks](docs/drivers/gemini/CONFORMANCE-HOOKS.md). These hooks
 are not installed by the host factory and perform no live key discovery.
 OpenAI also provides the explicit
-`daimon.testing.drivers.openai.conformance_sdk.offline_sdk_adapter()` component. Its fixed
+`mux.testing.drivers.openai.conformance_sdk.offline_sdk_adapter()` component. Its fixed
 SDK MockTransport executes the unchanged C06/C07/C09 oracles and tests C08
 conditional tool/file-mount refusal without update writes. Cancellation EOF
 retains occupancy, synthetic usage corrections survive memory-outbox restart,
 and binary artifacts/shared-vault retention use independent HTTP effects.
 This component changes neither the standard registry nor live certification;
-see [its scope and mutation controls](../testing/docs/drivers/openai/CONFORMANCE-SDK.md).
+see [its scope and mutation controls](docs/drivers/openai/CONFORMANCE-SDK.md).
 
 OpenAI host tests use the shared isolated SDK factory for direct clients and
 inject it into offline C04/component and F1 replay factories. The testing package
@@ -969,7 +969,7 @@ line, and fresh evidence output before key access. Offline SDK proofs retain
 native cancel/EOF occupancy, ambiguous-delivery recovery, all fenced store
 boundaries and monotonic terminal settlement. Historical certificates and
 standard pending declarations are unchanged; see
-[money and scenario boundaries](../testing/docs/drivers/gemini/LIVE-ROUND.md).
+[money and scenario boundaries](docs/drivers/gemini/LIVE-ROUND.md).
 
 
 Explicit native credential offers share one profile-bound host adapter and MCP grant
@@ -981,15 +981,35 @@ and remain disabled without an operator delivery grant.
 
 Product modules cannot import test or conformance harnesses. The repository's
 import-linter contract checks direct and transitive imports from core, adapters
-and mux outside its conformance package. Boundary tests run the configured
+and mux outside `mux.testing`. Boundary tests run the configured
 checker against reintroduced imports; the mux initializer and new top-level
 module inventory are covered too. Harness consumers belong in daimon-testing.
 
-Conformance and manual live-probe helpers now live in `daimon.testing.conformance`,
-`daimon.testing.drivers` and `daimon.testing.adapters`, outside the runtime wheels.
-The legacy mux conformance package is removed; its tests, saved receipts and
-reference docs are under `packages/testing` outside the wheel package. CI also
-checks built workspace wheels for test modules, QA helpers and receipt files.
+## Test doubles: `mux.testing`
+
+`mux.testing` ships in the `daimon-mux` wheel and is never imported by product
+code (an import-linter contract enforces it). It holds the offline conformance
+runner and budget guard (`mux.testing.conformance`), the Gemini fakes and live
+probes (`mux.testing.drivers.gemini`), the OpenAI offline SDK and conformance
+adapters (`mux.testing.drivers.openai`), the Anthropic Managed Agents fakes and
+scripted transport (`mux.testing.drivers.anthropic`) and the isolated SDK client
+builders (`mux.testing.isolated_sdk`). Only `mux.testing.drivers.<provider>` and
+`mux.testing.isolated_sdk` may import a provider SDK. Host-specific doubles (the
+database, tenant factories, platform surfaces) stay in `daimon.testing`.
+
+The mux tests import nothing from `daimon`. CI runs them in an environment that
+holds only `daimon-mux`, its provider extras and the test tools (the
+`mux-standalone` job). To reproduce that locally, install the wheel into a clean
+environment and point pytest at the standalone settings:
+
+```bash
+python -m pytest -c packages/mux/pytest-standalone.ini --rootdir . packages/mux/tests
+```
+
+Saved receipts, replay tapes and recordings live in `tests/fixtures`; the
+reference docs for the conformance kit and each driver are under `docs/`. CI
+also checks built workspace wheels for test modules, QA helpers and receipt
+files; `mux/testing/` is the one wheel directory exempt from the helper-name rule.
 
 ### Implicit execution authority
 

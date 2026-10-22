@@ -60,9 +60,10 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
         make_tenant,
         make_thread_session,
     )
-    from daimon.testing.ma import MARouter, list_response
-    from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-    from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+    from daimon.testing.ma_models import ma_agent, ma_environment
+    from mux.testing.drivers.anthropic.ma import MARouter, list_response
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
     from sqlalchemy.ext.asyncio import async_sessionmaker
 
     sessions = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
@@ -384,7 +385,7 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
         fingerprint_mutable,
     )
     from daimon.core.stores.thread_sessions import record_snapshot
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
     payload["tools"][0]["configs"] = []

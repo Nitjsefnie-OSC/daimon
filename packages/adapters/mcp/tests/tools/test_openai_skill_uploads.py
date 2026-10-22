@@ -52,11 +52,11 @@ class _OpenAIHost(NeutralResourceHost):
     """A real, scoped host whose catalog agent and Add edge are recorded stand-ins."""
 
     def __init__(self, sessions: async_sessionmaker[AsyncSession], scope: Scope) -> None:
-        from daimon.testing.isolated_sdk import build_async_openai
         from mux.drivers.openai import OpenAIDriver
         from mux.drivers.openai.transport import SDKTransport
         from mux.drivers.openai.turn import MemoryRecoveryJournal
         from mux.drivers.openai.usage import MemoryUsageRevisions
+        from mux.testing.isolated_sdk import build_async_openai
 
         super().__init__(
             OpenAIDriver(

@@ -22,10 +22,10 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_tenant,
 )
-from daimon.testing.isolated_sdk import build_async_anthropic
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ThreadRef
 from mux.contracts.resources import ProviderBinding
+from mux.testing.isolated_sdk import build_async_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

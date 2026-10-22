@@ -1478,7 +1478,7 @@ async def test_runtime_installs_factory_only_with_opted_in_owner_bindings(
 
     from daimon.adapters.discord import runtime as runtime_module
     from daimon.core.config import Settings
-    from daimon.testing.ma import build_stub_anthropic
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
     settings = Settings.model_validate(
         {
@@ -1676,7 +1676,7 @@ async def test_runtime_binds_real_frozen_root_without_a_caller_permission_projec
     from daimon.core.turn.runtime_manifest import read_frozen_root
     from daimon.testing.db import build_test_engine
     from daimon.testing.factories import make_platform_principal
-    from daimon.testing.ma import build_stub_anthropic
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
     deps, prepared, _, intent, _, scope, _, _ = discord_frozen_root
     original, _ = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
@@ -1869,7 +1869,7 @@ async def test_runtime_constructs_one_scoped_fleet_owner_and_drains_before_clien
     from daimon.core.config import Settings
     from daimon.core.fleet_orchestration import HostFleetPorts
     from daimon.core.pricing import MODEL_PRICING
-    from daimon.testing.ma import build_stub_anthropic
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
     settings = Settings.model_validate(
         {
@@ -1995,7 +1995,7 @@ async def test_runtime_preserves_falsey_injected_fleet_service_ownership(
     from daimon.adapters.discord import runtime as runtime_module
     from daimon.core.config import Settings
     from daimon.core.fleet_orchestration import HostFleetPorts
-    from daimon.testing.ma import build_stub_anthropic
+    from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 
     class ExplicitOwner(FleetOrchestrator):
         def __bool__(self):
@@ -2036,8 +2036,8 @@ async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
     from daimon.core.stores import mux_state
     from daimon.core.turn.run import run_prepared_turn
     from daimon.testing.db import build_test_engine
-    from daimon.testing.ma import sse_response
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma import sse_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     from packages.core.tests.turn.conftest import (
         make_agent_message,
@@ -2090,7 +2090,7 @@ async def test_normal_runtime_no_grant_preserves_sealed_and_final_delivery(
     original_routes = transport.router.routes
 
     def accept_input(request, match):
-        from daimon.testing.ma import send_events_response
+        from mux.testing.drivers.anthropic.ma import send_events_response
 
         sent.set()
         return send_events_response()

@@ -378,11 +378,11 @@ async def test_cross_backend_review_gate_uses_real_sdk_dispatch_and_journal(
     from daimon.core.stores import mux_state
     from daimon.core.turn.openai_deployment import OpenAIDeployment
     from daimon.core.turn.runtimes import build_channel_runtime
-    from daimon.testing.isolated_sdk import build_async_openai
     from mux.contracts.config import ConfigRevision, resolve_default
     from mux.contracts.ids import ModelRef
     from mux.drivers.openai import deployment
     from mux.drivers.openai.transport import SDKTransport
+    from mux.testing.isolated_sdk import build_async_openai
 
     from .test_openai_conversation_worker import ConversationWire
 

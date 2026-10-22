@@ -51,7 +51,7 @@ async def test_runtime_path_fallback_honors_env_and_keeps_explicit_overrides(
     from daimon.core.turn.deps import build_turn_deps
     from daimon.core.turn.run import _turn_port_kwargs  # pyright: ignore[reportPrivateUsage]
     from daimon.testing.ma_models import ma_agent, ma_environment
-    from daimon.testing.ma_transport import ScriptedTransport
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
     monkeypatch.setenv("DAIMON_TURN__PATH", "mux")
     settings = MagicMock()

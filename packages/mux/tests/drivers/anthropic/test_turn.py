@@ -14,7 +14,6 @@ from anthropic.types.beta.sessions import (
     BetaManagedAgentsAgentToolResultEvent,
     BetaManagedAgentsUserCustomToolResultEvent,
 )
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
 from mux.contracts.actions import NativeInput, UserMessage, UserToolConfirmation, UserToolResult
 from mux.contracts.events import Event, TextPart
 from mux.contracts.extensions import ExtensionConfig
@@ -25,6 +24,7 @@ from mux.drivers.anthropic.normalize import EventNormalizer
 from mux.drivers.anthropic.resources._authorization import ResourceAuthorization
 from mux.drivers.anthropic.turn import AnthropicEvents
 from mux.errors import ProviderError, ScopeViolation, UnsupportedCapability
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 NOW = datetime(2026, 10, 9, tzinfo=UTC)
 SCOPE = Scope(

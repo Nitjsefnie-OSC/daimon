@@ -385,6 +385,47 @@ jobs:
           path: ${{ matrix.suite }}.xml
           if-no-files-found: ignore
 
+  # The mux tests against an environment that holds only daimon-mux, its provider
+  # extras and the test tools, so a stray `daimon` import in mux or its tests fails
+  # here. Versions come from uv.lock; nothing is resolved fresh.
+  mux-standalone:
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+      - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
+        with:
+          enable-cache: false
+      - name: build the mux-only environment
+        run: |
+          uv venv "$RUNNER_TEMP/mux-venv" --python 3.12
+          uv export --quiet --frozen --no-hashes --no-emit-workspace --package daimon-mux --all-extras \
+            --no-header -o "$RUNNER_TEMP/mux-requirements.txt"
+          uv export --quiet --frozen --no-hashes --no-emit-workspace --all-packages --all-extras --all-groups \
+            --no-header -o "$RUNNER_TEMP/lock-pins.txt"
+          uv build --package daimon-mux --wheel --out-dir "$RUNNER_TEMP/mux-wheel"
+          uv pip install --python "$RUNNER_TEMP/mux-venv/bin/python" \
+            -r "$RUNNER_TEMP/mux-requirements.txt" -c "$RUNNER_TEMP/lock-pins.txt" \
+            pytest pytest-asyncio pytest-xdist pyyaml
+          uv pip install --python "$RUNNER_TEMP/mux-venv/bin/python" --no-deps \
+            "$RUNNER_TEMP"/mux-wheel/daimon_mux-*.whl
+      - name: daimon is not importable and mux is the installed wheel
+        run: |
+          py="$RUNNER_TEMP/mux-venv/bin/python"
+          if "$py" -c "import daimon"; then echo "daimon is importable"; exit 1; fi
+          "$py" -c "import mux, mux.testing; assert 'site-packages' in mux.__file__, mux.__file__"
+      - name: pytest (mux only)
+        run: >-
+          "$RUNNER_TEMP/mux-venv/bin/python" -m pytest
+          -c packages/mux/pytest-standalone.ini --rootdir . packages/mux/tests
+          -n 4 --dist worksteal --durations=20 --junitxml=mux-standalone.xml
+      - uses: actions/upload-artifact@ea165f8d65b6e75b540449e92b4886f43607fa02 # v4
+        if: always()
+        with:
+          name: mux-standalone-junit
+          path: mux-standalone.xml
+          if-no-files-found: ignore
+
   pytest-notebook-host:
     runs-on: ubuntu-latest
     timeout-minutes: 15
@@ -578,7 +619,7 @@ jobs:
 
   deploy-gcp:
     name: Deploy to GCP (staging)
-    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-light, pytest-notebook-host, docker-publish-candidate]
+    needs: [lint, shard-check, pytest-db, pytest-discord, pytest-light, mux-standalone, pytest-notebook-host, docker-publish-candidate]
     # vars.GCP_WIF_PROVIDER doubles as the deploy switch: repository variables
     # don't propagate to forks/clones, so a repo with no GCP config skips this
     # job cleanly (green CI) instead of failing at the auth step. Operators

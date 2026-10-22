@@ -27,13 +27,13 @@ from daimon.core.turn.runtime_manifest import (
     read_preparation_counterpart,
 )
 from daimon.core.turn.runtimes import scope_channel_runtimes
-from daimon.testing.ma import MARouter, build_fake_anthropic
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import deps_for_pinned_mux
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ChannelRef, ModelRef, ResourceRef, Revision, Scope
 from mux.contracts.resources import Agent
 from mux.profiles import backend_selection
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
@@ -54,7 +54,7 @@ async def consent_request(owned, request):
     )
     environment = ma_environment(tenant_id=identity.tenant_id)
     if "execution_identity" in params:
-        from daimon.testing.ma_models import ma_model_config
+        from mux.testing.drivers.anthropic.ma_models import ma_model_config
 
         native = native.model_copy(
             update={

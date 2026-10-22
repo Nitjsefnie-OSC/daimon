@@ -18,11 +18,11 @@ from daimon.core.turn.gemini import PROFILE, GeminiTurnIO
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
-from daimon.testing.ma_transport import ScriptedTransport
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.drivers.gemini.transport import Object, OwnedStream
 from mux.errors import ProviderError
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 from pydantic import JsonValue
 
 from . import test_gemini_codec as codec

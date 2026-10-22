@@ -7,8 +7,8 @@ from collections.abc import AsyncIterator
 import httpx
 import pytest
 from daimon.core.turn.io import turn_io
-from daimon.testing import build_fake_anthropic
 from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from pydantic import JsonValue
 
 

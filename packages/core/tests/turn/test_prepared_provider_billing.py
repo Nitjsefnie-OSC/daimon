@@ -26,8 +26,7 @@ from daimon.core.turn.run import prepared_billing, run_prepared_turn_impl
 from daimon.core.turn.state import TurnState
 from daimon.core.usage_billing import ObservationBilled
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
+from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
 from mux.contracts.ids import ChannelRef, ResourceRef, ThreadRef
@@ -36,6 +35,8 @@ from mux.contracts.usage import UsageObservation
 from mux.errors import ScopeViolation
 from mux.state.memory import MemoryStateStore
 from mux.state.store import binding_slot
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_run_prepared_turn import _deps

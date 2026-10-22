@@ -9,6 +9,8 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - `DAIMON_TURN__PATH` defaults to `mux`, so turns run through the Events/Sessions ports. Set `DAIMON_TURN__PATH=legacy` to keep the previous path; an empty value now selects `mux`. `DAIMON_TURN__CHANNEL_BACKENDS` stays off by default, so channels with no backend configuration behave as before and configured channels are still not read. CI adds a legacy leg beside the mux leg.
 
+- Ship mux's offline test doubles and conformance kits as `mux.testing` inside `daimon-mux` (moved from `daimon.testing`), and run the mux tests in CI against an environment with only `daimon-mux` installed.
+
 - Fleet: whenever a worker is cancelled, the host logs why (`fleet.worker_cancel`, with a reason such as `shutdown`, `budget`, `usage_unavailable`, `run_deadline` or `terminal`), so a worker interrupted at send is no longer left without a cause.
 - Gemini agents need no per-agent setup: one tenant-wide template row in the provider runtime manifest (`"root_materialization": true`) serves every agent switched to Gemini. Each agent version's counterpart is published on its first turn and reused after that. Channel and agent rows now serve only their own kind of turn.
 
