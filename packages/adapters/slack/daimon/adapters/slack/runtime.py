@@ -24,7 +24,7 @@ from daimon.core.mcp_oauth import McpTokenProbe, probe_bearer_token
 from daimon.core.scope import DeploymentDefault
 from daimon.core.skills.rate_limit import SkillsRateLimitedTransport
 from daimon.core.turn.deps import TurnDeps, build_turn_deps
-from daimon.core.turn.errors import AdmissionDenialReason
+from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn_origin import ResponderAccount
@@ -81,7 +81,7 @@ _FOREIGN_REFUSALS: dict[AdmissionDenialReason, tuple[str | None, str]] = {
     "channel_budget_exceeded": (None, f"Ask {_HOST_PEOPLE} to raise it."),
     "invoker_not_allowed": (None, f"Ask {_HOST_PEOPLE} to add you."),
     "own_agents_only": (None, f"Ask {_HOST_PEOPLE} to pick one."),
-    "backend_unsupported": (None, f"Ask {_HOST_PEOPLE} to change or clear it."),
+    "backend_unsupported": (None, f"Ask {_HOST_PEOPLE} to fix the agent's model provider."),
     "writers_none": (None, f"Ask somewhere else, or ask {_HOST_PEOPLE}."),
 }
 
@@ -92,6 +92,8 @@ def admission_refusal_message(
     *,
     in_dm: bool = False,
     foreign: bool = False,
+    cause: BackendRefusalCause | None = None,
+    provider: str | None = None,
 ) -> str:
     """The shared admission refusal in Slack's nouns, naming this deployment's bot.
 
@@ -103,6 +105,8 @@ def admission_refusal_message(
         SLACK_FOREIGN_REFUSAL_NOUNS if foreign else SLACK_REFUSAL_NOUNS,
         bot_name=escape_mrkdwn(resolve_bot_display_name(settings)),
         in_dm=in_dm,
+        cause=cause,
+        provider=provider,
     )
     override = _FOREIGN_REFUSALS.get(reason) if foreign else None
     if override is None:

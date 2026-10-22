@@ -1181,6 +1181,29 @@ class AgentBackendSwitchInfo(BaseModel):
     summary: str
     declared_drops: tuple[str, ...] = Field(default=(), exclude_if=lambda value: not value)
     agent_settings: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    # This chat's channel pins its own provider, which outranks the agent's setting here.
+    channel_pin: str | None = Field(default=None, exclude_if=lambda value: value is None)
+
+
+async def _channel_pin_line(runtime: McpRuntime, origin: TurnOriginRow) -> str | None:
+    """Say so when this chat's channel pins a provider: the agent's switch won't apply there."""
+    from daimon.core.channel_backend import channel_ref, current_backend
+    from daimon.core.stores import mux_state
+    from daimon.core.turn.notices import provider_name
+
+    channel = channel_ref(origin.tenant_id, origin.platform, origin.parent_channel_id)
+    async with runtime.session_factory() as session:
+        pinned = await current_backend(session, channel)
+        if (
+            pinned is None
+            or await mux_state.config_origin(session, channel, pinned.local) != "channel"
+        ):
+            return None
+    model = f" ({pinned.model})" if pinned.model else ""
+    return (
+        f"This channel pins {provider_name(pinned.backend)}{model}, so this agent keeps "
+        "answering on that here until the channel's pin is cleared."
+    )
 
 
 async def _request_agent_backend_switch_impl(
@@ -1309,6 +1332,9 @@ async def _request_agent_backend_switch_impl(
                 "Model provider changed. New conversations with this agent use it; "
                 "existing threads keep their model."
             )
+        channel_pin = await _channel_pin_line(runtime, origin)
+        if channel_pin is not None:
+            summary = f"{summary} {channel_pin}"
         return AgentBackendSwitchInfo(
             status=status,
             agent_name=agent.name,
@@ -1327,6 +1353,7 @@ async def _request_agent_backend_switch_impl(
             agent_settings=settings_line(preview.target_settings)
             if preview.target_settings
             else None,
+            channel_pin=channel_pin,
         )
     except (DaimonError, ValidationError) as exc:
         raise ToolError(

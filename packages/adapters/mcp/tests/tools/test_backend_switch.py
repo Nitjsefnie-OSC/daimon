@@ -674,3 +674,48 @@ async def test_an_owner_may_not_ask_to_share_threads(active_chat):
             origin_context_id=str(origin.id),
             thread_mode="shared",
         )
+
+
+async def test_the_switch_says_when_this_channel_pins_its_own_provider(active_chat):
+    from daimon.core.channel_backend import (
+        channel_ref,
+        clear_channel_backend,
+        set_channel_backend,
+    )
+    from mux.contracts.config import BackendConfig
+
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    _without_own_tools(payload)
+    channel = channel_ref(origin.tenant_id, origin.platform, origin.parent_channel_id)
+    async with runtime.session_factory.begin() as session:
+        await set_channel_backend(
+            session, channel, BackendConfig(backend="openai", model="gpt-6-luna")
+        )
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+    )
+    assert preview.channel_pin == (
+        "This channel pins OpenAI (gpt-6-luna), so this agent keeps answering on that here"
+        " until the channel's pin is cleared."
+    )
+    assert preview.summary.endswith(preview.channel_pin)
+    async with runtime.session_factory.begin() as session:
+        await clear_channel_backend(session, channel)
+    gate()
+    agent()
+    cleared = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+    )
+    assert cleared.channel_pin is None and "pins" not in cleared.summary
+    assert "channel_pin" not in cleared.model_dump()
+    assert not trace.violations

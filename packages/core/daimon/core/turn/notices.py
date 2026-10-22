@@ -12,9 +12,11 @@ from daimon.core.errors import TurnError
 from daimon.core.github_app_session import GitHubTokenMintUnavailable
 from daimon.core.platform_words import Place, words_for
 from daimon.core.stores.domain import CHAT_PLATFORMS, ChatPlatform
-from daimon.core.turn.errors import AdmissionDenialReason
+from daimon.core.turn.errors import AdmissionDenialReason, BackendRefusalCause
 from daimon.core.turn.state import ToolUseBlock, TurnState
 from daimon.core.turn.termination import TerminationReason
+from mux.profiles import INLINE_REUSE, MANAGED_AGENTS, PERSISTENT_WORKSPACE
+from mux.profiles.selfhosted import LOOP
 
 __all__ = [
     "RefusalNouns",
@@ -212,10 +214,38 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "writers_none": _COPY[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
     "client_requester": _Copy("I only answer in the channel we share.", "Mention me there."),
     "backend_unsupported": _Copy(
-        "This channel uses a model provider that isn't available.",
-        "Ask an admin to change or clear it.",
+        "This agent's model provider isn't available here right now.",
+        "Ask {who} to check which provider {agent_mid} uses.",
     ),
 }
+# A provider refusal names its real cause and the chat words that fix it.
+_BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
+    "channel_pin": _Copy(
+        "This channel is pinned to {provider}, which can't run here.",
+        "Ask {who} to clear this channel's pin, so {agent_mid} answers on its own provider.",
+    ),
+    "provider_not_allowed": _Copy(
+        "{Provider} isn't turned on for this {scope}.",
+        'Ask {who} to turn it on, or to say "switch {agent_mid} to Anthropic".',
+    ),
+    "agent_backend": _Copy(
+        "{agent} runs on {provider}, which isn't set up here yet.",
+        'Ask {who} to say "switch {agent_mid} to Anthropic", or to finish setting up {provider}.',
+    ),
+}
+_PROVIDER_NAMES = {
+    MANAGED_AGENTS.provider: "Anthropic",
+    PERSISTENT_WORKSPACE.provider: "OpenAI",
+    INLINE_REUSE.provider: "Gemini",
+    LOOP.provider: "a self-hosted model",
+}
+
+
+def provider_name(provider: str | None) -> str:
+    """How copy names a model provider: "OpenAI", or "a model provider" when unknown."""
+    return _PROVIDER_NAMES.get(provider or "", "a model provider")
+
+
 _DM_REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "runs_elsewhere": _Copy("{agent} only works in other channels.", "Ask it there."),
     "own_agents_only": _Copy("This channel only uses its own agents.", "Ask in that channel."),
@@ -232,27 +262,33 @@ def admission_refusal_text(
     bot_name: str | None = None,
     agent_name: str | None = None,
     in_dm: bool = False,
+    cause: BackendRefusalCause | None = None,
+    provider: str | None = None,
 ) -> str:
     """Two approved lines for an admission refusal.
 
     `bot_name` remains accepted for adapter callers; a pinned agent's name
     must come from `agent_name`, not the deployment bot's display name.
+    A `backend_unsupported` refusal with a `cause` names it and its fix.
     """
     copy = (_DM_REFUSALS.get(reason) if in_dm else None) or _REFUSALS[reason]
+    if reason == "backend_unsupported" and cause is not None:
+        copy = _BACKEND_REFUSALS[cause]
     agent = agent_name or "This agent"
-    return "\n\n".join(
-        (
-            copy.title.format(agent=agent, setup=nouns.setup),
-            copy.next_step.format(
-                agent=agent,
-                setup=nouns.setup,
-                billing=nouns.billing,
-                verb=nouns.verb,
-                who=nouns.who,
-                Who=_capitalised(nouns.who),
-            ),
-        )
-    )
+    named = provider_name(provider)
+    words = {
+        "agent": agent,
+        "agent_mid": agent_name or "this agent",
+        "provider": named,
+        "Provider": _capitalised(named),
+        "scope": nouns.scope,
+        "setup": nouns.setup,
+        "billing": nouns.billing,
+        "verb": nouns.verb,
+        "who": nouns.who,
+        "Who": _capitalised(nouns.who),
+    }
+    return "\n\n".join((copy.title.format(**words), copy.next_step.format(**words)))
 
 
 @dataclass(frozen=True, slots=True)

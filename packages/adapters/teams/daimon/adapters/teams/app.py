@@ -334,7 +334,9 @@ def _admission_refusal(
     # A protected channel hears nothing, a refusal included.
     if err.reason == "writers_none":
         return None
-    return admission_refusal_text(err.reason, nouns, in_dm=in_dm)
+    return admission_refusal_text(
+        err.reason, nouns, in_dm=in_dm, cause=err.cause, provider=err.provider
+    )
 
 
 async def _controls_after(sweep: asyncio.Task[None], lifecycle: TeamsTurnLifecycle) -> None:

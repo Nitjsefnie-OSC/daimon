@@ -300,3 +300,51 @@ def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:
     )
     assert channel == "team-020-analyst only works in other channels.\n\nAsk it there."
     assert dm == "team-020-analyst only works in other channels.\n\nAsk it there."
+
+
+@pytest.mark.parametrize(
+    ("cause", "provider", "title", "fix"),
+    [
+        (
+            "channel_pin",
+            "openai",
+            "This channel is pinned to OpenAI, which can't run here.",
+            "Ask an admin to clear this channel's pin, so churn-explorer answers on its own"
+            " provider.",
+        ),
+        (
+            "provider_not_allowed",
+            "gemini",
+            "Gemini isn't turned on for this server.",
+            'Ask an admin to turn it on, or to say "switch churn-explorer to Anthropic".',
+        ),
+        (
+            "agent_backend",
+            "gemini",
+            "churn-explorer runs on Gemini, which isn't set up here yet.",
+            'Ask an admin to say "switch churn-explorer to Anthropic", or to finish setting up'
+            " Gemini.",
+        ),
+    ],
+)
+def test_a_provider_refusal_names_its_real_cause_and_the_chat_fix(cause, provider, title, fix):
+    rendered = admission_refusal_text(
+        "backend_unsupported", _NOUNS, agent_name="churn-explorer", cause=cause, provider=provider
+    )
+    assert rendered == f"{title}\n\n{fix}"
+
+
+def test_an_unattributed_provider_refusal_never_blames_the_channel():
+    rendered = admission_refusal_text("backend_unsupported", _NOUNS)
+    assert "channel" not in rendered
+    assert rendered == (
+        "This agent's model provider isn't available here right now.\n\n"
+        "Ask an admin to check which provider this agent uses."
+    )
+
+
+def test_an_unknown_provider_is_named_generically():
+    rendered = admission_refusal_text(
+        "backend_unsupported", _NOUNS, cause="agent_backend", provider=None
+    )
+    assert rendered.startswith("This agent runs on a model provider,")

@@ -101,6 +101,7 @@ async def test_real_admission_refuses_even_a_reader_accepting_the_native_compone
     }
     assert any(cause["type"] == "UnsupportedCapability" for cause in diagnostics[-1]["causes"])
     assert "private" not in str(refused.value)
+    assert (refused.value.cause, refused.value.provider) == ("agent_backend", provider)
     async with host.sessions() as db:
         assert await mux_state.latest_config_revision(db, REVISION.channel) is None
         assert await mux_state.next_config_local(db, REVISION.channel) == 1
@@ -178,8 +179,13 @@ async def test_agent_preference_owner_refusal_logs_its_stage_and_cause(
         raise channel_backend.AgentBackendRefused("source_unavailable")
 
     monkeypatch.setattr(channel_backend, owner, refuse)
-    with capture_logs() as logs, pytest.raises(AdmissionDenied, match="backend_unsupported"):
+    with (
+        capture_logs() as logs,
+        pytest.raises(AdmissionDenied, match="backend_unsupported") as refused,
+    ):
         await host.admit("new-thread")
+    # The copy names the agent's backend as the cause, not the channel.
+    assert refused.value.cause == "agent_backend"
     diagnostic = next(row for row in logs if row["event"] == "turn.backend_unsupported")
     assert diagnostic["stage"] == (
         "source_agent_lookup" if owner == "load_backend_agent" else "agent_preference"
@@ -198,8 +204,13 @@ async def test_reauthorization_logs_a_removed_workspace_backend(selector_host):
     async with host.sessions.begin() as db:
         await set_access_policy(db, tenant_id=TENANT, policy=TenantAccessPolicy())
     before = (len(host.wire.requests), len(host.calls))
-    with capture_logs() as logs, pytest.raises(AdmissionDenied, match="backend_unsupported"):
+    with (
+        capture_logs() as logs,
+        pytest.raises(AdmissionDenied, match="backend_unsupported") as refused,
+    ):
         await reauthorize(host.deps, admission)
+    assert refused.value.cause == "provider_not_allowed"
+    assert refused.value.provider == admission.backend_revision.backend
     assert any(row.get("stage") == "workspace_policy" for row in logs)
     assert any(row.get("stage") == "reauthorize_policy" for row in logs)
     assert (len(host.wire.requests), len(host.calls)) == before
