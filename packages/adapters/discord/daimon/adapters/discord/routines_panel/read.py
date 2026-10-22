@@ -10,6 +10,7 @@ from daimon.adapters.discord.routines_panel.state import (
     derive_state,
     picker_label,
 )
+from daimon.core.config import RecruitmentSettings
 from daimon.core.defaults.ma_index import list_agents_by_tenant
 from daimon.core.routines import routine_for_reader
 from daimon.core.stores.routines import list_routines_for_tenant
@@ -24,6 +25,7 @@ async def load_guild_routines(
     *,
     tenant_id: uuid.UUID,
     viewer_user_id: str | None = None,
+    recruitment: RecruitmentSettings,
 ) -> tuple[list[RoutineEntry], int, dict[str, str]]:
     """Fetch routines + tenant agents; sort, cap, and decorate per entry.
 
@@ -31,7 +33,7 @@ async def load_guild_routines(
     covers every agent in the tenant (not just those referenced) so the caller
     can render fallbacks without a per-row LIST.
     """
-    rows = await list_routines_for_tenant(session, tenant_id=tenant_id)
+    rows = await list_routines_for_tenant(session, tenant_id=tenant_id, recruitment=recruitment)
     agents = await list_agents_by_tenant(anthropic, tenant_id=tenant_id)
     agent_name_map: dict[str, str] = {}
     for agent in agents:

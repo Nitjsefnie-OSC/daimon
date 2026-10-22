@@ -98,6 +98,7 @@ from daimon.core.turn.posture import (
     ExemptReason,
 )
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.run import (
     _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
     _turn_port_kwargs,  # pyright: ignore[reportPrivateUsage]
@@ -167,6 +168,7 @@ async def run_turn(
     agent_id: str,
     environment_id: str,
     trigger_message: str,
+    privacy: TurnPrivacy,
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
     account_id: uuid.UUID | None = None,
@@ -188,6 +190,7 @@ async def run_turn(
     model_override: str | None = None,
     sandbox: RoutineSandbox | None = None,
 ) -> str:
+    privacy.check()
     observation = current_outcome.get()
     owns_observation = observation is None
     if observation is None and session_factory is not None:
@@ -198,6 +201,7 @@ async def run_turn(
             agent_id=agent_id,
             environment_id=environment_id,
             trigger_message=trigger_message,
+            privacy=privacy,
             origin=origin,
             mcp_settings=mcp_settings,
             account_id=account_id,
@@ -229,6 +233,7 @@ async def run_turn(
                 agent_id=agent_id,
                 environment_id=environment_id,
                 trigger_message=trigger_message,
+                privacy=privacy,
                 origin=origin,
                 mcp_settings=mcp_settings,
                 account_id=account_id,
@@ -264,6 +269,7 @@ async def run_turn_impl(
     agent_id: str,
     environment_id: str,
     trigger_message: str,
+    privacy: TurnPrivacy,
     origin: TurnContext = "routine",
     mcp_settings: McpSettings | None = None,
     account_id: uuid.UUID | None = None,
@@ -368,6 +374,7 @@ async def run_turn_impl(
     called once. Without it they are off, as for every other unattended run
     (`unattended_capabilities.capability_policy`).
     """
+    privacy.check()
     turn_scope: Scope | None = None
     if load_turn_settings().path == "mux":
         if tenant_id is None or account_id is None:
@@ -533,6 +540,7 @@ async def run_turn_impl(
             )
         ):
             state: TurnState = await drive_turn(
+                privacy=privacy,
                 anthropic=anthropic,
                 scope=turn_scope,
                 session_id=session.id,

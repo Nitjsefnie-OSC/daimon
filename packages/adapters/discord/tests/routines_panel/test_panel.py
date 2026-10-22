@@ -4,6 +4,7 @@ from __future__ import annotations
 
 import uuid
 from datetime import UTC, datetime
+from types import SimpleNamespace
 from typing import Any
 from unittest.mock import AsyncMock, MagicMock
 
@@ -25,6 +26,7 @@ from daimon.adapters.discord.routines_panel.state import (
     derive_state,
 )
 from daimon.adapters.discord.runtime import DiscordRuntime
+from daimon.core.config import RecruitmentSettings
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.stores.domain import RoutineRow
 from sqlalchemy.exc import SQLAlchemyError
@@ -69,7 +71,9 @@ def _make_state(entries: list[RoutineEntry], *, over_cap: int = 0) -> RoutinesPa
 
 
 def _make_runtime() -> DiscordRuntime:
-    return MagicMock(spec=DiscordRuntime)
+    return MagicMock(
+        spec=DiscordRuntime, settings=SimpleNamespace(recruitment=RecruitmentSettings())
+    )
 
 
 def _find_button(view: discord.ui.LayoutView, label: str) -> discord.ui.Button[Any]:
@@ -291,7 +295,9 @@ class _SessionCM:
 
 
 def _runtime_with_session(session: Any) -> MagicMock:
-    runtime = MagicMock(spec=DiscordRuntime)
+    runtime = MagicMock(
+        spec=DiscordRuntime, settings=SimpleNamespace(recruitment=RecruitmentSettings())
+    )
     runtime.sessionmaker = MagicMock(return_value=_SessionCM(session))
     return runtime
 

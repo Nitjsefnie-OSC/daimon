@@ -13,6 +13,7 @@ from daimon.core.turn.gemini import GeminiTurnIO
 from daimon.core.turn.io import TurnEvent
 from daimon.core.turn.openai_codec import display_event
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.termination import (
     ProviderTerminalFailure,
     TerminationReason,
@@ -118,6 +119,7 @@ async def run_host(monkeypatch, event, leading=()):
     lifecycle = RecordingLifecycle()
     async with transport.client() as client:
         state = await driver.run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             session_id=event.session_id,
             user_message="offline",
@@ -192,6 +194,7 @@ async def test_actual_gemini_stream_terminal_reason_is_committed(
     async def run():
         async with ancillary.client() as client:
             return await driver.run_turn(
+                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 session_id=native_gemini.session.id,
                 user_message="offline",

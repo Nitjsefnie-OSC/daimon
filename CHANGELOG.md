@@ -7,6 +7,39 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Hide saved routine triggers/results from MCP, CLI and Discord controls when
+  their source or destination becomes reserved for recruitment, including
+  unknown legacy provenance. Restore this bot's `/recruitment` status, refresh,
+  retry and discard commands inside reserved channels with live recruiter checks.
+- Document the Discord reader registry as a syntax review ratchet with known
+  limits and `TurnPrivacy` as a trusted-caller declaration contract; prepared
+  turns prefer the admitted tenant over a repeated caller argument.
+
+### Changed
+
+- Reserve configured recruitment parent channels and their threads for human
+  staffing. Replace dynamic privacy filters and database configuration with
+  restart-bound tenant settings; reject general classifiers, DM transfers and
+  Discord MCP readers before content access. Fence confirmations with durable
+  event watermarks, including new messages, and exclude own-card echoes.
+
+### Fixed
+
+- Close recruitment boundaries for unresolved Discord channel forms, lead intake
+  and recovery, saved channel routines, persistent wizard controls and channel
+  metadata. Require explicit source authority at the core turn driver and gate
+  controls before SDK dispatch. Record complete bulk-delete events atomically;
+  audit runtime Discord readers with a discovery-based regression registry.
+- Recruitment tracks edits and deletions after raw-data retention, fences source events
+  before enrichment, and preserves backend uncertainty independently of later errors.
+  Empty recruitment settings require no privacy database or HTTP lookups.
+
+### Added
+
+- Opt-in recruiter-reviewed Discord staffing threads with a tenant-scoped encrypted ledger,
+  revision-bound confirmation, durable recruitment API outbox, candidate privacy guards,
+  configurable retention and a synthetic QA backend.
+
 ### Added
 
 - Built-in sandbox tools (bash, file reads and edits and the rest) can be turned back on for one channel or thread routine at a time, for that routine's own scheduled runs. The supported way today is the operator's `daimon routines sandbox-tools --tenant TENANT ROUTINE_ID... [--off] [--dry-run]`, which also opts in a confirmed list of routines at once and leaves any already set alone. An opt-in covers exactly the routine's current agent version and environment: a run gets built-ins only when its agent version and environment are the ones recorded, so after anyone edits the agent or its environment the next run goes without them and the opt-in is cleared until the operator approves the routine again. The `set_routine_sandbox_tools` MCP tool accepts only a live Discord server admin's own token, which no Daimon surface issues yet; it is kept for a future admin surface and refuses agents, operator tokens, legacy tokens and Slack or Teams callers. DM routines cannot be opted in, and editing a routine's agent, trigger message, destination or budget channel turns the opt-in off. Every change records who made it, when, the routine id and the agent version and environment it covers. `get_routine`, `list_routines` and the Discord `/routines` panel show whether a routine has sandbox tools. Watches, timers and wakes, agent chat, fleet workers, `daimon run` and workspace checkpoints keep them off with no opt-in.

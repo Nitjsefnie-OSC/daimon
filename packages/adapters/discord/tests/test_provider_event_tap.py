@@ -22,6 +22,7 @@ from anthropic.types.beta.sessions import (
 from daimon.core.turn import driver
 from daimon.core.turn.io import TurnConnectionLost, TurnEvent, TurnStream
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.run import _DeferredFailureLifecycle
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle
@@ -150,6 +151,7 @@ def native_events() -> tuple[
 
 async def run(codec: Codec, lifecycle: RecordingLifecycle, *, wrapped: bool) -> None:
     state = await driver.run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=cast(AsyncAnthropic, FakeAnthropic()),
         session_id="session",
         user_message="hello",

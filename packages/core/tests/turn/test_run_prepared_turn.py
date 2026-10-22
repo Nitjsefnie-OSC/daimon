@@ -51,6 +51,7 @@ from daimon.core.turn.admission import Admission
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.lifecycle import InterruptSource, ReconnectReason, TurnLifecycle
 from daimon.core.turn.prepare import ContinuityOutcome, PreparedTurn, bind_recorder
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
@@ -1877,6 +1878,7 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
 
     async def _fake_run_turn(
         *,
+        privacy: TurnPrivacy,
         anthropic: object,
         session_id: str,
         user_message: str,
@@ -1892,6 +1894,9 @@ async def test_cancel_set_before_recovery_starts_aborts_recovery_and_flushes_hel
         send_guard: object = None,
     ) -> TurnState:
         nonlocal call_count
+        privacy.check()
+        assert privacy.recruitment is not None and not privacy.recruitment.tenants
+        assert privacy.tenant_id == tenant.id and privacy.platform == "discord"
         assert scope.tenant_id == str(tenant.id) and scope.account_id == str(account.id)
         assert not scope.is_platform and not scope.is_legacy_host_authorized
         call_count += 1
@@ -1984,6 +1989,7 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
 
     async def _fake_run_turn(
         *,
+        privacy: TurnPrivacy,
         anthropic: object,
         session_id: str,
         user_message: str,
@@ -1999,6 +2005,9 @@ async def test_cancel_during_recovery_mirrors_into_the_recovery_turn_and_interru
         send_guard: object = None,
     ) -> TurnState:
         nonlocal call_count
+        privacy.check()
+        assert privacy.recruitment is not None and not privacy.recruitment.tenants
+        assert privacy.tenant_id == tenant.id and privacy.platform == "discord"
         assert scope.tenant_id == str(tenant.id) and scope.account_id == str(account.id)
         assert not scope.is_platform and not scope.is_legacy_host_authorized
         call_count += 1

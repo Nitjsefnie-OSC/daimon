@@ -13,6 +13,7 @@ from daimon.adapters.mcp.tools.discord._client import (
     _require_bot_token,  # pyright: ignore[reportPrivateUsage]
     rest_client,
 )
+from daimon.adapters.mcp.tools.discord._recruitment import require_general_channel
 from daimon.adapters.mcp.tools.setup_target import (
     origin_channel_id,
     require_turn_origin,
@@ -96,6 +97,7 @@ async def _post_discord_connect_card(
     )
     async with rest_client(_require_bot_token(runtime)) as client:
         channel = await client.fetch_channel(int(thread_id))
+        require_general_channel(runtime, auth.external_id, channel)
         if not isinstance(channel, discord.Thread) or str(channel.guild.id) != auth.external_id:
             raise ToolError("GitHub setup requires the originating Discord thread.")
         await channel.send(

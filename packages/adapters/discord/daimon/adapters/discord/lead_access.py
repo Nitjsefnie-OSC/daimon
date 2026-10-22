@@ -11,7 +11,9 @@ from dataclasses import dataclass
 from uuid import UUID
 
 from cryptography.fernet import MultiFernet
+from daimon.adapters.discord.recruitment_guard import protected
 from daimon.core.authz import AgentRef, Place
+from daimon.core.config import RecruitmentSettings
 from daimon.core.lead_intake import IntakeConfig
 from daimon.core.lead_intake_access import (
     LeadReader,
@@ -27,12 +29,20 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 import discord
 
+_NO_RECRUITMENT = RecruitmentSettings()
+
 
 class GatewayNativeLeadPermissions:
     """Native read facts for one member in one guild, fetched once per channel."""
 
-    def __init__(self, guild: discord.Guild, member: discord.Member) -> None:
+    def __init__(
+        self,
+        guild: discord.Guild,
+        member: discord.Member,
+        recruitment: RecruitmentSettings = _NO_RECRUITMENT,
+    ) -> None:
         self.guild, self.member = guild, member
+        self.recruitment = recruitment
         self._seen: dict[str, NativeChannel | None] = {}
 
     async def channel(self, channel_id: str) -> NativeChannel | None:
@@ -43,6 +53,8 @@ class GatewayNativeLeadPermissions:
     async def _fetch(self, channel_id: str) -> NativeChannel | None:
         try:
             channel = await self.guild.fetch_channel(int(channel_id))
+            if protected(self.recruitment, channel, str(self.guild.id)):
+                return None
             if isinstance(channel, discord.Thread):
                 parent = channel.parent
                 if parent is None:
@@ -115,12 +127,15 @@ async def discord_lead_reads(
     guild: discord.Guild,
     user_id: str,
     origin: discord.abc.GuildChannel | discord.Thread | None,
+    recruitment: RecruitmentSettings = _NO_RECRUITMENT,
 ) -> DiscordLeadReads:
     """The reader behind a person's own ephemeral reply: no agent carries what they read.
 
     Raises when lead intake is not configured for this guild or the person
     cannot be fetched; each read is then decided by `check`.
     """
+    if protected(recruitment, origin, str(guild.id)):
+        raise PermissionError("Source unavailable.")
     config, _ = await store.configuration()
     if str(guild.id) != config.guild_id:
         raise PermissionError("tenant_mismatch")
@@ -149,7 +164,7 @@ async def discord_lead_reads(
         origin=origin_place,
         origin_channel_ids=origin_ids,
     )
-    native = GatewayNativeLeadPermissions(guild, member)
+    native = GatewayNativeLeadPermissions(guild, member, recruitment)
 
     async def check(target: LeadReadTarget) -> None:
         await authorize_lead_read(target, reader, native)
@@ -166,6 +181,7 @@ async def require_lead_readable(
     channel: discord.abc.GuildChannel | discord.Thread,
     user_id: str,
     intake_id: str,
+    recruitment: RecruitmentSettings = _NO_RECRUITMENT,
 ) -> tuple[str, ...]:
     """Authorize and render a live lead; approval cards retain no evidence."""
     store = IntakeStore(sessionmaker, fernet, tenant_id)
@@ -177,6 +193,7 @@ async def require_lead_readable(
         guild=channel.guild,
         user_id=user_id,
         origin=channel,
+        recruitment=recruitment,
     )
     try:
         record = await store.get(UUID(intake_id))

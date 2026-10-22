@@ -16,6 +16,7 @@ from daimon.adapters.slack import app as slack
 from daimon.adapters.teams import app as teams
 from daimon.adapters.teams.identity import TeamsInbound
 from daimon.adapters.teams.reactions import TeamsReactions
+from daimon.core.config import RecruitmentSettings
 from daimon.core.errors import DaimonError
 from daimon.core.turn.thread_queue import ThreadQueue
 from daimon.core.turn_queue import TurnQueue
@@ -63,7 +64,9 @@ class Replay:
             _recovery=None,
             _participation=None,
             draining=draining,
-            runtime=SimpleNamespace(sessionmaker=None),
+            runtime=SimpleNamespace(
+                sessionmaker=None, settings=SimpleNamespace(recruitment=RecruitmentSettings())
+            ),
             _processing_tasks={},
             _track_processing_task=lambda thread_id: None,
         )

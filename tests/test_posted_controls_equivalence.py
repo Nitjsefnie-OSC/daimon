@@ -13,6 +13,7 @@ from uuid import UUID
 
 import discord
 import pytest
+from daimon.core.config import RecruitmentSettings
 from daimon.core.confirmation import ApprovedConfirmation, ConfirmationPrompt, PendingConfirmations
 from daimon.core.posted_controls import lifecycle
 from daimon.core.posted_controls.confirmation import NO_LONGER_PENDING_MESSAGE, NOT_YOURS_MESSAGE
@@ -335,9 +336,13 @@ async def test_routine_base_and_new(platform, op, scenario, monkeypatch):
         session = SimpleNamespace(begin=transaction)
         factory = MagicMock(side_effect=transaction)
         factory.begin = transaction
-        runtime = SimpleNamespace(sessionmaker=factory, anthropic=None)
+        runtime = SimpleNamespace(
+            sessionmaker=factory,
+            anthropic=None,
+            settings=SimpleNamespace(recruitment=RecruitmentSettings()),
+        )
 
-        async def load(session, routine_id, *, tenant_id):
+        async def load(session, routine_id, *, tenant_id, recruitment=None):
             trace.append(("load", routine_id, tenant_id))
             return None if scenario == "gone" else row
 

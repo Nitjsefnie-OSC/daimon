@@ -70,6 +70,7 @@ from daimon.core.headless_runner import run_turn
 from daimon.core.rule_views import RoutineOrigin
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
     MARouter,
@@ -240,6 +241,7 @@ async def test_run_turn_returns_last_message_text(origin, db_session, db_session
     client = _build_client(events, send_capture=sent)
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -287,6 +289,7 @@ async def test_full_final_response_is_returned_for_delivery() -> None:
     client = _build_client(events)
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -353,6 +356,7 @@ async def test_auto_allow_confirms_once_and_rides_out_a_reemitted_requires_actio
     client = _build_client(events, send_capture=send_capture)
 
     await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -403,6 +407,7 @@ async def test_session_error_raises_turn_error() -> None:
 
     with pytest.raises(TurnError) as exc_info:
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -448,6 +453,7 @@ async def test_run_turn_calls_usage_record_for_span_model_request_end() -> None:
         return usage_record
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -505,6 +511,7 @@ async def test_run_turn_without_usage_record_factory_completes_unbilled(
     client = _build_client(events, model_id=model_id)
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -592,6 +599,7 @@ async def test_run_turn_reconnects_through_a_clean_close_and_returns_post_reconn
     client = build_fake_anthropic(router.dispatch)
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -628,6 +636,7 @@ async def test_run_turn_propagates_usage_record_factory_exception() -> None:
 
     with pytest.raises(RuntimeError, match="metering down"):
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -666,6 +675,7 @@ async def test_run_turn_propagates_httpx_error() -> None:
 
     with pytest.raises(TurnError) as exc_info:
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -781,6 +791,7 @@ async def test_run_turn_attaches_vault_when_mcp_settings(
     client = build_fake_anthropic(router.dispatch)
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -830,6 +841,7 @@ async def test_run_turn_raises_value_error_when_account_id_missing() -> None:
         match=(r"^account_id is required when mcp_settings has public_url and jwt_secret$"),
     ):
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -861,6 +873,7 @@ async def test_run_turn_raises_when_mcp_active_and_agent_uuid_none() -> None:
         match=r"^agent_uuid is required when mcp_settings has public_url and jwt_secret$",
     ):
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -906,6 +919,7 @@ async def test_run_turn_stamps_session_metadata_with_tenant_and_account() -> Non
         return AsyncMock(return_value=None)
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -941,6 +955,7 @@ async def test_run_turn_without_usage_record_factory_stamps_session_billing_exem
     client = _build_client(_idle_events(), session_create_capture=session_create_capture)
 
     await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -973,6 +988,7 @@ async def test_run_turn_stamps_a_routine_session_with_where_it_fires(
     client = _build_client(_idle_events(), session_create_capture=session_create_capture)
 
     await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -1083,6 +1099,7 @@ async def test_run_turn_mounts_env_resource_when_agent_has_secrets(
     )
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -1108,6 +1125,7 @@ async def test_run_turn_omits_resources_when_phase51_params_absent() -> None:
     )
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -1222,6 +1240,7 @@ async def test_run_turn_composes_resources_alongside_vault_ids(
     client = build_fake_anthropic(router.dispatch)
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -1289,6 +1308,7 @@ async def test_run_turn_past_deadline_raises_a_ceiling_turn_error_from_session_a
 
     with pytest.raises(TurnError) as exc_info:
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -1334,6 +1354,7 @@ async def test_run_turn_ceiling_breach_during_the_drain_raises_a_ceiling_turn_er
 
     with pytest.raises(TurnError) as exc_info:
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -1354,6 +1375,7 @@ async def test_run_turn_omitting_the_deadline_still_completes_a_normal_turn() ->
     client = _build_client(_idle_events())
 
     tail = await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -1377,6 +1399,7 @@ async def test_run_turn_deadline_feeds_remaining_s_rather_than_being_ignored() -
 
     with pytest.raises(TurnError) as exc_info:
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -1423,6 +1446,7 @@ async def test_run_turn_creates_a_fresh_session_per_fire_and_never_reuses_one() 
 
     for trigger in ("first fire", "second fire"):
         await run_turn(
+            privacy=TurnPrivacy("test"),
             anthropic=client,
             agent_id="agent_x",
             environment_id="env_x",
@@ -1452,6 +1476,7 @@ async def test_memory_access_per_headless_origin(
     bodies: list[dict[str, Any]] = []
     client = _build_client(_idle_events(), session_create_capture=bodies)
     await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",
@@ -1511,6 +1536,7 @@ async def test_headless_routines_never_mount_owner_memory(
     bodies: list[dict[str, Any]] = []
     client = _build_client(_idle_events(), session_create_capture=bodies)
     await run_turn(
+        privacy=TurnPrivacy("test"),
         anthropic=client,
         agent_id="agent_x",
         environment_id="env_x",

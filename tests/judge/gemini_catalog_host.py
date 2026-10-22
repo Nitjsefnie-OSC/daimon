@@ -16,6 +16,7 @@ from daimon.core.mux_backend import TurnBackendRequest, TurnRuntime
 from daimon.core.turn.driver import run_turn
 from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
+from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.testing.discord_surface import DiscordSurfaceCapture
 from daimon.testing.host_clock import current_host_clock
@@ -161,6 +162,7 @@ async def run_gemini_turn(
         async def invoke() -> str:
             state = await await_root_completion(
                 run_turn(
+                    privacy=TurnPrivacy("rehearsal"),
                     anthropic=sentinel,
                     scope=scope,
                     session_id=session.id,
