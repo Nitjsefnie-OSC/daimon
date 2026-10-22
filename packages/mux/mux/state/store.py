@@ -210,3 +210,13 @@ async def bind_new_slot(store: StateStore, binding: ProviderBinding) -> Provider
         if winner is None:
             raise
         return winner
+
+
+__all__ = [
+    "ConfigRevisionConflict",
+    "SESSION_REF",
+    "StateStore",
+    "bind_new_slot",
+    "binding_slot",
+    "check_binding_successor",
+]

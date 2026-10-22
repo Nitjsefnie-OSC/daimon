@@ -42,10 +42,9 @@ from daimon.core.turn.runtime_manifest import (
 from mux.contracts.config import ConfigRevision
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.resources import EnvironmentSpec, SessionSpec
+from mux.drivers.openai import SessionControls, Transport
 from mux.drivers.openai.mcp_auth import KEY as MCP_METADATA_KEY
-from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.skill_bindings import reserved as skill_metadata_key
-from mux.drivers.openai.transport import Transport
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
 from pydantic import (
@@ -470,7 +469,7 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
             raise AdmissionDenied(reason="backend_unsupported")
         # Import/construction is selected-only. The private driver owns SDK
         # request/stream lifetimes and disables retry of uncertain mutations.
-        from mux.drivers.openai.deployment import configured_transport
+        from mux.drivers.openai import configured_transport
 
         return configured_transport(api_key=secret, project=deployment.project)
 

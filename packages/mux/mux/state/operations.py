@@ -216,3 +216,20 @@ def recovery(operation: Operation) -> Recovery:
             return "observe"
         case "processed" | "failed":
             return "done"
+
+
+__all__ = [
+    "Begun",
+    "InvalidTransition",
+    "OperationRecord",
+    "Recovery",
+    "SendClaimed",
+    "TRANSITIONS",
+    "advance",
+    "begin",
+    "check_owner",
+    "claim",
+    "operation_scope",
+    "recovery",
+    "request_digest",
+]
