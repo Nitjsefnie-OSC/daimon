@@ -84,7 +84,7 @@ from mux.profiles import (
 from mux.state.lease import Slot
 from mux.state.operations import request_digest
 from mux.state.store import StateStore
-from pydantic import Field, JsonValue, TypeAdapter, model_validator
+from pydantic import Field, JsonValue, TypeAdapter, field_validator, model_validator
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 if TYPE_CHECKING:
@@ -962,6 +962,21 @@ class WorkerLimits(Contract):
 class AgentFleetGrant(Contract):
     """Finite admin ceilings; an owner assigns the persisted setting epoch."""
 
+    # Missing on legacy grants means the root's own agent only. The runtime
+    # adds that agent implicitly for every explicit selection as well.
+    worker_agents: Literal["any"] | tuple[uuid.UUID, ...] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
+
+    @field_validator("worker_agents")
+    @classmethod
+    def _worker_agents(
+        cls, value: Literal["any"] | tuple[uuid.UUID, ...] | None
+    ) -> Literal["any"] | tuple[uuid.UUID, ...] | None:
+        if isinstance(value, tuple) and (not value or len(set(value)) != len(value)):
+            raise ValueError("worker agents must be a nonempty list of unique logical agent ids")
+        return value
+
     epoch: int = Field(default=0, ge=0, strict=True)
     max_workers: int = Field(gt=0, strict=True)
     choices: tuple[tuple[ResolvedBackend, ModelRef], ...] = Field(min_length=1)
@@ -1455,8 +1470,14 @@ def fleet_root_permissions(
     policy: TenantAccessPolicy,
     now: datetime,
     seal_ids: frozenset[str] = frozenset(),
+    own_backends: tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]] | None = None,
 ) -> WorkerPermissions:
-    """Compose captured source; caller joins origin/binding and rechecks grant epoch."""
+    """Compose captured source; caller joins origin/binding and rechecks grant epoch.
+
+    The root gets the grant's model choices plus its own model. `own_backends`
+    replaces those choices for an agent that runs as a worker: its own config
+    decides its model, not the grant's model list.
+    """
     from daimon.core.memory_resource import memory_mount
     from daimon.core.turn.ceiling import TURN_CEILING_S
 
@@ -1517,7 +1538,11 @@ def fleet_root_permissions(
     duration = min(grant.max_run_seconds, grant.max_worker_seconds, TURN_CEILING_S)
     deadline = min(grant.expires_at, now + timedelta(seconds=duration))
     limits = grant.limits.model_copy(update={"deadline": deadline})
-    backend_grants, models = _with_root_model(grant, spec.model, policy=policy, fleet=fleet)
+    backend_grants, models = (
+        _with_root_model(grant, spec.model, policy=policy, fleet=fleet)
+        if own_backends is None
+        else own_backends
+    )
     return freeze_root_permissions(
         WorkerPermissions(
             fleet=fleet,
@@ -1541,6 +1566,165 @@ def fleet_root_permissions(
         policy=policy,
         now=now,
     )
+
+
+def worker_agent_allowed(
+    grant: AgentFleetGrant, root_agent_id: uuid.UUID | None, agent_id: uuid.UUID
+) -> bool:
+    """Whether the grant lets this run's workers run as `agent_id`.
+
+    Field absent (stored and legacy grants): the root's own agent only. "any": any
+    agent the requester may use in the run's place (authorize decides that per
+    spawn). A list: only those logical agent ids. The root's own agent is always
+    allowed.
+    """
+    if agent_id == root_agent_id:
+        return True
+    allowed = grant.worker_agents
+    return allowed == "any" or (isinstance(allowed, tuple) and agent_id in allowed)
+
+
+def worker_agents_line(grant: AgentFleetGrant, names: Mapping[uuid.UUID, str]) -> str:
+    """The preview sentence for which agents a grant's workers may run as."""
+    allowed = grant.worker_agents
+    if allowed == "any":
+        return "Workers can be any agent you can use here."
+    if allowed is None:
+        return "Workers run as this agent only."
+    listed = ", ".join(
+        names.get(agent_id, "an agent no longer on this server") for agent_id in allowed
+    )
+    return f"Workers can be this agent or: {listed}."
+
+
+def agent_worker_backend(
+    spec: AgentSpec, backend: Provider | None, model: str | None
+) -> tuple[ResolvedBackend, ModelRef]:
+    """The backend and model an agent runs on as a worker: its own agent config.
+
+    `backend`/`model` are the agent's current backend setting (#1309). No setting,
+    or Managed Agents, means the agent's own native model.
+    """
+    from mux.profiles import MANAGED_AGENTS, backend_selection
+
+    if backend is None or backend == MANAGED_AGENTS.provider:
+        selection = backend_selection(MANAGED_AGENTS.provider)
+        return selection, ModelRef(provider=spec.model.provider, id=spec.model.id)
+    try:
+        selection = backend_selection(backend)
+    except InvalidConfig:
+        raise WorkerSpecRefused("backend", "unsupported") from None
+    chosen = model or selection.model
+    if chosen is None:
+        raise WorkerSpecRefused("backend", "unbound")
+    if selection.model not in (None, chosen):
+        selection = selection.model_copy(update={"model": chosen})
+    return selection, ModelRef(provider=backend, id=chosen)
+
+
+def agent_worker_patch(
+    spec: AgentSpec, task: str | None, model: ModelRef | None = None
+) -> AgentPatch | None:
+    """The sparse change a worker running AS an agent makes to that agent's own spec.
+
+    The task is appended to the agent's own instructions, never replacing them.
+    `model` is the agent's configured model when it differs from its native one;
+    a model on another provider declares the same losses a task worker does. The
+    agent's tools are its own: one that asks before running cannot be asked by a
+    worker, so the resolver refuses that agent rather than drop the tool.
+    """
+    update: dict[str, object] = {}
+    if task is not None and task.strip():
+        update["system"] = (spec.system or "") + "\n\nYour task: " + task.strip()
+    if model is not None and model != spec.model:
+        update["model"] = model
+        drops: set[DeclaredDrop] = set(spec.declared_drops)
+        if model.provider != spec.model.provider:
+            drops |= {"mcp", "memory", "sandbox"}
+        if spec.extensions:
+            drops.add("model_controls")
+        if drops != set(spec.declared_drops):
+            update["declared_drops"] = tuple(sorted(drops))
+    return AgentPatch.model_validate(update) if update else None
+
+
+def agent_worker_permissions(
+    root: WorkerPermissions,
+    source: BackendAgent,
+    admission: AdmissionGrant,
+    grant: AgentFleetGrant,
+    *,
+    policy: TenantAccessPolicy,
+    now: datetime,
+    backend: tuple[ResolvedBackend, ModelRef] | None = None,
+) -> WorkerPermissions:
+    """The authority a worker runs under when it runs AS another on-server agent.
+
+    The agent's own captured source is the ceiling (its prompt, tools, skills),
+    inside the root's run: the same fleet facts, subject and finite run limits,
+    so money, the run binding and the wake stay the root's. Its model is its own
+    config's (`agent_worker_backend`; default: its native model), never the
+    grant's model list, and it comes first in `models`. When that model is on
+    another backend, the native one is kept only so the ceiling itself resolves;
+    spawn pins the configured model. Tenant backend policy still applies. SPAWN_WORKER is
+    then asked for this agent, which requires the requester may start a turn with
+    and run it in the run's place, as the agent-visibility rule says everywhere.
+    """
+    if not worker_agent_allowed(grant, root.agent_id, source.agent_id):
+        raise WorkerSpecRefused("scope", "not_subset")
+    if (
+        admission.subject != root.subject
+        or admission.run_place != root.fleet.place
+        or admission.thread_id != root.fleet.root.thread_id
+    ):
+        raise WorkerSpecRefused("origin", "unbound")
+    worker_root = fleet_root_permissions(
+        source,
+        admission,
+        grant,
+        fleet=root.fleet,
+        policy=policy,
+        now=now,
+        seal_ids=root.seal_ids,
+        own_backends=_agent_worker_backends(source, backend, policy=policy, fleet=root.fleet),
+    )
+    # The run's own finite limits (deadline, budget, provider lines) bind every worker.
+    return replace(worker_root, limits=root.limits)
+
+
+def _agent_worker_backends(
+    source: BackendAgent,
+    backend: tuple[ResolvedBackend, ModelRef] | None,
+    *,
+    policy: TenantAccessPolicy,
+    fleet: FleetFacts,
+) -> tuple[tuple[ResolvedBackend, ...], tuple[ModelRef, ...]]:
+    """The agent's own backend and model, refused only by tenant policy or its profile.
+
+    `unbound`: the tenant hasn't enabled that backend. `unsupported`: the profile
+    won't run that model as a fleet worker (e.g. a channel-only model).
+    """
+    from daimon.core.channel_backend import backend_is_enabled, check_backend
+    from mux.profiles import MANAGED_AGENTS, backend_selection
+
+    spec = source.effective_spec
+    if spec is None:
+        raise WorkerSpecRefused("origin", "unbound")
+    selection, model = backend if backend is not None else agent_worker_backend(spec, None, None)
+    if not backend_is_enabled(model.provider, policy.enabled_backends):
+        raise WorkerSpecRefused("backend", "unbound")
+    try:
+        check_backend(
+            ConfigRevision.create(fleet.root.channel, 1, selection),
+            enabled_backends=policy.enabled_backends,
+            worker=True,
+        )
+    except (DaimonError, InvalidConfig):
+        raise WorkerSpecRefused("backend", "unsupported") from None
+    native = ModelRef(provider=spec.model.provider, id=spec.model.id)
+    if model == native:
+        return (selection,), (model,)
+    return (selection, backend_selection(MANAGED_AGENTS.provider)), (model, native)
 
 
 def freeze_root_permissions(

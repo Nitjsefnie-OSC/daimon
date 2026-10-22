@@ -2218,3 +2218,16 @@ async def test_history_finder_matches_only_a_bot_card_with_this_runs_controls():
     thread.history = history
     assert await history_finder(thread)(RUN) is card
     assert await history_finder(thread)(UUID(int=8)) is None
+
+
+def test_a_worker_running_as_another_agent_shows_that_agents_name():
+    as_researcher = worker(ordinal=1, role="research")
+    as_researcher = replace(as_researcher, spec={**as_researcher.spec, "name": "researcher"})
+    plain = replace(worker(ordinal=2, role="W2"), spec={**worker().spec, "name": "W2"})
+    view = build_fleet_view(run(), (as_researcher, plain))
+    text = "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert "**research** (researcher) ·" in text
+    # A worker named after its role (a plain task worker) shows no agent name.
+    assert "**W2** ·" in text and "(W2)" not in text

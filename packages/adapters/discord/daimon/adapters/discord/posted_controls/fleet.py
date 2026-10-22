@@ -90,7 +90,7 @@ def build_fleet_view(
         else "received"
     )
     facts = tuple(
-        f"{worker.ordinal}. **{_literal(worker.role, 60)}** · "
+        f"{worker.ordinal}. **{_literal(worker.role, 60)}**{_worker_agent(worker)} · "
         f"{_literal(worker.backend, 20)} / {_literal(worker.model, 40)} — "
         f"{_worker_status(worker)}"
         for worker in sorted(workers, key=lambda row: row.ordinal)
@@ -196,6 +196,14 @@ def build_fleet_view(
         view.stop()
         raise FleetRefused("invalid_card")
     return view
+
+
+def _worker_agent(worker: FleetWorker) -> str:
+    """The agent a worker runs as, when that is not just its role's name."""
+    name = worker.spec.get("name")
+    if not isinstance(name, str) or not name.strip() or name == worker.role:
+        return ""
+    return f" ({_literal(name, 40)})"
 
 
 def _worker_status(worker: FleetWorker) -> str:

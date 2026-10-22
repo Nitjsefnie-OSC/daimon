@@ -118,6 +118,14 @@ class FleetPorts(Protocol):
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision
     ) -> Agent: ...
 
+    async def agent_worker_parent(
+        self, parent: WorkerPermissions, agent_name: str
+    ) -> WorkerPermissions: ...
+
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]: ...
+
     async def admit(
         self,
         parent: WorkerPermissions,
@@ -467,6 +475,37 @@ class FleetOrchestrator:
             raise FleetRefused("prompt_exceeds_worker_token_cap")
         return resolved
 
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]:
+        """The on-server agents this root's workers may run as, for a plain-language ask.
+
+        Advice only: every spawn decides again with fresh authority.
+        """
+        _authorize(parent, policy)
+        return await self._owner().worker_agents(parent, policy)
+
+    async def agent_worker(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, agent_name: str
+    ) -> WorkerPermissions:
+        """The authority for a worker that runs as `agent_name`, inside this root's run.
+
+        The root must be allowed to spawn here; the owner then admits that agent for
+        the requester in the run's place and checks the grant's worker agents.
+        """
+        _authorize(parent, policy)
+        if not agent_name.strip():
+            raise FleetRefused("worker_agent_required")
+        worker_parent = await self._owner().agent_worker_parent(parent, agent_name.strip())
+        if (
+            worker_parent.fleet != parent.fleet
+            or worker_parent.subject != parent.subject
+            or worker_parent.limits != parent.limits
+        ):
+            raise FleetRefused("worker_agent_unbound")
+        _authorize(worker_parent, policy)
+        return worker_parent
+
     async def spawn(
         self,
         parent: WorkerPermissions,
@@ -487,15 +526,36 @@ class FleetOrchestrator:
         reviewer_of: uuid.UUID | None = None,
         captured_source: BackendAgent | None = None,
         fill_token_limits: bool = False,
+        as_agent: str | None = None,
+        task: str | None = None,
     ) -> Mapping[str, JsonValue]:
         """Resolve once, then hand admission to the atomic owner operation.
 
         Cross-review follows exactly this path with the target's durable result
         attached as input by the host. The model cannot supply review evidence.
+        With `as_agent`, the worker runs AS that on-server agent: its own pinned
+        revision is the clone, its captured source the ceiling, and the task is
+        appended to its own instructions rather than replacing them.
         """
         _authorize(parent, policy)
         owner = self._owner()
-        from daimon.core.neutral_resources import resolve_worker_spec
+        from daimon.core.neutral_resources import agent_worker_patch, resolve_worker_spec
+
+        if as_agent is not None:
+            if agent is not None or clone is not None or overrides is not None:
+                raise FleetRefused("worker_agent_excludes_spec")
+            parent = await self.agent_worker(parent, policy, agent_name=as_agent)
+            captured_source = await owner.capture_source(parent)
+            if (
+                captured_source is None
+                or captured_source.source is None
+                or captured_source.effective_spec is None
+            ):
+                raise FleetRefused("clone_evidence_unavailable")
+            clone = captured_source.source.ref
+            clone_revision = captured_source.source.revision
+            # The agent's own configured model comes first (agent_worker_permissions).
+            overrides = agent_worker_patch(captured_source.effective_spec, task, parent.models[0])
 
         selected_run = parent.fleet.run_id if run_id is None else run_id
         if selected_run != parent.fleet.run_id:
@@ -554,6 +614,9 @@ class FleetOrchestrator:
             )
 
         resolved = resolve(limits)
+        if as_agent is not None and resolved.spec.model != parent.models[0]:
+            # A worker that runs as an agent runs on that agent's model, nothing else.
+            raise FleetRefused("worker_agent_model_mismatch")
         reviewed: Event | None = None
         if reviewer_of is not None:
             run, workers = await self.read_snapshot(parent, policy, selected_run)
@@ -1031,6 +1094,11 @@ class HostFleetPorts:
             self._dispatch = self._dispatch_worker
         self._clone_reader, self._wait = clone_reader, wait
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+        # Preparation requests of workers that run as another agent, per (run, agent).
+        # In-process only: after a restart, or on another replica, an agent worker's
+        # preparation falls back to the root's request, which no longer matches that
+        # agent and refuses (origin unbound). That fails safe; persisting it is a follow-up.
+        self._agent_requests: dict[tuple[uuid.UUID, uuid.UUID], ProviderPreparationRequest] = {}
         self._watches: dict[
             uuid.UUID, tuple[dict[uuid.UUID, asyncio.Event], asyncio.Event, asyncio.Task[None]]
         ] = {}
@@ -1109,6 +1177,8 @@ class HostFleetPorts:
                     retained = self._watches.get(worker.run_id)
                     if retained is not None and retained[2] is done:
                         self._watches.pop(worker.run_id)
+                        for key in [k for k in self._agent_requests if k[0] == worker.run_id]:
+                            self._agent_requests.pop(key, None)
                     if not done.cancelled():
                         done.exception()
 
@@ -1224,7 +1294,12 @@ class HostFleetPorts:
                 async with asyncio.timeout(
                     remaining_s(bound, now=datetime.now(UTC), refuse_expired=True)
                 ):
-                    request = await self._preparation(parent)
+                    cached = (
+                        self._agent_requests.get((parent.fleet.run_id, parent.agent_id))
+                        if parent.agent_id is not None
+                        else None
+                    )
+                    request = cached if cached is not None else await self._preparation(parent)
                     bound = min(bound, request.deadline)
                     remaining_s(bound, now=request.now(), refuse_expired=True)
                     yield replace(request, deadline=bound)
@@ -1337,6 +1412,157 @@ class HostFleetPorts:
         _scope(parent, run)
         async with self.sessions() as db:
             return await task_continuations.count_run_wakes(db, run=run, exclude_id=exclude)
+
+    async def agent_worker_parent(
+        self, parent: WorkerPermissions, agent_name: str
+    ) -> WorkerPermissions:
+        from daimon.core.channel_backend import AgentBackendRefused, load_backend_agent
+        from daimon.core.neutral_resources import (
+            WorkerSpecRefused,
+            agent_worker_backend,
+            agent_worker_permissions,
+        )
+        from daimon.core.stores import agent_backends
+        from daimon.core.stores.access_policy import load_access_policy
+        from daimon.core.turn.admission import prepare_worker_agent
+        from daimon.core.turn.errors import AdmissionDenied
+        from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+
+        deps = self._deps
+        if deps is None or self._preparation is None:
+            raise FleetRefused("prerequisites_unavailable")
+        async with self._load_preparation(parent) as root:
+            try:
+                source = await load_backend_agent(
+                    deps.anthropic,
+                    deps.sessionmaker,
+                    tenant_id=root.tenant_id,
+                    agent_name=agent_name,
+                )
+            except AgentBackendRefused:
+                raise FleetRefused("worker_agent_unavailable") from None
+            if source.agent_id == parent.agent_id:
+                return parent
+            grant = await read_agent_fleet_grant(deps, root.admission, now=datetime.now(UTC))
+            if grant is None:
+                raise FleetRefused("fleet_grant_unavailable")
+            try:
+                request = await prepare_worker_agent(deps, root, source)
+            except (AgentBackendRefused, AdmissionDenied):
+                raise FleetRefused("worker_agent_not_allowed_here") from None
+            if request.source is None or request.admission.grant is None:
+                raise FleetRefused("worker_agent_unavailable")
+            async with self.sessions() as db:
+                policy = await load_access_policy(db, tenant_id=root.tenant_id)
+                setting = await agent_backends.current(db, root.tenant_id, source.agent_id)
+            try:
+                spec = request.source.effective_spec
+                if spec is None:
+                    raise WorkerSpecRefused("origin", "unbound")
+                worker_parent = agent_worker_permissions(
+                    parent,
+                    request.source,
+                    request.admission.grant,
+                    grant,
+                    policy=policy,
+                    now=datetime.now(UTC),
+                    # Its model and backend come from its own agent config.
+                    backend=agent_worker_backend(
+                        spec,
+                        setting.backend if setting is not None else None,
+                        setting.model if setting is not None else None,
+                    ),
+                )
+            except WorkerSpecRefused as error:
+                raise FleetRefused(
+                    "worker_agent_not_in_grant"
+                    if error.field == "scope"
+                    else "worker_agent_backend_not_enabled"
+                    if (error.field, error.reason) == ("backend", "unbound")
+                    else "worker_agent_model_cannot_run_workers"
+                    if (error.field, error.reason) == ("backend", "unsupported")
+                    else f"worker_agent_{error.field}_{error.reason}"
+                ) from None
+            self._agent_requests[(parent.fleet.run_id, source.agent_id)] = request
+            return worker_parent
+
+    async def worker_agents(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy
+    ) -> list[dict[str, JsonValue]]:
+        from daimon.core import pricing
+        from daimon.core.authz import Action, Surface, authorize, build_agent_ref
+        from daimon.core.defaults.ma_index import list_agents_by_tenant
+        from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.neutral_resources import worker_agent_allowed
+        from daimon.core.stores import agent_backends
+        from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+        from mux.errors import InvalidConfig
+        from mux.profiles import MANAGED_AGENTS, backend_selection
+
+        deps = self._deps
+        if deps is None or self._preparation is None:
+            raise FleetRefused("prerequisites_unavailable")
+        tenant_id = uuid.UUID(parent.fleet.scope.tenant_id)
+        async with self._load_preparation(parent) as root:
+            grant = await read_agent_fleet_grant(deps, root.admission, now=datetime.now(UTC))
+        if grant is None:
+            raise FleetRefused("fleet_grant_unavailable")
+        listed: list[dict[str, JsonValue]] = []
+        for native in await list_agents_by_tenant(deps.anthropic, tenant_id=tenant_id):
+            name = (native.metadata or {}).get(MA_METADATA_KEY_NAME) or native.name
+            agent_id = derive_agent_uuid(tenant_id=tenant_id, ma_agent_id=native.id)
+            async with self.sessions() as db:
+                setting = await agent_backends.current(db, tenant_id, agent_id)
+            backend = (setting.backend if setting is not None else None) or MANAGED_AGENTS.provider
+            native_model = native.model if isinstance(native.model, str) else native.model.id
+            if backend == MANAGED_AGENTS.provider:
+                model: str | None = native_model
+                rates: pricing.ModelRates | pricing.ProviderPrice | None = (
+                    pricing.AGENT_MODEL_PRICING.get(native_model)
+                )
+            else:
+                try:
+                    selection = backend_selection(backend)
+                except InvalidConfig:
+                    continue
+                model = (setting.model if setting is not None else None) or selection.model
+                rates = (
+                    pricing.provider_prices(selection.profile).get((backend, model))
+                    if model is not None
+                    else None
+                )
+            # Its model is its own config's; the grant's model list does not apply.
+            allowed = (
+                model is not None
+                and backend in policy.enabled_backends
+                and worker_agent_allowed(grant, parent.agent_id, agent_id)
+                and authorize(
+                    policy,
+                    subject=parent.subject,
+                    action=Action.SPAWN_WORKER,
+                    surface=Surface.FLEET,
+                    agent=build_agent_ref(native.name, native.metadata or {}, name),
+                    place=parent.fleet.place,
+                    fleet=parent.fleet,
+                ).allowed
+            )
+            if allowed:
+                listed.append(
+                    {
+                        "name": name,
+                        "description": native.description or "",
+                        "backend": backend,
+                        "model": model,
+                        "price_per_million_tokens": (
+                            f"input ${rates.input}, output ${rates.output}"
+                            if rates is not None
+                            else "unknown"
+                        ),
+                        "root": agent_id == parent.agent_id,
+                    }
+                )
+        return sorted(listed, key=lambda row: (not row["root"], str(row["name"])))
 
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision
