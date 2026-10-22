@@ -35,7 +35,6 @@ from anthropic.types.beta import BetaManagedAgentsSession
 from cryptography.fernet import Fernet
 from daimon.adapters.slack.admin import SlackRequester
 from daimon.adapters.slack.app import SlackApp
-from daimon.adapters.slack.errors import NON_MEMBER_NOTICE
 from daimon.adapters.slack.lifecycle import SlackTurnLifecycle
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.core.continuity.messages import render_unexpected_loss
@@ -846,13 +845,14 @@ async def test_handle_app_mention_no_token_when_no_token_row_drops(
     assert dropped_logs[0]["team_id"] == team_id, "the dropped log must bind the team_id"
 
 
-async def test_handle_app_mention_slack_connect_external_when_external_user_posts_ephemeral(
+async def test_handle_app_mention_slack_connect_external_reaches_orchestration(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
 ) -> None:
-    """When the event sender belongs to a different Slack workspace (Slack Connect),
-    a chat_postEphemeral rejection is sent and the orchestration seam is NOT reached.
+    """An event whose sender belongs to a different Slack workspace (Slack Connect) is
+    no longer turned away at the listener: it reaches the orchestration seam, where
+    the sender's organisation is decided and the turn runs held, and no refusal is posted.
 
     ``fake_slack_web_client`` activates an aioresponses context that intercepts ALL
     aiohttp requests made by any AsyncWebClient during this test, including the
@@ -906,20 +906,15 @@ async def test_handle_app_mention_slack_connect_external_when_external_user_post
     mock = fake_slack_web_client.mock  # type: ignore[union-attr]
     await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
 
-    assert len(orchestrate_calls) == 0, (
-        "Slack Connect external event must be dropped — orchestration must not run"
-    )
+    assert len(orchestrate_calls) == 1, "an external sender's mention must reach orchestration"
 
-    # Verify chat_postEphemeral was called against the intercepted transport.
     ephemeral_calls = [
         req
         for (_, url), reqs in mock.requests.items()
         if url == URL("https://slack.com/api/chat.postEphemeral")
         for req in reqs
     ]
-    assert len(ephemeral_calls) == 1, (
-        "chat_postEphemeral must be called exactly once for a Slack Connect external event"
-    )
+    assert ephemeral_calls == [], "no refusal is posted to an external sender"
 
 
 async def test_handle_app_mention_failure_posts_error_into_thread(
@@ -5770,126 +5765,6 @@ async def test_on_request_view_submission_match_acks_update_and_spawns_purge() -
         "matching username must ack with response_action=update (Deleting… view)"
     )
     mock_purge.assert_called_once()  # pyright: ignore[reportUnknownMemberType]
-
-
-async def test_handle_app_mention_slack_connect_external_when_in_thread_rejects_in_thread(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-) -> None:
-    """An in-thread Slack Connect rejection must carry the event's thread_ts.
-
-    Without it the notice posts at channel root while the sender is watching
-    the thread, and a refused mention is indistinguishable from a dead bot.
-    """
-    team_id = "T_APP_CONNECT_THREAD"
-    parent_ts = "1000000009.000001"
-    fernet_key = Fernet.generate_key().decode()
-    fernet = build_multifernet((fernet_key,))
-
-    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
-    await upsert_slack_bot_token(
-        db_session,
-        team_id=team_id,
-        encrypted_token=encrypt_token(fernet, "xoxb-connect-thread"),
-    )
-    await db_session.flush()
-
-    app = _make_app(db_session_factory, crypto_key=fernet_key)
-
-    event: dict[str, Any] = {
-        "type": "app_mention",
-        "channel": "C_TEST",
-        "event_ts": "1000000009.000002",
-        "ts": "1000000009.000002",
-        "thread_ts": parent_ts,
-        "user": "U_EXTERNAL",
-        "user_team": "T_EXTERNAL",
-        "text": "<@U_BOT> hello",
-    }
-
-    await app._handle_app_mention(event, team_id=team_id)  # pyright: ignore[reportPrivateUsage]
-
-    ephemeral_calls = [
-        req
-        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
-        if url == URL("https://slack.com/api/chat.postEphemeral")
-        for req in reqs
-    ]
-    assert len(ephemeral_calls) == 1, "the Connect rejection must be posted exactly once"
-    assert ephemeral_calls[0].kwargs["json"]["thread_ts"] == parent_ts, (
-        "an in-thread rejection must be posted into that thread, not at channel root"
-    )
-
-
-@pytest.mark.parametrize(
-    "user",
-    [
-        pytest.param({"team_id": "T_OTHER_WORKSPACE", "is_admin": True}, id="external-admin"),
-        pytest.param(
-            {"team_id": "T_OTHER_WORKSPACE", "is_primary_owner": True}, id="external-owner"
-        ),
-        pytest.param({"is_admin": True}, id="no-team-id"),
-        pytest.param({"team_id": "T_MENTION_NONMEMBER", "is_stranger": True}, id="stranger"),
-    ],
-)
-async def test_mention_without_team_fields_from_a_non_member_is_refused_before_admission(
-    db_session: AsyncSession,
-    db_session_factory: async_sessionmaker[AsyncSession],
-    fake_slack_web_client: Any,
-    user: dict[str, Any],
-) -> None:
-    """The event carries no ``user_team`` field, so the cheap gate lets it through;
-    ``users.info`` then shows the sender is not a verified member of this workspace.
-    They get the Connect refusal in their thread and nothing is admitted or stored.
-    """
-    from yarl import URL
-
-    team_id = "T_MENTION_NONMEMBER"
-    parent_ts = "9200000001.000001"
-    tenant_id = derive_tenant_uuid(platform="slack", workspace_id=team_id)
-    await provision_tenant(db_session_factory, platform="slack", workspace_id=team_id)
-    _override_users_info(
-        fake_slack_web_client.mock,
-        payload={"ok": True, "user": {"id": "U_EXTERNAL", "name": "visitor", **user}},
-    )
-    app, _ = make_orchestrate_app(db_session_factory)
-    event: dict[str, Any] = {
-        "type": "app_mention",
-        "ts": "9200000001.000002",
-        "event_ts": "9200000001.000002",
-        "thread_ts": parent_ts,
-        "channel": "C_TEST",
-        "user": "U_EXTERNAL",
-        "text": "<@U_BOT> hello",
-    }
-
-    with patch("daimon.adapters.slack.app.admit", new_callable=AsyncMock) as admit:
-        await app._run_thread_turn(  # pyright: ignore[reportPrivateUsage]
-            event,
-            channel="C_TEST",
-            web_client=fake_slack_web_client.client,
-            tenant_id=tenant_id,
-            thread_id=parent_ts,
-            team_id=team_id,
-        )
-
-    admit.assert_not_awaited()
-    ephemerals = [
-        req
-        for (_, url), reqs in fake_slack_web_client.mock.requests.items()
-        if url == URL("https://slack.com/api/chat.postEphemeral")
-        for req in reqs
-    ]
-    assert len(ephemerals) == 1, "the sender must get exactly one refusal"
-    body = ephemerals[0].kwargs["json"]
-    assert body["user"] == "U_EXTERNAL"
-    assert body["thread_ts"] == parent_ts
-    assert body["text"] == NON_MEMBER_NOTICE
-    assert not any(
-        url == URL("https://slack.com/api/chat.postMessage")
-        for (_, url) in fake_slack_web_client.mock.requests
-    ), "no turn card or reply may be posted"
 
 
 async def test_orchestrate_tenant_cap_when_in_thread_sheds_in_thread(

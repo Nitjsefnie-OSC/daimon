@@ -263,7 +263,8 @@ adding another.
 
 Who may vote: anyone who could start a turn there (the invoker allowlist and the
 channel's rules), checked when the vote is recorded and again on send. Anyone else is
-told they can't, and nothing is recorded. External Slack Connect members are refused.
+told they can't, and nothing is recorded. A member of another workspace
+(Slack Connect) can vote and send the form only on an answer to their own request.
 The text is stored on the feedback row. Logs carry the row id and the reason
 codes. Deleting your data with `/privacy` removes the row.
 
@@ -322,6 +323,46 @@ Discord, and link previews are off, so the link shows nothing to anyone who can'
 already open the channel. When the answer is in a channel or thread with limited
 readers, the form
 tells the person their note leaves the channel, and the post says to answer there.
+
+### Slack Connect (shared channels)
+
+There is no setting. When Daimon is in a channel shared with another workspace,
+people from that workspace can mention it. On every turn Daimon asks Slack
+(`users.info`) which workspace the person belongs to; only a verified member of
+the workspace that installed the app counts as one of its own.
+
+People from the other workspace are plain users, held to the channel they asked
+in and its threads. They can stop their own turn, answer the approval card of
+their own turn, and rate an answer to their own request. They can't be
+administrators, use `/dm-me` or private conversations, create agents, set keys,
+read the workspace directory, or use routines, billing, privacy, agent setup,
+GitHub, browser sign-in or site access, **Ask a person** or thread hand-over.
+Clicking one of those controls, or sending one of those forms, gets "That's only
+for people at <your workspace>." and does nothing. "Always allow" on an approval
+card stays admin-only.
+
+Everything in a shared channel stays in it: every turn there is held to that
+channel, your own members' turns included. Those turns have no admin tools, so
+set agents up from an internal channel or a DM.
+
+Chat tools that read and post are bound to the channel. That does not limit
+the agent's sandbox or a third-party connector, which can still reach whatever
+the agent can reach. The person who picks the agent for a shared channel decides
+what it can reach, so choose an agent whose connectors and repos are fine for the
+other workspace to use.
+
+A channel counts as shared when `conversations.info` reports `is_ext_shared`
+(Slack's other flag, `is_shared`, also covers sharing between your own
+workspaces, so it is not used). The answer is cached for ten minutes per channel;
+if Slack can't be asked, Daimon falls back to what it has recorded and to who is
+asking. The `channel_shared` event records the channel at once. A channel stays
+recorded after `channel_unshared`, so its turns stay held.
+
+If both organisations install Daimon, the workspace whose installation receives
+the event answers.
+
+Subscribe the app to `channel_shared`, `channel_unshared` and
+`member_joined_channel`: apply `docs/slack-app-manifest.yaml` and reinstall.
 
 ### Private conversations
 

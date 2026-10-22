@@ -149,18 +149,18 @@ async def resolve_admin_status(
     return None if requester is None else requester.is_admin
 
 
-async def resolve_is_admin(client: AsyncWebClient, *, user_id: str) -> bool:
-    """Return True if the Slack user is a workspace admin, fail-closed.
+async def resolve_is_admin(client: AsyncWebClient, *, user_id: str, host_team_id: str) -> bool:
+    """Return True only for a verified host-workspace member with an admin signal.
 
     Collapses "not an admin" and "lookup failed" into ``False``: the ONE
     deliberate sentinel-return at the adapter boundary, justified by the
-    fail-closed security requirement. It has no host-team check: its callers
-    are interactive handlers (block actions, modals, slash commands), and
-    block actions from another workspace are dropped centrally before they run.
+    fail-closed security requirement. A member of another workspace (Slack
+    Connect) is never an admin here, whatever their own workspace says: the
+    host team is required, so no caller can skip the check.
 
     Returns:
-        ``True`` if the user is a workspace admin, owner, or primary owner;
+        ``True`` if the user is a host-workspace admin, owner, or primary owner;
         ``False`` otherwise, including on any ``users.info`` failure.
     """
-    u = await _lookup_user(client, user_id=user_id)
-    return u is not None and _is_admin_signal(u)
+    requester = await resolve_requester(client, user_id=user_id, host_team_id=host_team_id)
+    return requester is not None and requester.is_admin
