@@ -273,4 +273,6 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         runtime=runtime
         if request.worker is not None or admission.backend_revision_origin == "agent"
         else None,
+        # Revokes a per-turn MCP credential however the turn ends.
+        _finalize=runtime.end_of_turn,
     )

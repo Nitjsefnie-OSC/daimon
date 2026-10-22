@@ -249,6 +249,43 @@ def transform_paths(value: JsonValue, path: str = "$", *, in_network: bool = Fal
     return found
 
 
+def mcp_request_tokens(request: Mapping[str, JsonValue]) -> set[RedactedCredential]:
+    """Remember only the MCP bearer credentials this request dispatches."""
+    found: set[RedactedCredential] = set()
+    tools = request.get("tools")
+    for tool in tools if isinstance(tools, list) else []:
+        if not isinstance(tool, dict) or tool.get("type") != "mcp_server":
+            continue
+        headers = tool.get("headers")
+        header = headers.get("Authorization") if isinstance(headers, dict) else None
+        if isinstance(header, str) and header.startswith("Bearer ") and header[7:]:
+            found.add(RedactedCredential(header[7:]))
+    return found
+
+
+def scrub_mcp_echo(value: Object, tokens: set[RedactedCredential]) -> Object:
+    """Remove the echo of our own MCP server credential header, and nothing else.
+
+    If an interaction echoes its request tools, our `mcp_server` entry may carry
+    the Authorization header this transport dispatched. Only that exact location
+    is cleaned: `tools[i].headers` of an `mcp_server` tool on the interaction or
+    on a stream event's `interaction`, equal to a header we sent. Any other
+    header refuses.
+    """
+    result = copy.deepcopy(value)
+    ours = [{"Authorization": "Bearer " + token} for token in tokens]
+    nested = result.get("interaction")
+    for owner in (result, nested) if isinstance(nested, dict) else (result,):
+        tools = owner.get("tools")
+        for tool in tools if isinstance(tools, list) else []:
+            if not isinstance(tool, dict) or "headers" not in tool:
+                continue
+            if tool.get("type") != "mcp_server" or tool["headers"] not in ours:
+                raise ProviderError("permission", retryable=False, native_code="mcp_header_echo")
+            del tool["headers"]
+    return result
+
+
 def checked_storage_response(
     value: Object,
     *,
@@ -256,14 +293,18 @@ def checked_storage_response(
     tokens: AbstractSet[RedactedCredential] | None = None,
     interaction_id: str | None = None,
     digests: AbstractSet[str] = frozenset(),
+    mcp_tokens: AbstractSet[RedactedCredential] | None = None,
 ) -> Object:
-    """Scrub our own echoed mount transform, then fail closed on any other trace."""
-    if not protected:
+    """Scrub our own echoed mount transform and MCP header, then fail closed on any other trace."""
+    mcp = mcp_tokens or set()
+    if not protected and not mcp:
         return value
     value, matched = scrub_mount_echo(
         value, tokens or set(), interaction_id=interaction_id, digests=digests
     )
     known = {*(tokens or ()), *matched}
+    if mcp:
+        value = scrub_mcp_echo(value, mcp)
     # The token anywhere else (model output, a tool result, another field, a
     # key) is a leak: check decoded keys/values and the re-encoded bytes of the
     # scrubbed payload FIRST, before any diagnostic path is built or logged.
@@ -271,6 +312,8 @@ def checked_storage_response(
     if any(contains_secret(value, t) or t.encode() in encoded for t in known):
         log.warning("gemini mount token echo refused: reason=token_outside_mount_location")
         raise ProviderError("permission", retryable=False, native_code="gcs_token_echo")
+    if any(contains_secret(value, t) or t.encode() in encoded for t in mcp):
+        raise ProviderError("permission", retryable=False, native_code="mcp_token_echo")
     if network_transform_present(value):
         _refuse_transform(",".join(transform_paths(value)), "outside_mount_location")
     return value
@@ -388,6 +431,8 @@ class SDKTransport:
         )
         # Interaction id -> digests of the mount headers sent for it.
         self._mount_echoes = mount_echoes if mount_echoes is not None else MountEchoBook()
+        # The MCP credentials this transport dispatched; any echo is scrubbed or refused.
+        self._mcp_tokens: set[RedactedCredential] = set()
         # google-genai 2.7 forwards attempts as Stainless max_retries, so
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]
@@ -408,6 +453,7 @@ class SDKTransport:
             self._protect_storage_credentials
             or bool(self._storage_tokens)
             or bool(self._mount_echoes.get(interaction_id))
+            or bool(self._mcp_tokens)
         )
 
     def _protected_interaction(
@@ -432,6 +478,7 @@ class SDKTransport:
             tokens=self._storage_tokens,
             interaction_id=interaction_id,
             digests=self._mount_echoes.get(interaction_id) if interaction_id else frozenset(),
+            mcp_tokens=self._mcp_tokens,
         )
         # The same loose construction `response.parse()` performs, on clean data.
         parsed = cast(Any, Interaction).construct(**clean)
@@ -501,9 +548,11 @@ class SDKTransport:
         token = storage_request_token(bounded)
         if token is not None:
             self._storage_tokens.add(token)
+        self._mcp_tokens |= mcp_request_tokens(bounded)
         protected = (
             self._protect_storage_credentials
             or bool(self._storage_tokens)
+            or bool(self._mcp_tokens)
             or network_transform_present(bounded)
         )
         if model_request(bounded):
@@ -595,6 +644,7 @@ class SDKTransport:
                             tokens=self._storage_tokens,
                             interaction_id=interaction_id,
                             digests=self._mount_echoes.get(interaction_id),
+                            mcp_tokens=self._mcp_tokens,
                         )
                     else:
                         yield object_value(

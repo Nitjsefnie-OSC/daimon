@@ -1158,6 +1158,9 @@ class SourceRepresentation(_Facts):
     unavailable_mcp_tools: tuple[str, ...] = ()
     unavailable_builtin_tools: tuple[str, ...] = ()
     environment: EnvironmentSpec | None = None
+    # Whole capabilities a partial representation (an agent template) leaves out;
+    # consent must declare each one.
+    unavailable_capabilities: tuple[str, ...] = ()
 
 
 class BackendAgent(_Facts):
