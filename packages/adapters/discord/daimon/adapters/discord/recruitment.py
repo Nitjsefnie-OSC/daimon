@@ -13,12 +13,11 @@ from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.recruitment import may_decide
 from daimon.core.recruitment_discord import RecruitmentDiscord
-from daimon.core.recruitment_runtime import backend_client, build_service
+from daimon.core.recruitment_runtime import backend_client, build_service, tenant_config
 from daimon.core.recruitment_service import RecruitmentService
 from daimon.core.stores.recruitment import (
     RecruitmentBusy,
     RecruitmentStore,
-    configured_tenants,
     invalidate_source,
 )
 
@@ -43,7 +42,9 @@ class RecruitmentCog(commands.Cog):
         if not settings.recruitment.enabled or fernet is None or settings.discord is None:
             raise PermissionError("recruitment_unavailable")
         tenant = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
-        store = RecruitmentStore(self.runtime.sessionmaker, fernet, tenant)
+        store = RecruitmentStore(
+            self.runtime.sessionmaker, fernet, tenant, tenant_config(settings, str(guild_id))
+        )
         async with httpx.AsyncClient() as http, backend_client(settings) as api_http:
             port = RecruitmentDiscord(http, settings.discord.bot_token.get_secret_value())
             yield build_service(settings, store, port, api_http, self.runtime.anthropic), port
@@ -79,9 +80,25 @@ class RecruitmentCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_message(self, message: discord.Message) -> None:
-        if message.author.bot or not isinstance(message.channel, discord.Thread):
+        from daimon.adapters.discord.recruitment_guard import protected
+
+        if (
+            message.guild is None
+            or message.author.bot
+            or not protected(
+                self.runtime.settings.recruitment, message.channel, str(message.guild.id)
+            )
+        ):
             return
-        await self.ingest_message(message.channel, message.id)
+        await invalidate_source(
+            self.runtime.sessionmaker,
+            derive_tenant_uuid(platform="discord", workspace_id=str(message.guild.id)),
+            str(message.channel.id),
+            str(message.id),
+            observed_at=message.edited_at or message.created_at,
+        )
+        if isinstance(message.channel, discord.Thread):
+            await self.ingest_message(message.channel, message.id)
 
     async def raw_revision(
         self,
@@ -91,8 +108,21 @@ class RecruitmentCog(commands.Cog):
         *,
         edited_at: datetime | None = None,
         deleted: bool = False,
+        enrich: bool = True,
     ) -> None:
         if guild_id is None:
+            return
+        channel = self.bot.get_channel(channel_id)
+        parent = (
+            str(channel.parent_id)
+            if isinstance(channel, discord.Thread) and channel.parent_id
+            else ""
+            if isinstance(channel, discord.abc.GuildChannel)
+            else None
+        )
+        if not self.runtime.settings.recruitment.is_recruitment_channel(
+            str(guild_id), str(channel_id), parent
+        ):
             return
         tenant = derive_tenant_uuid(platform="discord", workspace_id=str(guild_id))
         thread_id = await invalidate_source(
@@ -103,7 +133,7 @@ class RecruitmentCog(commands.Cog):
             observed_at=edited_at,
             deleted=deleted,
         )
-        if thread_id is None or not self.runtime.settings.recruitment.enabled:
+        if thread_id is None or not enrich or not self.runtime.settings.recruitment.enabled:
             return
         # The event is durable before the first Discord read. Failed enrichment
         # leaves confirmation/delivery fenced for reconciliation after restart.
@@ -127,6 +157,10 @@ class RecruitmentCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_message_edit(self, payload: discord.RawMessageUpdateEvent) -> None:
+        if self.bot.user and str(payload.data.get("author", {}).get("id", "")) == str(
+            self.bot.user.id
+        ):
+            return
         raw_time = payload.data.get("edited_timestamp")
         edited = datetime.fromisoformat(raw_time) if isinstance(raw_time, str) else None
         await self.raw_revision(
@@ -141,16 +175,10 @@ class RecruitmentCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
-        # Invalidate the entire batch before enriching or posting anything.
         for message_id in payload.message_ids:
-            if payload.guild_id is not None:
-                await invalidate_source(
-                    self.runtime.sessionmaker,
-                    derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id)),
-                    str(payload.channel_id),
-                    str(message_id),
-                    deleted=True,
-                )
+            await self.raw_revision(
+                payload.guild_id, payload.channel_id, message_id, deleted=True, enrich=False
+            )
 
     async def ingest_message(
         self, thread: discord.Thread, message_id: int, *, source_channel_id: str | None = None
@@ -168,7 +196,9 @@ class RecruitmentCog(commands.Cog):
                 source = await port.message(
                     config, source_channel_id or str(thread.id), str(message_id)
                 )
-                if source:
+                if source is None:
+                    await service.store.ignore_bot_source(str(thread.id), str(message_id))
+                else:
                     # Accept a live revision even while reconciliation holds a
                     # worker claim. Processing can safely resume next tick.
                     await service.store.ingest(str(thread.id), source)
@@ -243,17 +273,20 @@ class RecruitmentCog(commands.Cog):
                 actor, thread_id = str(interaction.user.id), str(thread.id)
                 await service.authorize(actor, thread_id)
                 state = await service.store.get(thread_id)
-                parts = custom.split(":", 2)
+                parts = custom.split(":", 3)
                 if (
                     not state
-                    or len(parts) != 3
+                    or len(parts) != 4
                     or parts[1] != state.revision
+                    or parts[2] != str(state.covered_watermark)
+                    or parts[3] not in {"retry", "discard", "correct"}
+                    and state.seen_watermark != state.covered_watermark
                     or not interaction.message
                     or str(interaction.message.id) != state.card_id
                 ):
                     await self.publish(thread, service)
                     raise ValueError("Summary changed; use the refreshed review.")
-                action = parts[2]
+                action = parts[3]
                 if action == "correct":
                     await interaction.followup.send(
                         "Post explicit corrected details here, then use /recruitment refresh. "
@@ -266,7 +299,14 @@ class RecruitmentCog(commands.Cog):
                 elif action == "discard":
                     await service.discard(thread_id, actor)
                 else:
-                    await service.confirm(thread_id, parts[1], action, actor, str(interaction.id))
+                    await service.confirm(
+                        thread_id,
+                        parts[1],
+                        action,
+                        actor,
+                        str(interaction.id),
+                        covered_watermark=int(parts[2]),
+                    )
                     await service.deliver(thread_id)
                 await self.publish(thread, service)
                 await interaction.followup.send(
@@ -373,8 +413,11 @@ class RecruitmentCog(commands.Cog):
         settings = self.runtime.settings
         if fernet is None or settings.discord is None:
             return
-        for tenant in await configured_tenants(self.runtime.sessionmaker):
-            store = RecruitmentStore(self.runtime.sessionmaker, fernet, tenant)
+        for guild_id in settings.recruitment.tenants:
+            tenant = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+            store = RecruitmentStore(
+                self.runtime.sessionmaker, fernet, tenant, tenant_config(settings, guild_id)
+            )
             config = await store.configuration()
             if not config:
                 continue

@@ -8,7 +8,7 @@ from __future__ import annotations
 
 import asyncio
 import re
-from collections.abc import Awaitable, Callable, Collection, Sequence
+from collections.abc import Collection, Sequence
 from datetime import timedelta
 from xml.sax.saxutils import escape, quoteattr
 
@@ -46,16 +46,6 @@ REPLY_EXCERPT_MAX_CHARS = 200
 # Fetching an uncached target is best effort and must never hold up a turn.
 REPLY_FETCH_TIMEOUT_S = 5.0
 _TRUNCATION_MARK = "… [truncated]"
-
-
-type SourceFilter = Callable[[discord.Message], Awaitable[bool]]
-
-
-async def _visible_messages(
-    messages: Sequence[discord.Message], source_filter: SourceFilter | None
-) -> list[discord.Message]:
-    """Single boundary before serializing any text, embeds or attachment URLs."""
-    return [m for m in messages if source_filter is None or not await source_filter(m)]
 
 
 def _strip_bot_mention(
@@ -196,7 +186,6 @@ async def _reply_target_lines(
     bot_user_id: int | None,
     bot_display_name: str,
     omit_oversized_image_urls: bool,
-    source_filter: SourceFilter | None = None,
 ) -> list[str]:
     """The ``<reply_targets>`` block for replies whose target the context does not show.
 
@@ -238,8 +227,6 @@ async def _reply_target_lines(
                 continue
             if isinstance(target, discord.DeletedReferencedMessage):
                 body.append(f'<message id={quoteattr(str(target_id))} deleted="true"{origin}/>')
-                continue
-            if not await _visible_messages([target], source_filter):
                 continue
             body.extend(
                 _render_message(
@@ -392,7 +379,6 @@ async def build_context_xml(
     query_message_ids: Sequence[int] = (),
     query_messages: Sequence[discord.Message] = (),
     excluded_message_ids: Sequence[str] = (),
-    source_filter: SourceFilter | None = None,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from thread history for the turn driver.
 
@@ -419,10 +405,6 @@ async def build_context_xml(
     ``excluded_message_ids`` lists messages to keep out of the history, such as
     the turn's own status card.
     """
-    queries_to_check = tuple(query_messages) or (trigger,)
-    if len(await _visible_messages(queries_to_check, source_filter)) != len(queries_to_check):
-        raise PermissionError("Recruitment sources cannot enter provider context")
-
     messages = [m async for m in thread.history(limit=limit)]
     messages.sort(key=lambda m: m.created_at)
     excluded_ids = {
@@ -452,7 +434,6 @@ async def build_context_xml(
     ):
         messages.insert(0, starter)
 
-    messages = await _visible_messages(messages, source_filter)
     image_atts: list[discord.Attachment] = [
         att for msg in messages for att in msg.attachments if is_vision_image_attachment(att)
     ]
@@ -484,7 +465,6 @@ async def build_context_xml(
             bot_user_id=bot_user_id,
             bot_display_name=bot_display_name,
             omit_oversized_image_urls=omit_oversized_image_urls,
-            source_filter=source_filter,
         )
     )
     lines.append("</context>")
@@ -521,7 +501,6 @@ async def build_delta_xml(
     query_text: str | None = None,
     query_message_ids: Sequence[int] = (),
     query_messages: Sequence[discord.Message] = (),
-    source_filter: SourceFilter | None = None,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context for a continuation turn (delta since watermark).
 
@@ -553,10 +532,6 @@ async def build_delta_xml(
     ``query_text`` replaces only the active query text, preserving the
     original trigger's identity and history exclusion.
     """
-    queries_to_check = tuple(query_messages) or (trigger,)
-    if len(await _visible_messages(queries_to_check, source_filter)) != len(queries_to_check):
-        raise PermissionError("Recruitment sources cannot enter provider context")
-
     if after_message_id is None:
         return await build_context_xml(
             thread,
@@ -570,7 +545,6 @@ async def build_delta_xml(
             query_message_ids=query_message_ids,
             query_messages=query_messages,
             excluded_message_ids=excluded_message_ids,
-            source_filter=source_filter,
         )
 
     after_obj = discord.Object(id=after_message_id)
@@ -588,7 +562,6 @@ async def build_delta_xml(
     messages = [m for m in messages if m.id not in excluded_ids]
     messages.sort(key=lambda m: m.created_at)
 
-    messages = await _visible_messages(messages, source_filter)
     image_atts: list[discord.Attachment] = [
         att for msg in messages for att in msg.attachments if is_vision_image_attachment(att)
     ]
@@ -620,7 +593,6 @@ async def build_delta_xml(
             bot_user_id=bot_user_id,
             bot_display_name=bot_display_name,
             omit_oversized_image_urls=omit_oversized_image_urls,
-            source_filter=source_filter,
         )
     )
     lines.append("</context>")
@@ -652,7 +624,6 @@ async def build_channel_context_xml(
     omit_oversized_image_urls: bool = False,
     is_admin: bool = False,
     key_names: Sequence[str] = (),
-    source_filter: SourceFilter | None = None,
 ) -> tuple[str, list[discord.Attachment]]:
     """Build XML context from parent channel history for a channel-mention turn.
 
@@ -674,9 +645,6 @@ async def build_channel_context_xml(
     ``key_names`` names this agent's stored keys, names only (see
     `daimon.core.turn_keys`); empty renders no ``<keys>`` element at all.
     """
-    if not await _visible_messages([trigger], source_filter):
-        raise PermissionError("Recruitment sources cannot enter provider context")
-
     try:
         recent = [m async for m in channel.history(limit=limit)]
     except discord.HTTPException:
@@ -702,8 +670,6 @@ async def build_channel_context_xml(
                     break
                 if msg.id == trigger.id or msg.id in seen_ids:
                     continue
-                if not await _visible_messages([msg], source_filter):
-                    continue
                 for att in msg.attachments:
                     older_files.append(
                         f"<attachment filename={quoteattr(att.filename)}"
@@ -726,7 +692,6 @@ async def build_channel_context_xml(
     messages.sort(key=lambda m: m.created_at)
     messages = [m for m in messages if m.id != trigger.id]
 
-    messages = await _visible_messages(messages, source_filter)
     image_atts: list[discord.Attachment] = [
         att for msg in messages for att in msg.attachments if is_vision_image_attachment(att)
     ]
@@ -758,7 +723,6 @@ async def build_channel_context_xml(
             bot_user_id=bot_user_id,
             bot_display_name=bot_display_name,
             omit_oversized_image_urls=omit_oversized_image_urls,
-            source_filter=source_filter,
         )
     )
     if older_files:

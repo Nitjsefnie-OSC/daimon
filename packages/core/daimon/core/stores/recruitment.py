@@ -10,7 +10,6 @@ from uuid import UUID, uuid4
 
 from cryptography.fernet import MultiFernet
 from daimon.core._models import (
-    RecruitmentConfigRecord,
     RecruitmentMessageRecord,
     RecruitmentOutboxRecord,
     RecruitmentThreadRecord,
@@ -30,9 +29,19 @@ class RecruitmentBusy(Exception):
 
 class RecruitmentStore:
     def __init__(
-        self, sessions: async_sessionmaker[AsyncSession], fernet: MultiFernet, tenant_id: UUID
+        self,
+        sessions: async_sessionmaker[AsyncSession],
+        fernet: MultiFernet,
+        tenant_id: UUID,
+        config: RecruitmentConfig | None = None,
     ) -> None:
         self.sessions, self.fernet, self.tenant_id = sessions, fernet, tenant_id
+        if config is not None:
+            from daimon.core.ma_identity import derive_tenant_uuid
+
+            if derive_tenant_uuid(platform="discord", workspace_id=config.guild_id) != tenant_id:
+                raise ValueError("tenant_guild_mismatch")
+        self.config = config
         self._claim: ContextVar[tuple[str, str] | None] = ContextVar(
             "recruitment_claim", default=None
         )
@@ -65,35 +74,8 @@ class RecruitmentStore:
             finally:
                 self._claim.reset(context)
 
-    async def configure(self, config: RecruitmentConfig) -> None:
-        from daimon.core.ma_identity import derive_tenant_uuid
-
-        if derive_tenant_uuid(platform="discord", workspace_id=config.guild_id) != self.tenant_id:
-            raise ValueError("tenant_guild_mismatch")
-        async with self.claim("config"), self.sessions.begin() as session:
-            old = await session.get(RecruitmentConfigRecord, self.tenant_id)
-            if (
-                old
-                and config != RecruitmentConfig.model_validate(old.config)
-                and config.revision <= int(old.config["revision"])
-            ):
-                raise ValueError("configuration_revision_must_increase")
-            await session.execute(
-                insert(RecruitmentConfigRecord)
-                .values(tenant_id=self.tenant_id, config=config.model_dump(mode="json"))
-                .on_conflict_do_update(
-                    index_elements=["tenant_id"], set_={"config": config.model_dump(mode="json")}
-                )
-            )
-
-        from daimon.core.stores.recruitment_privacy import protect_tenant
-
-        protect_tenant(self.sessions, self.tenant_id)
-
     async def configuration(self) -> RecruitmentConfig | None:
-        async with self.sessions() as session:
-            row = await session.get(RecruitmentConfigRecord, self.tenant_id)
-            return RecruitmentConfig.model_validate(row.config) if row else None
+        return self.config
 
     async def has_provider_session(self, thread_id: str) -> bool:
         async with self.sessions() as session:
@@ -137,6 +119,10 @@ class RecruitmentStore:
                     card_id=row.card_id,
                 )
             state = ThreadState.model_validate_json(self.fernet.decrypt(row.encrypted_state))
+            state.seen_watermark, state.covered_watermark = (
+                row.seen_watermark,
+                row.covered_watermark,
+            )
             if state.revision != row.revision:
                 state.revision, state.error, state.card_revision = (
                     row.revision,
@@ -158,12 +144,24 @@ class RecruitmentStore:
         now = datetime.now(UTC)
         async with self.sessions.begin() as session:
             claim = self._claim.get()
+            if outbox and not update_outbox:
+                parent = await session.get(
+                    RecruitmentThreadRecord, (self.tenant_id, state.thread_id), with_for_update=True
+                )
+                if (
+                    parent is None
+                    or parent.revision != state.revision
+                    or parent.seen_watermark != state.covered_watermark
+                ):
+                    raise ValueError("stale_summary")
             values = dict(
                 tenant_id=self.tenant_id,
                 thread_id=state.thread_id,
                 parent_id=state.parent_id,
                 card_id=state.card_id,
                 phase=state.phase,
+                seen_watermark=state.seen_watermark,
+                covered_watermark=state.covered_watermark,
                 revision=state.revision,
                 encrypted_state=self.seal(state),
                 claim_token=claim[1] if claim else None,
@@ -173,7 +171,7 @@ class RecruitmentStore:
             changes = {
                 k: v
                 for k, v in values.items()
-                if k in {"phase", "revision", "encrypted_state", "card_id"}
+                if k in {"phase", "revision", "encrypted_state", "card_id", "covered_watermark"}
                 or activity
                 and k in {"raw_expires_at", "expires_at"}
             }
@@ -230,10 +228,6 @@ class RecruitmentStore:
                     .values(processed_revision=digest)
                 )
 
-        from daimon.core.stores.recruitment_privacy import protect_tenant
-
-        protect_tenant(self.sessions, self.tenant_id)
-
     async def messages(self, thread_id: str, *, pending_only: bool = False) -> list[SourceMessage]:
         async with self.sessions() as session:
             rows = await session.scalars(
@@ -252,8 +246,7 @@ class RecruitmentStore:
                     ),
                 )
             )
-            config = await session.get(RecruitmentConfigRecord, self.tenant_id)
-            guild = str(config.config["guild_id"]) if config else "0"
+            guild = self.config.guild_id if self.config else "0"
             result: list[SourceMessage] = []
             for row in rows:
                 if row.deleted:
@@ -324,6 +317,8 @@ class RecruitmentStore:
                     and message.observed_at <= row.observed_at
                 ):
                     return False
+            if row is None or not row.needs_enrichment:
+                thread.seen_watermark += 1
             claim = self._claim.get()
             if claim and thread.claim_token != claim[1]:
                 raise RecruitmentBusy("claim_expired")
@@ -334,10 +329,9 @@ class RecruitmentStore:
             state = ThreadState.model_validate_json(self.fernet.decrypt(thread.encrypted_state))
             state.revision, state.error, state.card_revision = uuid4().hex, "refresh_required", ""
             thread.revision, thread.encrypted_state = state.revision, self.seal(state)
-            configured = await session.get(RecruitmentConfigRecord, self.tenant_id)
-            if not configured:
+            config = self.config
+            if config is None:
                 raise PermissionError("recruitment_unconfigured")
-            config = RecruitmentConfig.model_validate(configured.config)
             if not config.enabled:
                 raise PermissionError("recruitment_disabled")
             await session.execute(
@@ -372,6 +366,37 @@ class RecruitmentStore:
                 )
             )
             return True
+
+    async def ignore_bot_source(self, thread_id: str, message_id: str) -> None:
+        from sqlalchemy import delete
+
+        async with self.sessions.begin() as session:
+            thread = await session.get(
+                RecruitmentThreadRecord, (self.tenant_id, thread_id), with_for_update=True
+            )
+            if not thread:
+                return
+            await session.execute(
+                delete(RecruitmentMessageRecord).where(
+                    RecruitmentMessageRecord.tenant_id == self.tenant_id,
+                    RecruitmentMessageRecord.thread_id == thread_id,
+                    RecruitmentMessageRecord.message_id == message_id,
+                    RecruitmentMessageRecord.needs_enrichment.is_(True),
+                )
+            )
+            pending = await session.scalar(
+                select(RecruitmentMessageRecord.message_id)
+                .where(
+                    RecruitmentMessageRecord.tenant_id == self.tenant_id,
+                    RecruitmentMessageRecord.thread_id == thread_id,
+                    RecruitmentMessageRecord.processed_revision.is_distinct_from(
+                        RecruitmentMessageRecord.revision
+                    ),
+                )
+                .limit(1)
+            )
+            if pending is None:
+                thread.covered_watermark = thread.seen_watermark
 
     async def outbox(self, id: str) -> Outbox | None:
         async with self.sessions() as session:
@@ -447,10 +472,10 @@ async def purge_expired(
         )
 
 
-async def configured_tenants(sessions: async_sessionmaker[AsyncSession]) -> list[UUID]:
-    """Operator sweep enumerates configs; all subsequent operations use a bound store."""
+async def enrolled_tenants(sessions: async_sessionmaker[AsyncSession]) -> list[UUID]:
+    """Erasure enumerates retained enrolled tenants, independently of current settings."""
     async with sessions() as session:
-        return list(await session.scalars(select(RecruitmentConfigRecord.tenant_id)))
+        return list(await session.scalars(select(RecruitmentThreadRecord.tenant_id).distinct()))
 
 
 async def invalidate_source(
@@ -484,14 +509,22 @@ async def invalidate_source(
             )
             .with_for_update()
         )
-        if thread is None or thread.phase == "expired":
+        if thread is None or thread.phase == "expired" or thread.card_id == message_id:
             return None
         old = await session.get(RecruitmentMessageRecord, (tenant_id, thread.thread_id, message_id))
-        when = observed_at or (old.observed_at if old and not deleted else datetime.now(UTC))
-        if old and (old.deleted or observed_at and observed_at < old.observed_at):
-            return thread.thread_id
+        when = observed_at or (
+            old.observed_at
+            if old and not deleted
+            else datetime.now(UTC)
+            if deleted
+            else datetime.min.replace(tzinfo=UTC)
+        )
+        if old:
+            when = max(when, old.observed_at)
+            deleted = deleted or old.deleted
         revision = uuid4().hex
-        thread.revision, thread.claim_token = revision, uuid4().hex
+        thread.seen_watermark += 1
+        thread.claim_token = uuid4().hex
         values = dict(
             tenant_id=tenant_id,
             thread_id=thread.thread_id,

@@ -16,7 +16,7 @@ from pydantic import SecretStr
 
 
 def test_enrollment_and_live_recruiter_boundary() -> None:
-    config = RecruitmentConfig(guild_id="1", recruiter_role_ids=("7",))
+    config = RecruitmentConfig(guild_id="1", recruiter_role_ids=("7",), channel_ids=("2",))
     assert enrollment_source("  !LABS-Staffing: Synthetic", "2", config)
     assert not enrollment_source("!labs-staffing:   ", "2", config)
     assert not enrollment_source("Staffing request", "2", config)
@@ -100,3 +100,16 @@ def test_recruitment_migration_has_no_diff_whitespace_errors() -> None:
     assert [
         i for i, line in enumerate(migration.read_text().splitlines(), 1) if line.rstrip() != line
     ] == []
+
+
+def test_settings_require_explicit_parent_channels_and_recruiters():
+    import pytest
+    from daimon.core.config import RecruitmentSettings
+    from pydantic import ValidationError
+
+    with pytest.raises(ValidationError):
+        RecruitmentSettings(tenants={"101": {"channel_ids": [], "recruiter_user_ids": ["7"]}})
+    with pytest.raises(ValidationError):
+        RecruitmentSettings(tenants={"101": {"channel_ids": ["2"]}})
+    config = RecruitmentConfig(guild_id="101", channel_ids=("2",))
+    assert not enrollment_source("!labs-staffing: Synthetic", "3", config)

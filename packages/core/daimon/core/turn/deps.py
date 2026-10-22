@@ -28,6 +28,7 @@ from daimon.core.config import (
     DiscordSettings,
     GithubAppSettings,
     McpSettings,
+    RecruitmentSettings,
     Settings,
     TurnSettings,
     load_turn_settings,
@@ -82,6 +83,7 @@ class TurnDeps:
     github_app_id: str | None
     github_app_private_key: str | None
     public_url: str | None
+    recruitment: RecruitmentSettings = field(default_factory=RecruitmentSettings)
     membership_resolver: MembershipResolver | None = None
     direct_message_policies: Mapping[uuid.UUID, DirectMessagePolicy] = field(
         default_factory=dict[uuid.UUID, DirectMessagePolicy]
@@ -181,6 +183,7 @@ def build_turn_deps(
     turn_settings = cast(object, settings.turn)
     crypto_keys = tuple(secret.get_secret_value() for secret in settings.crypto.keys)
     return TurnDeps(
+        recruitment=settings.recruitment,
         membership_resolver=(
             DiscordRestMembershipResolver(settings.discord.bot_token.get_secret_value())
             if isinstance(settings.discord, DiscordSettings)

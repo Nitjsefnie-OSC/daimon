@@ -72,6 +72,8 @@ class RecruitmentService:
                 return
             for message in messages:
                 await self.store.ingest(thread_id, message)
+            state = await self.store.get(thread_id)
+            assert state is not None
             fresh = await self.store.messages(thread_id, pending_only=True)
             if refresh and not state.candidate_id:
                 fresh = messages
@@ -102,6 +104,16 @@ class RecruitmentService:
             if len(history) > 200 or sum(len(m.content) for m in history) > 60000:
                 state.phase, state.error = "blocked", "history_too_large"
                 await self.store.save(state, config, activity=True)
+                return
+            if not history and not state.candidate_id:
+                state.phase, state.error, state.candidate = (
+                    "blocked",
+                    "candidate_evidence_missing",
+                    None,
+                )
+                state.summary, state.changes = "No current candidate evidence.", []
+                state.covered_watermark = state.seen_watermark
+                await self.store.save(state, config, processed=tuple(fresh))
                 return
             options: dict[str, list[str]] = {}
             if state.matches:
@@ -160,12 +172,21 @@ class RecruitmentService:
                 state.phase, state.error = "review", None
             except (ValueError, RecruitmentAPIError, APIError, TimeoutError):
                 state.phase, state.error = "blocked", "review_unavailable"
+            if state.error is None:
+                state.covered_watermark = state.seen_watermark
             await self.store.save(
                 state, config, activity=True, processed=tuple(fresh) if state.error is None else ()
             )
 
     async def confirm(
-        self, thread_id: str, revision: str, selection: str, actor: str, interaction: str
+        self,
+        thread_id: str,
+        revision: str,
+        selection: str,
+        actor: str,
+        interaction: str,
+        *,
+        covered_watermark: int | None = None,
     ) -> None:
         await self.authorize(actor, thread_id)
         config = await self.config()
@@ -175,6 +196,9 @@ class RecruitmentService:
                 not state
                 or state.phase != "review"
                 or state.revision != revision
+                or state.seen_watermark != state.covered_watermark
+                or covered_watermark is not None
+                and covered_watermark != state.covered_watermark
                 or state.outbox_id
                 or not state.scan_complete
                 or state.config_revision != config.revision
@@ -258,10 +282,17 @@ class RecruitmentService:
             state = await self.store.get(thread_id)
             if not state or not state.outbox_id:
                 return
-            if await self.store.pending_enrichment(thread_id):
-                return
             item = await self.store.outbox(state.outbox_id)
             if not item or item.state in {"completed", "discarded", "expired"}:
+                return
+            if await self.store.pending_enrichment(thread_id):
+                return
+            # Fresh evidence fences a first send. A possibly-applied operation
+            # still needs its original same-key authoritative outcome; it must
+            # not deadlock behind the newer facts waiting for that outcome.
+            if state.seen_watermark != state.covered_watermark and not (
+                item.attempts and item.possibly_applied
+            ):
                 return
             if (
                 item.state == "blocked"

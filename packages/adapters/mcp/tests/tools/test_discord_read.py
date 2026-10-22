@@ -1250,17 +1250,3 @@ async def test_poll_reads_recheck_owners_history_permission_at_actual_read(monke
             await _read_thread_impl(
                 _runtime_with_discord_token(), _auth(), thread_id="444", require_owner_history=True
             )
-
-
-@pytest.fixture(autouse=True)
-def ordinary_sources_without_recruitment(monkeypatch: pytest.MonkeyPatch) -> None:
-    # These transport fixtures have no database. Recruitment privacy is tested
-    # separately with persisted tenant configuration and enrollments.
-    from unittest.mock import AsyncMock
-
-    from daimon.core.stores.recruitment_privacy import RecruitmentSources
-
-    monkeypatch.setattr(
-        "daimon.adapters.mcp.tools.discord._recruitment.sources_for_task",
-        AsyncMock(return_value=RecruitmentSources()),
-    )

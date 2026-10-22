@@ -16,7 +16,6 @@ from daimon.core.recruitment import (
 from daimon.core.recruitment_api import RecruitmentAPI, SyntheticRecruitmentTransport
 from daimon.core.recruitment_service import RecruitmentService
 from daimon.core.stores.recruitment import RecruitmentStore
-from daimon.core.stores.recruitment_privacy import sources_for_task
 from daimon.testing.factories import make_tenant
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, async_sessionmaker
@@ -28,10 +27,12 @@ async def store(db_nullpool_engine: AsyncEngine, db_clean: None) -> RecruitmentS
     async with db_session_factory.begin() as session:
         tenant = await make_tenant(session, workspace_id="101")
     result = RecruitmentStore(
-        db_session_factory, MultiFernet([Fernet(Fernet.generate_key())]), tenant.id
-    )
-    await result.configure(
-        RecruitmentConfig(guild_id="101", enabled=True, recruiter_user_ids=("7",))
+        db_session_factory,
+        MultiFernet([Fernet(Fernet.generate_key())]),
+        tenant.id,
+        RecruitmentConfig(
+            guild_id="101", enabled=True, recruiter_user_ids=("7",), channel_ids=("2",)
+        ),
     )
     return result
 
@@ -107,7 +108,7 @@ async def test_tenant_filter_and_retention_tombstones(store: RecruitmentStore) -
     assert await other.get("20") is None
     assert await other.messages("20") == []
     assert not await other.enrolled("20")
-    assert "20" not in (await sources_for_task(store.sessions, other.tenant_id, fresh=True)).threads
+    assert "20" not in await other.list_threads()
     with pytest.raises(LookupError):
         await other.ingest("20", message())
     await other.purge(datetime.now(UTC) + timedelta(days=99))
@@ -116,7 +117,7 @@ async def test_tenant_filter_and_retention_tombstones(store: RecruitmentStore) -
     assert await store.messages("20") == []
     state = await store.get("20")
     assert state and state.phase == "expired" and state.card_id == "30"
-    assert "20" in (await sources_for_task(store.sessions, store.tenant_id, fresh=True)).threads
+    assert "20" in await store.list_threads()
 
 
 async def test_update_needs_fresh_confirmation_and_keeps_both_fields(
@@ -314,7 +315,7 @@ async def test_gateway_edit_fences_inflight_worker_and_remains_pending(
     config = await store.configuration()
     assert config
     await store.save(ThreadState(thread_id="20", parent_id="2", revision="old"), config)
-    inbox = RecruitmentStore(store.sessions, store.fernet, store.tenant_id)
+    inbox = RecruitmentStore(store.sessions, store.fernet, store.tenant_id, store.config)
     async with store.claim("20"):
         stale = await store.get("20")
         assert stale
@@ -448,7 +449,14 @@ async def test_raw_events_fence_review_before_discord_enrichment(store, event) -
         bot.fetch_channel = AsyncMock(side_effect=fetch)
         runtime = SimpleNamespace(
             sessionmaker=store.sessions,
-            settings=SimpleNamespace(recruitment=SimpleNamespace(enabled=True)),
+            settings=SimpleNamespace(
+                recruitment=__import__(
+                    "daimon.core.config", fromlist=["RecruitmentSettings"]
+                ).RecruitmentSettings(
+                    enabled=True,
+                    tenants={"101": {"channel_ids": ["2"], "recruiter_user_ids": ["7"]}},
+                )
+            ),
         )
         cog = RecruitmentCog(bot, runtime)
         payload = SimpleNamespace(
@@ -508,58 +516,19 @@ async def test_new_edit_after_raw_purge_invalidates_derived_review(store) -> Non
     assert (await store.messages("20"))[0].content == newer.content
 
 
-async def test_privacy_negative_cache_is_cheap_but_dispatch_is_authoritative(
-    store, monkeypatch
-) -> None:
-    from daimon.core.ma_identity import derive_tenant_uuid
-    from daimon.core.stores.recruitment_privacy import privacy_active, sources_for_task
-    from sqlalchemy import event
+def test_privacy_settings_are_authoritative_without_io():
+    from daimon.core.config import RecruitmentSettings
 
-    other = derive_tenant_uuid(platform="discord", workspace_id="102")
-    assert not await privacy_active(store.sessions, other)
-    statements = []
-    engine = store.sessions.kw["bind"].sync_engine
-
-    def capture(*args):
-        statements.append(args[2])
-
-    event.listen(engine, "before_cursor_execute", capture)
-    try:
-        for _ in range(20):
-            assert not await privacy_active(store.sessions, other)
-    finally:
-        event.remove(engine, "before_cursor_execute", capture)
-    assert statements == []
-    async with store.sessions.begin() as session:
-        await make_tenant(session, workspace_id="102")
-    # Simulate a config committed by another process, without local invalidation.
-    import time
-
-    import daimon.core.stores.recruitment_privacy as privacy
-    from sqlalchemy import text
-
-    async with store.sessions.begin() as session:
-        await session.execute(
-            text(
-                "INSERT INTO recruitment_configs (tenant_id,config) VALUES (:tenant,CAST(:config AS JSONB))"
-            ),
-            {
-                "tenant": other,
-                "config": RecruitmentConfig(guild_id="102", enabled=False).model_dump_json(),
-            },
-        )
-    privacy._INDEX[store.sessions] = (time.monotonic(), frozenset({store.tenant_id}))
-    assert not await privacy_active(store.sessions, other)
-    snapshot = await sources_for_task(store.sessions, other, fresh=True)
-    assert snapshot.active  # Dispatch does not authorize from admission's cache.
-    newly_configured = RecruitmentStore(store.sessions, store.fernet, other)
-    await newly_configured.configure(RecruitmentConfig(guild_id="102", enabled=False, revision=2))
-    assert await privacy_active(store.sessions, other)
-    state = ThreadState(thread_id="30", parent_id="2")
-    await newly_configured.save(state, await newly_configured.configuration())
-    await newly_configured.purge(datetime.now(UTC) + timedelta(days=40))
-    assert "30" in (await sources_for_task(store.sessions, other, fresh=True)).threads
-    assert await privacy_active(store.sessions, other)
+    settings = RecruitmentSettings(
+        tenants={"101": {"channel_ids": ["2"], "recruiter_user_ids": ["7"]}}
+    )
+    for _ in range(20):
+        assert settings.is_recruitment_channel("101", "20", "2")
+        assert settings.is_recruitment_channel("101", "2", "")
+        assert settings.is_recruitment_channel("101", "20", None)
+        assert not RecruitmentSettings().is_recruitment_channel("101", "20", None)
+    # Rename, prefix removal, enrollment and retention cannot change this boundary.
+    assert not settings.is_recruitment_channel("102", "20", "2")
 
 
 async def test_partial_event_does_not_repopulate_unchanged_erased_evidence(store) -> None:
@@ -577,7 +546,7 @@ async def test_partial_event_does_not_repopulate_unchanged_erased_evidence(store
     assert not await store.pending_enrichment("20")
     assert await store.messages("20") == []
     state = await store.get("20")
-    assert state.revision != before.revision and state.error == "refresh_required"
+    assert state.seen_watermark > state.covered_watermark or state.revision != before.revision
 
 
 async def test_offline_deletion_after_raw_purge_uses_content_free_manifest(store) -> None:
@@ -611,5 +580,242 @@ async def test_offline_deletion_after_raw_purge_uses_content_free_manifest(store
         )
         await service.delete_message("20", "10")
     state = await store.get("20")
-    assert state.revision != before.revision
+    assert state.seen_watermark > before.seen_watermark
     assert (await store.message_manifest("20"))[0][2] is True
+
+
+@pytest.mark.parametrize("parent", [False, True])
+async def test_new_message_fences_confirmation_before_first_enrichment(store, parent):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock, MagicMock
+
+    import discord
+    from daimon.adapters.discord.recruitment import RecruitmentCog
+    from daimon.core.config import RecruitmentSettings
+
+    async def authorize(actor, thread):
+        pass
+
+    async with httpx.AsyncClient(transport=SyntheticRecruitmentTransport()) as http:
+        service = RecruitmentService(
+            store,
+            RecruitmentAPI(http, "https://synthetic.invalid", SecretStr("fake")),
+            extract,
+            authorize,
+            backend="synthetic",
+        )
+        await service.enroll("20", "2", "!labs-staffing: Synthetic")
+        await service.ingest("20", [message()])
+        state = await store.get("20")
+        state.scan_complete = True
+        await store.save(state, await service.config())
+        settings = RecruitmentSettings(
+            enabled=True, tenants={"101": {"channel_ids": ["2"], "recruiter_user_ids": ["7"]}}
+        )
+        cog = RecruitmentCog(
+            MagicMock(),
+            SimpleNamespace(
+                sessionmaker=store.sessions, settings=SimpleNamespace(recruitment=settings)
+            ),
+        )
+
+        async def enrichment(*args, **kwargs):
+            with pytest.raises(ValueError, match="stale"):
+                await service.confirm("20", state.revision, "create", "7", "racing-create")
+            assert await store.pending_enrichment("20")
+
+        cog.ingest_message = AsyncMock(side_effect=enrichment)
+        incoming = MagicMock(spec=discord.Message)
+        incoming.author.bot = False
+        incoming.guild.id = 101
+        incoming.channel = MagicMock(spec=discord.TextChannel if parent else discord.Thread)
+        incoming.channel.id, incoming.channel.parent_id = (2 if parent else 20), 2
+        incoming.id = 20 if parent else 11
+        incoming.edited_at = None
+        incoming.created_at = datetime.now(UTC)
+        await cog.on_message(incoming)
+        with pytest.raises(ValueError, match="stale"):
+            await service.confirm("20", state.revision, "create", "7", "after-create")
+        current = await store.get("20")
+        assert current.seen_watermark > current.covered_watermark
+        # Recovery accepts the actual timestamp, even though the event arrived later.
+        assert await store.ingest(
+            "20", message(str(incoming.id)).model_copy(update={"observed_at": incoming.created_at})
+        )
+
+
+@pytest.mark.parametrize("known_card", [True, False])
+async def test_own_card_echo_is_excluded_and_unknown_bot_recovers_without_new_review(
+    store, known_card
+):
+    from daimon.core.recruitment_discord import DiscordMessage
+    from daimon.core.stores.recruitment import invalidate_source
+
+    config = await store.configuration()
+    await store.save(
+        ThreadState(thread_id="20", parent_id="2", revision="review", card_id="30", phase="review"),
+        config,
+    )
+    before = await store.get("20")
+    id = "30" if known_card else "31"
+    await invalidate_source(store.sessions, store.tenant_id, "20", id)
+    if not known_card:
+        assert await store.pending_enrichment("20")
+        # Same conversion used by both live and scheduler enrichment.
+        source = DiscordMessage(
+            id=id,
+            content="private card",
+            author={"id": "99", "bot": True},
+            timestamp=datetime.now(UTC),
+        ).source("101", "20")
+        assert source is None
+        await store.ignore_bot_source("20", id)
+    assert not await store.pending_enrichment("20")
+    after = await store.get("20")
+    assert after.revision == before.revision
+    assert after.seen_watermark == after.covered_watermark
+    assert await store.messages("20") == []
+
+
+async def test_confirmation_watermark_is_checked_atomically_with_outbox_insert(store, monkeypatch):
+    from daimon.core.stores.recruitment import RecruitmentBusy, invalidate_source
+
+    async def authorize(actor, thread):
+        pass
+
+    async with httpx.AsyncClient(transport=SyntheticRecruitmentTransport()) as http:
+        service = RecruitmentService(
+            store,
+            RecruitmentAPI(http, "https://synthetic.invalid", SecretStr("fake")),
+            extract,
+            authorize,
+            backend="synthetic",
+        )
+        await service.enroll("20", "2", "!labs-staffing: Synthetic")
+        await service.ingest("20", [message()])
+        state = await store.get("20")
+        state.scan_complete = True
+        await store.save(state, await service.config())
+        original_save = store.save
+
+        async def racing_save(state, config, **kwargs):
+            if kwargs.get("outbox"):
+                await invalidate_source(store.sessions, store.tenant_id, "20", "11")
+            await original_save(state, config, **kwargs)
+
+        monkeypatch.setattr(store, "save", racing_save)
+        with pytest.raises((ValueError, RecruitmentBusy)):
+            await service.confirm(
+                "20",
+                state.revision,
+                "create",
+                "7",
+                "race",
+                covered_watermark=state.covered_watermark,
+            )
+        assert (await store.get("20")).outbox_id is None
+
+
+async def test_scheduler_recovers_unknown_author_bot_edit_without_card_echo_loop(store):
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+
+    from daimon.core.recruitment_runtime import reconcile_thread
+    from daimon.core.stores.recruitment import invalidate_source
+
+    config = await store.configuration()
+    await store.save(
+        ThreadState(
+            thread_id="20", parent_id="2", phase="review", revision="same-review", card_id="30"
+        ),
+        config,
+    )
+    await invalidate_source(store.sessions, store.tenant_id, "20", "31")
+
+    async def authorize(actor, thread):
+        pass
+
+    port = SimpleNamespace(
+        check_access=AsyncMock(),
+        bot_id=AsyncMock(return_value="99"),
+        message=AsyncMock(return_value=None),
+        history=AsyncMock(return_value=([], None, "0")),
+    )
+    async with httpx.AsyncClient(transport=SyntheticRecruitmentTransport()) as http:
+        service = RecruitmentService(
+            store,
+            RecruitmentAPI(http, "https://synthetic.invalid", SecretStr("fake")),
+            extract,
+            authorize,
+            backend="synthetic",
+        )
+        await reconcile_thread(service, port, "20")
+    state = await store.get("20")
+    assert state.revision == "same-review"
+    assert state.seen_watermark == state.covered_watermark
+    assert not await store.pending_enrichment("20")
+    assert await store.messages("20") == []
+
+
+async def test_new_evidence_does_not_deadlock_same_key_uncertainty_resolution(store):
+    fake = SyntheticRecruitmentTransport()
+    lost = False
+
+    class AcceptedThenLost(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            nonlocal lost
+            response = await fake.handle_async_request(request)
+            if not request.url.path.endswith("/match") and not lost:
+                lost = True
+                raise httpx.ReadTimeout("accepted", request=request)
+            return response
+
+    async def authorize(actor, thread):
+        pass
+
+    async with httpx.AsyncClient(transport=AcceptedThenLost()) as http:
+        service = RecruitmentService(
+            store,
+            RecruitmentAPI(http, "https://synthetic.invalid", SecretStr("fake")),
+            extract,
+            authorize,
+            backend="synthetic",
+        )
+        await service.enroll("20", "2", "!labs-staffing: Synthetic")
+        await service.ingest("20", [message()])
+        state = await store.get("20")
+        state.scan_complete = True
+        await store.save(state, await service.config())
+        await service.confirm("20", state.revision, "create", "7", "uncertain")
+        await service.deliver("20", force=True)
+        item = await store.outbox((await store.get("20")).outbox_id)
+        assert item.possibly_applied
+        await service.ingest("20", [message("11", "Synthetic newer fact")])
+        await service.deliver("20", force=True)
+        state = await store.get("20")
+        assert state.candidate_id and state.outbox_id is None
+        assert state.phase == "blocked" and len(fake.effects) == 1
+
+
+async def test_every_non_control_gateway_event_advances_watermark_even_if_reordered(store):
+    from daimon.core.stores.recruitment import invalidate_source
+
+    await store.save(
+        ThreadState(thread_id="20", parent_id="2", card_id="30"), await store.configuration()
+    )
+    original = message()
+    await store.ingest("20", original)
+    before = (await store.get("20")).seen_watermark
+    await invalidate_source(store.sessions, store.tenant_id, "20", "10", deleted=True)
+    await invalidate_source(store.sessions, store.tenant_id, "20", "10", deleted=True)
+    await invalidate_source(
+        store.sessions,
+        store.tenant_id,
+        "20",
+        "10",
+        observed_at=original.observed_at - timedelta(days=1),
+    )
+    assert (await store.get("20")).seen_watermark == before + 3
+    assert (await store.message_manifest("20"))[0][2] is True
+    await invalidate_source(store.sessions, store.tenant_id, "20", "30")
+    assert (await store.get("20")).seen_watermark == before + 3

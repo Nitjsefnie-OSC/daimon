@@ -45,7 +45,9 @@ def review_card(
     def button(label: str, action: str, *, disabled: bool = False) -> None:
         view.add_item(
             discord.ui.Button(
-                label=label, custom_id=f"recruit:{state.revision}:{action}", disabled=disabled
+                label=label,
+                custom_id=f"recruit:{state.revision}:{state.covered_watermark}:{action}",
+                disabled=disabled,
             )
         )
 
@@ -57,7 +59,12 @@ def review_card(
             disabled=not outgoing.may_discard,
         )
     elif state.phase == "review":
-        ready = state.scan_complete and state.candidate is not None and not state.error
+        ready = (
+            state.seen_watermark == state.covered_watermark
+            and state.scan_complete
+            and state.candidate is not None
+            and not state.error
+        )
         if state.candidate_id:
             button("Confirm update", "update", disabled=not ready or not state.changes)
         else:

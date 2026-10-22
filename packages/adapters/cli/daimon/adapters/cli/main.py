@@ -25,7 +25,6 @@ from daimon.adapters.cli.commands.memory import memory_app
 from daimon.adapters.cli.commands.notebook import notebook_app
 from daimon.adapters.cli.commands.openai import PROVIDER_NAME, openai_app
 from daimon.adapters.cli.commands.promo import promo_app
-from daimon.adapters.cli.commands.recruitment import recruitment_app
 from daimon.adapters.cli.commands.routines import routines_app
 from daimon.adapters.cli.commands.sessions import sessions_app
 from daimon.adapters.cli.commands.skills import skills_app
@@ -55,7 +54,6 @@ app.add_typer(skills_app, name="skills")
 app.add_typer(help_app, name="help")
 app.add_typer(mcp_app, name="mcp")
 app.add_typer(leads_app, name="leads")
-app.add_typer(recruitment_app, name="recruitment")
 app.add_typer(memory_app, name="memory")
 app.add_typer(notebook_app, name="notebook")
 app.add_typer(openai_app, name=PROVIDER_NAME)

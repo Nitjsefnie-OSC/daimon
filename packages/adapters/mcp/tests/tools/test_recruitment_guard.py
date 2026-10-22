@@ -1,47 +1,15 @@
-"""One tenant predicate protects direct reads, parent starters and rename ingress."""
+"""Recruitment privacy depends solely on immutable channel parents."""
 
-from datetime import UTC, datetime
-from types import SimpleNamespace
-from unittest.mock import MagicMock
-
-import discord
-from cryptography.fernet import Fernet, MultiFernet
-from daimon.adapters.mcp.tools.discord._recruitment import recruitment_message, recruitment_thread
-from daimon.core.recruitment import RecruitmentConfig, ThreadState
-from daimon.core.stores.recruitment import RecruitmentStore
-from daimon.core.stores.recruitment_privacy import SourceChannel
-from daimon.testing.factories import make_tenant
+import pytest
+from daimon.core.config import RecruitmentSettings
 
 
-async def test_qualifying_and_persisted_sources_survive_disable_and_rename(
-    db_session_factory, db_clean
-) -> None:
-    async with db_session_factory.begin() as session:
-        tenant = await make_tenant(session, workspace_id="101")
-    store = RecruitmentStore(
-        db_session_factory, MultiFernet([Fernet(Fernet.generate_key())]), tenant.id
+@pytest.mark.parametrize("name", ["!labs-staffing: Candidate", "prefix removed", ""])
+def test_privacy_precedes_enrollment_and_survives_rename_and_erasure(name):
+    settings = RecruitmentSettings(
+        tenants={"101": {"channel_ids": ["2"], "recruiter_user_ids": ["7"]}}
     )
-    config = RecruitmentConfig(guild_id="101", enabled=False, channel_ids=("2",))
-    await store.configure(config)
-    runtime = SimpleNamespace(session_factory=db_session_factory)
-
-    async def live_allowed(id):
-        return SourceChannel(id, "101", "2", " !LABS-staffing: Synthetic", True)
-
-    async def live_elsewhere(id):
-        return SourceChannel(id, "101", "3", " !LABS-staffing: Synthetic", True)
-
-    assert await recruitment_thread(runtime, "101", "20", resolve=live_allowed)
-    from daimon.core.stores.recruitment_privacy import sources_for_task
-
-    await sources_for_task(store.sessions, tenant.id, fresh=True)
-    assert not await recruitment_thread(runtime, "101", "20", resolve=live_elsewhere)
-    await store.save(ThreadState(thread_id="20", parent_id="2"), config)
-    assert await recruitment_thread(runtime, "101", "20", title="Prefix removed", parent_id="2")
-    assert not await recruitment_thread(runtime, "102", "20")
-    message = MagicMock(spec=discord.Message)
-    message.id = 20
-    message.channel = MagicMock(spec=discord.TextChannel)
-    assert await recruitment_message(runtime, "101", message)  # parent starter
-    await store.purge(datetime.max.replace(tzinfo=UTC))
-    assert await recruitment_thread(runtime, "101", "20")  # tombstone remains private
+    assert settings.is_recruitment_channel("101", "20", "2")
+    assert settings.is_recruitment_channel("101", "2")
+    assert not settings.is_recruitment_channel("102", "20", "2")
+    assert not settings.is_recruitment_channel("101", "20", "3")

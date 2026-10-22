@@ -4263,16 +4263,10 @@ class LeadMailboxMessageRecord(Base):
     expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
 
 
-class RecruitmentConfigRecord(Base):
-    __tablename__ = "recruitment_configs"
-    tenant_id: Mapped[uuid.UUID] = mapped_column(
-        UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
-    )
-    config: Mapped[dict[str, Any]] = mapped_column(JSONB, nullable=False)
-
-
 class RecruitmentThreadRecord(Base):
     __tablename__ = "recruitment_threads"
+    seen_watermark: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
+    covered_watermark: Mapped[int] = mapped_column(BigInteger, nullable=False, default=0)
     tenant_id: Mapped[uuid.UUID] = mapped_column(
         UUID(as_uuid=True), ForeignKey("tenants.id", ondelete="CASCADE"), primary_key=True
     )

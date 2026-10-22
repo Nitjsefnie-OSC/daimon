@@ -153,7 +153,7 @@ def enrollment_source(title: str, parent_id: str, config: RecruitmentConfig) -> 
     prefix = "!labs-staffing:"
     name = title.lstrip()
     return (
-        (not config.channel_ids or parent_id in config.channel_ids)
+        (parent_id in config.channel_ids)
         and name.casefold().startswith(prefix)
         and bool(name[len(prefix) :].strip())
     )
@@ -172,6 +172,8 @@ class ThreadState(RecruitmentModel):
     parent_id: str
     phase: str = "discovered"
     revision: str = ""
+    seen_watermark: int = 0
+    covered_watermark: int = 0
     config_revision: int = 0
     backend: str = ""
     candidate: Candidate | None = None

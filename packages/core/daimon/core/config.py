@@ -1765,7 +1765,52 @@ class RecruitmentBackendSettings(BaseModel):
     )
 
 
+class RecruitmentTenantSettings(BaseModel):
+    channel_ids: tuple[str, ...] = Field(
+        min_length=1,
+        description=(
+            "Required recruitment parent channel IDs; isolated from all general agent "
+            "readers, even while processing is disabled. Restart services to change."
+        ),
+    )
+    recruiter_user_ids: tuple[str, ...] = ()
+    recruiter_role_ids: tuple[str, ...] = ()
+    enabled: bool = True
+    raw_retention_days: int = Field(default=7, ge=1, le=365)
+    retention_days: int = Field(default=30, ge=1, le=3650)
+
+    @model_validator(mode="after")
+    def require_recruiters(self) -> RecruitmentTenantSettings:
+        if not self.recruiter_user_ids and not self.recruiter_role_ids:
+            raise ValueError("At least one recruiter user or role is required")
+        return self
+
+
 class RecruitmentSettings(BaseModel):
+    tenants: dict[str, RecruitmentTenantSettings] = Field(
+        default_factory=dict,
+        description=(
+            "Guild ID to recruitment settings (required nonempty channel_ids and "
+            "recruiter_user_ids or recruiter_role_ids). Immutable for the process lifetime; "
+            "restart Discord, MCP and scheduler together when changing. Privacy applies "
+            "even when recruitment processing is disabled."
+        ),
+    )
+
+    def is_recruitment_channel(
+        self, guild_id: str, channel_id: str, parent_id: str | None = ""
+    ) -> bool:
+        """Pure privacy boundary; None means an unresolved thread parent."""
+        tenant = self.tenants.get(guild_id)
+        return bool(
+            tenant
+            and (
+                channel_id in tenant.channel_ids
+                or parent_id is None
+                or parent_id in tenant.channel_ids
+            )
+        )
+
     enabled: bool = Field(
         default=False,
         description=(

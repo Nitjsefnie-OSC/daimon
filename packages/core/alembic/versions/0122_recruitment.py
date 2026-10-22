@@ -14,18 +14,12 @@ depends_on = None
 def upgrade() -> None:
     op.execute("SET LOCAL lock_timeout = '5s'")
     op.execute(
-        """CREATE TABLE recruitment_configs (
-    tenant_id UUID NOT NULL,
-    config JSONB NOT NULL,
-    PRIMARY KEY (tenant_id),
-    FOREIGN KEY(tenant_id) REFERENCES tenants (id) ON DELETE CASCADE
-)"""
-    )
-    op.execute(
         """CREATE TABLE recruitment_threads (
     tenant_id UUID NOT NULL,
     thread_id TEXT NOT NULL,
     parent_id TEXT NOT NULL,
+    seen_watermark BIGINT NOT NULL DEFAULT 0,
+    covered_watermark BIGINT NOT NULL DEFAULT 0,
     card_id TEXT,
     claim_token TEXT,
     phase TEXT NOT NULL,
@@ -76,14 +70,13 @@ def upgrade() -> None:
         op.execute(
             "DO $$ BEGIN IF EXISTS (SELECT FROM pg_roles WHERE rolname = '"
             + role
-            + "') THEN EXECUTE format('REVOKE ALL ON recruitment_configs, "
+            + "') THEN EXECUTE format('REVOKE ALL ON "
             "recruitment_threads, recruitment_messages, recruitment_outbox FROM %I', '"
             + role
             + "'); END IF; END $$"
         )
     op.execute(
-        "REVOKE ALL ON recruitment_configs, recruitment_threads, "
-        "recruitment_messages, recruitment_outbox FROM PUBLIC"
+        "REVOKE ALL ON recruitment_threads, recruitment_messages, recruitment_outbox FROM PUBLIC"
     )
 
 

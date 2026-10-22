@@ -932,45 +932,17 @@ async def test_search_rows_carry_author_username_and_role(
     assert result.rows[1].role == "assistant", "bot author must have role 'assistant'"
 
 
-@pytest.fixture(autouse=True)
-def ordinary_sources_without_recruitment(monkeypatch: pytest.MonkeyPatch) -> None:
-    # These transport fixtures have no database. Recruitment privacy is tested
-    # separately with persisted tenant configuration and enrollments.
-    from unittest.mock import AsyncMock
-
-    from daimon.core.stores.recruitment_privacy import RecruitmentSources
-
-    monkeypatch.setattr(
-        "daimon.adapters.mcp.tools.discord._recruitment.sources_for_task",
-        AsyncMock(return_value=RecruitmentSources()),
-    )
-
-
-@pytest.fixture(autouse=True)
-def ordinary_search_sources(monkeypatch):
-    from unittest.mock import AsyncMock
-
-    from daimon.core.stores.recruitment_privacy import RecruitmentSources
-
-    monkeypatch.setattr(
-        "daimon.adapters.mcp.tools.discord._search.sources_for_task",
-        AsyncMock(return_value=RecruitmentSources()),
-    )
-
-
 @pytest.mark.parametrize("indexed_name", [None, "old ordinary title"])
 @pytest.mark.parametrize("unreachable", [False, True])
 async def test_search_qualifying_thread_uses_live_metadata_even_without_enrollment(
     monkeypatch, indexed_name, unreachable
 ):
-    from unittest.mock import AsyncMock
+    from daimon.core.config import RecruitmentSettings
 
-    from daimon.core.recruitment import RecruitmentConfig
-    from daimon.core.stores.recruitment_privacy import RecruitmentSources
-
-    # No enrollment: includes the refused-enrollment/provider-session scenario.
-    sources = RecruitmentSources(RecruitmentConfig(guild_id="111", channel_ids=("222",)))
-    monkeypatch.setattr(_search_mod, "sources_for_task", AsyncMock(return_value=sources))
+    runtime = _runtime_with_discord_token()
+    runtime.settings.recruitment = RecruitmentSettings(
+        tenants={"111": {"channel_ids": ["222"], "recruiter_user_ids": ["7"]}}
+    )
     live_requested = []
     indexed = _thread_payload(thread_id="900", parent_id="222", name=indexed_name or "")
     if indexed_name is None:
@@ -1004,10 +976,8 @@ async def test_search_qualifying_thread_uses_live_metadata_even_without_enrollme
         raise AssertionError(route.path)
 
     patch_discord_http(monkeypatch, handler)
-    result = await _search_messages_impl(
-        _runtime_with_discord_token(), _auth(), content="candidate"
-    )
+    result = await _search_messages_impl(runtime, _auth(), content="candidate")
     assert result.rows == []
-    assert live_requested == ["900"]
+    assert live_requested == []  # Immutable indexed parent is sufficient; title is irrelevant.
     assert "private-candidate@example.test" not in result.model_dump_json()
     assert "private-cv.pdf" not in result.model_dump_json()

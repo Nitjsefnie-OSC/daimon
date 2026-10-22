@@ -22,7 +22,7 @@ def test_cards_disable_incomplete_history_and_bind_revision() -> None:
     embed, view = review_card(state, None)
     assert embed.footer.text == "recruitment:intent"
     create = next(c for c in view.children if c.label == "Create")
-    assert create.disabled and create.custom_id == "recruit:revision:create"
+    assert create.disabled and create.custom_id == "recruit:revision:0:create"
     state.scan_complete = True
     _, view = review_card(state, None)
     assert not next(c for c in view.children if c.label == "Create").disabled
@@ -42,7 +42,7 @@ async def test_nonrecruiter_click_is_ephemeral_and_never_confirms() -> None:
     interaction.channel = MagicMock(spec=discord.Thread)
     interaction.channel.id = 20
     interaction.user.id = 8
-    interaction.data = {"custom_id": "recruit:revision:create"}
+    interaction.data = {"custom_id": "recruit:revision:0:create"}
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
     await cog.on_interaction(interaction)
@@ -71,7 +71,7 @@ async def test_stale_click_refreshes_card_without_confirming() -> None:
     interaction.channel = MagicMock(spec=discord.Thread)
     interaction.channel.id = 20
     interaction.user.id = 7
-    interaction.data = {"custom_id": "recruit:old:create"}
+    interaction.data = {"custom_id": "recruit:old:0:create"}
     interaction.response.defer = AsyncMock()
     interaction.followup.send = AsyncMock()
     await cog.on_interaction(interaction)
@@ -161,7 +161,6 @@ async def test_ambiguous_card_recovery_never_posts_elsewhere() -> None:
 
 
 async def test_expired_card_redaction_runs_when_feature_is_disabled(monkeypatch) -> None:
-    from uuid import uuid4
 
     from daimon.core.recruitment import RecruitmentConfig
     from pydantic import SecretStr
@@ -174,9 +173,6 @@ async def test_expired_card_redaction_runs_when_feature_is_disabled(monkeypatch)
         get=AsyncMock(return_value=state),
     )
     monkeypatch.setattr(
-        "daimon.adapters.discord.recruitment.configured_tenants", AsyncMock(return_value=[uuid4()])
-    )
-    monkeypatch.setattr(
         "daimon.adapters.discord.recruitment.RecruitmentStore", MagicMock(return_value=store)
     )
     port = SimpleNamespace(check_access=AsyncMock(), bot_id=AsyncMock(return_value="bot"))
@@ -187,7 +183,13 @@ async def test_expired_card_redaction_runs_when_feature_is_disabled(monkeypatch)
         turn_deps=SimpleNamespace(fernet=object()),
         sessionmaker=object(),
         settings=SimpleNamespace(
-            recruitment=SimpleNamespace(enabled=False),
+            recruitment=__import__(
+                "daimon.core.config", fromlist=["RecruitmentSettings"]
+            ).RecruitmentSettings(
+                tenants={
+                    "101": {"channel_ids": ["2"], "recruiter_user_ids": ["7"], "enabled": False}
+                }
+            ),
             discord=SimpleNamespace(bot_token=SecretStr("fake")),
         ),
     )
@@ -213,23 +215,31 @@ async def test_expired_card_redaction_uses_retained_id_outside_recent_history() 
     thread.history.assert_not_called()
 
 
-async def test_unconfigured_ingress_short_circuits_without_source_or_discord_io(
-    monkeypatch,
-) -> None:
-    from daimon.adapters.discord.recruitment_guard import recruitment_message_blocked
+async def test_unconfigured_ingress_short_circuits_without_source_or_discord_io():
+    from daimon.adapters.discord.recruitment_guard import protected
+    from daimon.core.config import RecruitmentSettings
 
-    inactive = AsyncMock(return_value=False)
-    source_filter = AsyncMock(side_effect=AssertionError("should not build source filter"))
-    monkeypatch.setattr("daimon.adapters.discord.recruitment_guard.privacy_active", inactive)
-    monkeypatch.setattr(
-        "daimon.adapters.discord.recruitment_guard.recruitment_message_filter", source_filter
-    )
-    runtime = SimpleNamespace(sessionmaker=object())
-    message = MagicMock(spec=discord.Message)
-    message.guild.id = 101
-    message.flags.has_thread = True
-    message.guild.fetch_channel = AsyncMock()
+    channel = MagicMock(spec=discord.Thread)
     for _ in range(20):
-        assert not await recruitment_message_blocked(runtime, message)
-    source_filter.assert_not_awaited()
-    message.guild.fetch_channel.assert_not_awaited()
+        assert not protected(RecruitmentSettings(), channel, "101")
+    channel.guild.fetch_channel.assert_not_called()
+
+
+async def test_empty_settings_raw_hooks_do_no_database_or_discord_io(monkeypatch):
+    from daimon.core.config import RecruitmentSettings
+
+    invalidate = AsyncMock(side_effect=AssertionError("no recruitment SQL"))
+    monkeypatch.setattr("daimon.adapters.discord.recruitment.invalidate_source", invalidate)
+    bot = MagicMock()
+    bot.get_channel.return_value = None
+    runtime = SimpleNamespace(settings=SimpleNamespace(recruitment=RecruitmentSettings()))
+    cog = RecruitmentCog(bot, runtime)
+    payload = SimpleNamespace(
+        guild_id=101, channel_id=2, message_id=40, message_ids={40, 41}, data={}
+    )
+    for _ in range(20):
+        await cog.on_raw_message_edit(payload)
+        await cog.on_raw_message_delete(payload)
+        await cog.on_raw_bulk_message_delete(payload)
+    invalidate.assert_not_awaited()
+    bot.fetch_channel.assert_not_called()

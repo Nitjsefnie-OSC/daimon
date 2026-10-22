@@ -13,6 +13,7 @@ from daimon.core.recruitment import (
     ChangeOperation,
     Extraction,
     ProposedChange,
+    RecruitmentConfig,
     SourceMessage,
 )
 from daimon.core.recruitment_api import RecruitmentAPI, SyntheticRecruitmentTransport
@@ -22,7 +23,7 @@ from daimon.core.recruitment_service import RecruitmentService
 from daimon.core.stores.recruitment import (
     RecruitmentBusy,
     RecruitmentStore,
-    configured_tenants,
+    enrolled_tenants,
     purge_expired,
 )
 from pydantic import SecretStr
@@ -30,6 +31,14 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 # Synthetic identities/keys survive client/tick boundaries within this process.
 _SYNTHETIC = SyntheticRecruitmentTransport()
+
+
+def tenant_config(settings: Settings, guild_id: str) -> RecruitmentConfig | None:
+    tenant = settings.recruitment.tenants.get(guild_id)
+    if tenant is None:
+        return None
+    revision = int(hashlib.sha256(tenant.model_dump_json().encode()).hexdigest()[:12], 16)
+    return RecruitmentConfig(guild_id=guild_id, revision=revision, **tenant.model_dump())
 
 
 def build_service(
@@ -128,6 +137,8 @@ async def reconcile_thread(
             continue
         if source is not None:
             await service.store.ingest(thread, source)
+        else:
+            await service.store.ignore_bot_source(thread, message_id)
     # Scan old pages even after a restart; initial review stays unconfirmable
     # until a complete history traversal has established the evidence boundary.
     old, before, _ = await discord.history(config, thread, before=state.scan_before)
@@ -164,7 +175,7 @@ async def reconcile_recruitment(
     fernet: MultiFernet | None,
     anthropic: AsyncAnthropic,
 ) -> None:
-    tenants = await configured_tenants(sessions)
+    tenants = await enrolled_tenants(sessions)
     # Erasure is independent of feature enablement, backend availability and Discord.
     for tenant in tenants:
         await purge_expired(sessions, tenant, datetime.now(UTC))
@@ -172,8 +183,11 @@ async def reconcile_recruitment(
         return
     async with httpx.AsyncClient() as discord_http, backend_client(settings) as api_http:
         discord = RecruitmentDiscord(discord_http, settings.discord.bot_token.get_secret_value())
-        for tenant in tenants:
-            store = RecruitmentStore(sessions, fernet, tenant)
+        from daimon.core.ma_identity import derive_tenant_uuid
+
+        for guild_id in settings.recruitment.tenants:
+            tenant = derive_tenant_uuid(platform="discord", workspace_id=guild_id)
+            store = RecruitmentStore(sessions, fernet, tenant, tenant_config(settings, guild_id))
             config = await store.configuration()
             if not config or not config.enabled:
                 continue
