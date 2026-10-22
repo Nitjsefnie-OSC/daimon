@@ -28,7 +28,7 @@ from daimon.core.stores import channel_budgets
 from daimon.core.stores.domain import BudgetWindow
 from daimon.core.stores.tenant_ledger import get_channel_spend
 from daimon.testing.factories import make_channel_budget, make_ledger_entry, make_tenant
-from daimon.testing.ma_models import ma_model_usage
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import select
 from sqlalchemy.exc import IntegrityError
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

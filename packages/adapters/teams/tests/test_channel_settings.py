@@ -32,8 +32,14 @@ from daimon.core.stores.scoped_config_read import get_scope
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.stores.teams_installations import record_teams_installation
-from daimon.testing import build_fake_anthropic, ma_agent, ma_environment
-from daimon.testing.ma import FakeMAState, MARouter, list_response, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
+    FakeMAState,
+    MARouter,
+    build_fake_anthropic,
+    list_response,
+    make_fake_ma_handler,
+)
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (

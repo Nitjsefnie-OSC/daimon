@@ -25,8 +25,8 @@ from daimon.core.channel_environments import (
 )
 from daimon.core.roster import paginate
 from daimon.core.scope import DeploymentDefault
-from daimon.testing import ma_environment
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 TEAM = "T0ENVS"

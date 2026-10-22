@@ -54,8 +54,9 @@ from daimon.testing.factories import (
     make_platform_principal,
     make_tenant,
 )
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
-from daimon.testing.ma_models import ma_agent, ma_session
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy import func, select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -1710,7 +1711,7 @@ async def test_personal_memory_erasure_survives_agent_archive_and_missing_princi
         archive_memory_store_for_agent,
         ensure_personal_memory_store_and_mount,
     )
-    from daimon.testing.ma import (
+    from mux.testing.drivers.anthropic.ma import (
         FakeMemoryStoreState,
         NotHandled,
         combine_handlers,

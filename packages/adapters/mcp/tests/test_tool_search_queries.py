@@ -37,11 +37,15 @@ from daimon.core.stores.domain import Role
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.slack_bot_tokens import upsert_slack_bot_token
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing import ma_agent
 from daimon.testing.asgi import mcp_session
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import build_fake_anthropic, build_stub_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import (
+    build_fake_anthropic,
+    build_stub_anthropic,
+    list_response,
+)
 from pydantic import HttpUrl, PostgresDsn, SecretStr
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from starlette.applications import Starlette

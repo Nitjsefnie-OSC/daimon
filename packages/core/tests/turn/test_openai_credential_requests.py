@@ -46,7 +46,6 @@ from daimon.testing import pytest_plugin as database_plugin
 from daimon.testing.db import DatabasePreflight, preflight_test_database, require_owned_sessionmaker
 from daimon.testing.discord_surface import DiscordMessageCapture, DiscordSurfaceHarness
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.isolated_sdk import SDK_ENV_VARS, build_async_anthropic, build_async_openai
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mcp.types import TextContent
@@ -58,6 +57,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ScopeViolation, UnsupportedCapability
+from mux.testing.isolated_sdk import SDK_ENV_VARS, build_async_anthropic, build_async_openai
 from pydantic import TypeAdapter
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 

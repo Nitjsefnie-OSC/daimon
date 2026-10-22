@@ -53,7 +53,10 @@ from daimon.core.turn.run import RunOutcome, _is_dead_session, run_prepared_turn
 from daimon.core.turn.state import TurnState
 from daimon.core.turn.termination import TerminationReason
 from daimon.testing.db import build_test_engine
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from daimon.testing.turn_fakes import RecordingLifecycle
+from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
@@ -62,9 +65,7 @@ from daimon.testing.ma import (
     send_events_response,
     sse_response,
 )
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_model_usage
-from daimon.testing.turn_fakes import RecordingLifecycle
-from mux.contracts.ids import Scope
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 from sqlalchemy.pool import NullPool
@@ -2995,7 +2996,7 @@ import asyncio
 import anthropic
 import httpx
 from daimon.core.turn.run import _archive_orphaned_session
-from daimon.testing.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_models import ma_session
 
 async def handler(_request: httpx.Request) -> httpx.Response:
     return httpx.Response(200, json=ma_session(id="sess_orphan").model_dump(mode="json"))
