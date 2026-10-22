@@ -37,6 +37,7 @@ from daimon.core.stores.domain import Role
 from daimon.core.turn.admission import admit
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT
+from daimon.core.turn_hold import RequesterOrg
 from sqlalchemy.exc import SQLAlchemyError
 
 import discord
@@ -108,6 +109,7 @@ class DirectMessageCog(commands.Cog):
             admission = await admit(
                 runtime.turn_deps,
                 tenant_id=tenant_id,
+                requester_org=RequesterOrg.HOST,
                 platform="discord",
                 external_user_id=str(member.id),
                 channel_id=source_channel_id,

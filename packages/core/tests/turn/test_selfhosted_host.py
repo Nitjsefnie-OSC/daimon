@@ -16,6 +16,7 @@ from daimon.core.turn import selfhosted_host
 from daimon.core.turn.prepare import ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.run import run_prepared_turn
 from daimon.core.turn.selfhosted_host import SelfHostedHostRuntime, prepare_selfhosted
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.turn_fakes import RecordingLifecycle, deps_for
 from daimon.testing.turn_leg import MUX_LEG
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -43,11 +44,14 @@ class Wire:
         self.turns = {}
         self.posts = 0
         self.unmatched_start = False
+        self.pending_checkpoint_warning = False
 
     def handle(self, request):
         assert request.headers["authorization"] == "Bearer offline"
         if request.method == "GET":
-            after = int(request.url.params.get("after_seq", "0"))
+            after = int(
+                request.url.params.get("replay_after_seq", request.url.params.get("after_seq", "0"))
+            )
             return httpx.Response(
                 200, json={"events": [e for e in self.events if e["seq"] > after], "complete": True}
             )
@@ -83,6 +87,15 @@ class Wire:
                     {"request_id": f"request-{self.posts}", "model": "gpt-6-luna"},
                 )
                 events[-1] = ("turn_ended", {"outcome": "interrupted"})
+            if self.pending_checkpoint_warning:
+                events.insert(
+                    0,
+                    (
+                        "checkpoint_warning",
+                        {"message": "Recent messages and files may be lost after a restart."},
+                    ),
+                )
+                self.pending_checkpoint_warning = False
             for kind, data in events:
                 self.events.append(
                     dict(
@@ -235,6 +248,20 @@ async def composed(request, db_committing_engine, db_clean, monkeypatch, pinned_
         yield request, wire, store, observations
 
 
+async def test_a_held_admission_is_refused_before_any_io(composed):
+    from daimon.core.turn.errors import AdmissionDenied
+
+    request, wire, _, _ = composed
+    held = TurnHold(platform="slack", channel_id="C-SYN-1", client=True)
+    request = replace(request, admission=replace(request.admission, hold=held))
+
+    with pytest.raises(AdmissionDenied) as refused:
+        await prepare_selfhosted(request)
+
+    assert refused.value.reason == "backend_unsupported"
+    assert wire.posts == 0 and wire.turns == {}
+
+
 async def test_prepare_reuses_same_tenant_bound_session_without_a_turn(composed):
     request, wire, _, _ = composed
     first = await prepare_selfhosted(request)
@@ -292,6 +319,10 @@ async def test_two_real_host_turns_keep_roots_and_usage_separate(composed, prior
                     )
                 )
 
+        if index == 2:
+            # Upload failure arrives after the original reader closes.
+            wire.pending_checkpoint_warning = True
+
         async def reseed():
             return "question"
 
@@ -315,6 +346,7 @@ async def test_two_real_host_turns_keep_roots_and_usage_separate(composed, prior
         assert f"answer {index}" in str(outcome.state.content)
         assert ("skills unavailable here" in str(outcome.state.content)) == (index == 1)
         assert len(finalized) == index
+        assert ("may be lost after a restart" in str(outcome.state.content)) == (index == 2)
         if index == 2:
             assert "answer 1" not in str(outcome.state.content)
     assert wire.posts == 2
@@ -474,6 +506,7 @@ async def test_turn_finalizer_runs_when_the_turn_raises(composed, monkeypatch, f
         (False, False, "inspection_auto_chat"),
         (False, False, "inspection_auto_unattended"),
         (False, False, "long_history"),
+        (False, False, "receipt_restart"),
         (False, False, "retained_skills"),
     ],
 )
@@ -502,6 +535,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     from daimon.core.turn.outcomes import drain_outcomes
     from daimon.core.turn.persistence import current_persistence
     from daimon.core.turn.runtimes import build_channel_runtime, ensure_channel_runtime
+    from daimon.core.turn_hold import RequesterOrg
     from daimon.testing.factories import make_account, make_platform_principal, make_tenant_config
     from mux.contracts.extensions import ExtensionConfig
     from mux.contracts.ids import SkillRef, ThreadRef
@@ -832,6 +866,10 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                 routed_session = wire.events[0]["session_id"]
             assert call.url.params["identifier"] == sandbox_id(routed_session)
             assert call.url.host == "pool.example"
+            assert call.url.params["session_id"] == routed_session
+            assert int(call.url.params["after_seq"]) >= 0
+            if "replay_after_seq" in call.url.params:
+                assert int(call.url.params["replay_after_seq"]) <= int(call.url.params["after_seq"])
         clients.append(self)
         if call.url.path.endswith("/actions"):
             body = json.loads(call.content)
@@ -1037,6 +1075,7 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     admitted = await admit(
         request.deps,
         tenant_id=TENANT,
+        requester_org=RequesterOrg.HOST,
         platform="slack",
         external_user_id="caller",
         channel_id=REVISION.channel.channel_id,
@@ -1154,6 +1193,14 @@ async def test_production_shell_admits_before_http_records_and_revokes(
         assert len(credentials) == 1
         assert len(token_calls) == (2 if scenario == "entra_refresh" else 1)
         assert len({id(client) for client in clients}) == 1
+    if pool:
+        await prepared.backend.events._c.transport.request(
+            "GET",
+            f"/v0/sessions/{prepared.session_ref.id}/events?replay_after_seq=0&after_seq=0",
+            after_seq=0,
+            session_id=prepared.session_ref.id,
+        )
+        assert any("replay_after_seq" in call.url.params for call in requests)
     observations = await prepared.backend.usage.reconcile(SCOPE, prepared.session_ref)
     assert len(observations) == 1
     await prepared._record(observation=observations[0])
@@ -1188,6 +1235,57 @@ async def test_production_shell_admits_before_http_records_and_revokes(
     else:
         assert not pending.rows
 
+    async def persist_projection_cursor(cursor):
+        store = mux_state.PostgresStateStore(request.deps.sessionmaker)
+        slot = Slot(
+            thread=ThreadRef(channel=REVISION.channel, thread_id=request.thread_id),
+            account_id=SCOPE.account_id,
+        )
+        lease = await store.acquire_lease(
+            slot, holder="fixture", turn_id="fixture", now=request.now(), ttl=timedelta(seconds=30)
+        )
+        try:
+            await store.append_events(
+                prepared.session_ref, (), fence=lease, cursor=str(cursor), now=request.now()
+            )
+        finally:
+            await store.release_lease(lease)
+
+    if scenario == "receipt_restart":
+        from mux.contracts.ids import PageRequest
+
+        # Receipts can commit ahead of the answer projection. A fresh driver
+        # has no local history and must replay the first answer below the fence.
+        wire.events[-1]["seq"] = 10
+        await persist_projection_cursor(0)
+        async with request.deps.sessionmaker() as db, db.begin():
+            await contexts.advance_replay_cursor(
+                db, tenant_id=TENANT, binding_id=binding.id, seq=10
+            )
+        previous_runtime = prepared.runtime
+        requests.clear()
+        prepared = await bind_session_impl(
+            request.deps,
+            admitted,
+            tenant_id=TENANT,
+            platform="slack",
+            external_user_id="caller",
+            thread_id=request.thread_id,
+            session_account_id=ACCOUNT,
+            reuse_existing=True,
+        )
+        assert prepared.runtime is not previous_runtime
+        assert (
+            await prepared.backend.events.reconcile(SCOPE, prepared.session_ref)
+        ).state == "idle"
+        page = await prepared.backend.events.list(SCOPE, prepared.session_ref, page=PageRequest())
+        gets = [call for call in requests if call.method == "GET"]
+        assert gets and gets[0].url.params["after_seq"] == "10"
+        assert gets[0].url.params["replay_after_seq"] == "0"
+        assert "answer 1" in str(page.data)
+        assert page.data[-1].type == "session.turn_ended"
+        assert wire.posts == 1
+
     if scenario == "long_history":
         import time
 
@@ -1213,6 +1311,8 @@ async def test_production_shell_admits_before_http_records_and_revokes(
                     }
                 )
         floor = len(wire.events)
+        # Prior invocations saved their answers as well as accounting receipts.
+        await persist_projection_cursor(floor)
         async with request.deps.sessionmaker() as db, db.begin():
             await contexts.advance_replay_cursor(
                 db, tenant_id=TENANT, binding_id=binding.id, seq=floor

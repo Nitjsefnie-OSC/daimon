@@ -208,7 +208,7 @@ async def test_cold_thread_feedback_before_session_create(
     else:
         app: Any = SlackApp(runtime=runtime)
         with AioResponsesMock() as mock:
-            module._register_slack_defaults(mock)
+            module._register_slack_defaults(mock, team_id=workspace)
             await app._handle_app_mention(
                 {
                     "type": "app_mention",

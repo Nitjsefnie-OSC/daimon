@@ -31,7 +31,11 @@ async def test_pool_routes_every_c3_operation_and_reconstructed_transport(sessio
             ("POST", "/v0/turns", {"idempotency_key": "once"}),
             ("POST", "/v0/turns/turn/actions", {"decision": "allow"}),
             ("POST", "/v0/turns/turn/cancel", {}),
-            ("GET", "/v0/sessions/session/events?after_seq=7&extra=a&extra=b&empty=", None),
+            (
+                "GET",
+                "/v0/sessions/session/events?after_seq=7&replay_after_seq=3&extra=a&extra=b&empty=",
+                None,
+            ),
             ("POST", "/v0/turns", {"idempotency_key": "once"}),
         ]:
             # Rebuilding the transport cannot lose the session mapping.
@@ -44,6 +48,7 @@ async def test_pool_routes_every_c3_operation_and_reconstructed_transport(sessio
             await transport.request(
                 method,
                 path,
+                after_seq=0,
                 session_id=session_id,
                 body=body,
                 mcp_authorization="Bearer ephemeral" if path == "/v0/turns" else None,
@@ -51,9 +56,11 @@ async def test_pool_routes_every_c3_operation_and_reconstructed_transport(sessio
     assert len(tokens) == len(requests) == 5
     assert requests[3].url.params.multi_items() == [
         ("after_seq", "7"),
+        ("replay_after_seq", "3"),
         ("extra", "a"),
         ("extra", "b"),
         ("empty", ""),
+        ("session_id", session_id),
         ("identifier", sandbox_id(session_id)),
     ]
     assert requests[0].content == requests[-1].content
@@ -81,7 +88,9 @@ async def test_pool_poll_retry_refreshes_token_and_preserves_cursor():
         transport = DirectTransport(
             client, base_url="https://pool.example", token_provider=token, session_pool=True
         )
-        await transport.request("GET", "/v0/sessions/s/events?after_seq=13", session_id="s")
+        await transport.request(
+            "GET", "/v0/sessions/s/events?after_seq=13", after_seq=0, session_id="s"
+        )
     assert [request.headers["Authorization"] for request in calls] == [
         "Bearer token-0",
         "Bearer token-1",
@@ -110,7 +119,7 @@ async def test_pool_rejects_injected_routing_before_any_io(path):
             client, base_url="https://pool.example", token_provider=token, session_pool=True
         )
         with pytest.raises(ValueError):
-            await transport.request("POST", path, session_id="s")
+            await transport.request("POST", path, after_seq=0, session_id="s")
 
 
 @pytest.mark.parametrize(
@@ -191,5 +200,7 @@ async def test_empty_session_is_refused_before_token_or_http(session_id, mode):
             )
         )
         with pytest.raises(ValueError, match="session id"):
-            await transport.request("GET", "/v0/sessions/s/events", session_id=session_id)
+            await transport.request(
+                "GET", "/v0/sessions/s/events", session_id=session_id, after_seq=0
+            )
     assert calls == []

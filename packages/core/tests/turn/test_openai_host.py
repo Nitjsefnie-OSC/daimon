@@ -19,6 +19,7 @@ from daimon.core.turn.openai_host import OpenAIHostRuntime, prepare_openai, runt
 from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevisions
 from daimon.core.turn.persistence import TurnPersistence, UncertainSend
 from daimon.core.turn.prepare import ProviderPreparationRequest
+from daimon.core.turn_hold import TurnHold
 from daimon.core.usage_billing import ObservationRecorder
 from daimon.testing.turn_fakes import RecordingLifecycle
 from mux.contracts.ids import PageRequest, ResourceRef, Revision, ThreadRef
@@ -794,6 +795,7 @@ async def test_origin_approval_has_separate_claim_and_native_response(composed):
         ("source_sealed", True),
         ("asks_before_publishing", True),
         ("daimon_rules_need_driver", True),
+        ("hold", TurnHold(platform="slack", channel_id="C-SYN-1", client=True)),
     ],
 )
 async def test_unimplemented_restricted_policy_refuses_before_transport(composed, policy, value):
