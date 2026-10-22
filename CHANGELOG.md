@@ -7,7 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Teams: people from another organisation are held to the channel they asked in and cannot use DMs.
+- A turn asked by someone from another organisation, or in a channel shared with one, can be held to that channel (groundwork; Teams behaviour is unchanged).
 
 - Slack: an external (Slack Connect) member's role is never taken from their own workspace, a mention from one is refused before anything is stored, and their queued follow-ups no longer run.
 

@@ -259,18 +259,15 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
 
 
 def _requester_org(inbound: TeamsInbound) -> tuple[RequesterOrg, str | None]:
-    """Which organisation the sender belongs to, from what the activity names.
+    """Which organisation admission is told the sender belongs to.
 
-    A foreign sender with a home tenant id is verified as another organisation.
-    A foreign sender with no id is restricted without being recorded. Fail-closed
-    detection of the sender's organisation comes later; today a sender the
-    activity does not mark foreign counts as a member.
+    Teams keeps its existing behaviour for now: every sender it admits is
+    passed as a member, so no Teams turn is held. Fail-closed detection of a
+    Teams sender's organisation is separate work. `is_foreign` still reaches
+    the turn origin for the wording and the 1:1-only tools that read it.
     """
-    if not inbound.is_foreign:
-        return RequesterOrg.HOST, None
-    if inbound.home_tenant_id:
-        return RequesterOrg.OTHER, inbound.home_tenant_id
-    return RequesterOrg.UNKNOWN, None
+    del inbound
+    return RequesterOrg.HOST, None
 
 
 _NO_CONTEXT = (
@@ -1736,7 +1733,7 @@ class TeamsApp:
             configuration_target_ma_agent_id=config.configuration_target_ma_agent_id,
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",
-            sender_foreign=admission.hold is not None and admission.hold.client,
+            sender_foreign=inbound.is_foreign,
             shared_channel=admission.shared_channel,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
