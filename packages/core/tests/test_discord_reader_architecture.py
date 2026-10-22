@@ -3,6 +3,11 @@
 The registry is an explicit review artifact. Adding another primitive, caller,
 control class or duplicate call requires an entry with a boundary and regression.
 Line numbers are deliberately excluded, so formatting cannot silently bless code.
+This is a review ratchet, not exhaustive discovery or a proof of authorization.
+Bound-method aliases, getattr/reflection, constructed URL variables and lower-level
+SDK HTTP primitives can escape detection. Guard strings and regression names do
+not prove reachability, guard order or control flow. Manual reader inventory and
+behavioral regressions remain necessary, including stored-content projections.
 """
 
 import ast
@@ -91,6 +96,12 @@ def discover(root: Path) -> Counter[str]:
                     primitive = (
                         node.func.attr if isinstance(node.func, ast.Attribute) else node.func.id
                     )
+                    if primitive in {
+                        "get_routine",
+                        "list_routines_for_tenant",
+                        "list_routines_missing_agent_name",
+                    }:
+                        kinds.append("stored_routine")
                     if primitive in {"history", "fetch_message", "fetch_channel"} or (
                         sdk and primitive == "fetch"
                     ):
@@ -128,7 +139,7 @@ def discover(root: Path) -> Counter[str]:
     return result
 
 
-def test_every_discord_reader_has_an_audited_entry_and_regression():
+def test_recognized_discord_readers_match_review_registry():
     registry = json.loads(REGISTRY.read_text())
     actual = discover(ROOT)
     registered = Counter({key: entry["count"] for key, entry in registry["entries"].items()})
@@ -169,6 +180,8 @@ async def future(channel, http):
     await channel.fetch_channel(2)
     await http.get(f"/channels/{channel.id}/messages")
     await drive()
+    await routines.get_routine()
+    await routines.list_routines_for_tenant()
 class Saved(discord.ui.View):
     pass
 class Answer(discord.ui.Modal):
@@ -176,4 +189,4 @@ class Answer(discord.ui.Modal):
 class Derived(Renamed):
     pass
 """)
-    assert sum(discover(tmp_path).values()) == 8
+    assert sum(discover(tmp_path).values()) == 10

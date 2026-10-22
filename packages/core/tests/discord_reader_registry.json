@@ -10,7 +10,7 @@
       "boundary": "packages/adapters/discord/daimon/adapters/discord/bot.py:_handle_mention",
       "guard": "protected(",
       "regression": "packages/core/tests/test_recruitment_readers.py:test_enumerated_readers_refuse_parent_and_thread_before_content",
-      "note": "Context/reply/attachment and normal output helpers inherit the channel entry; core driver repeats source authority. Category/channel fetches here are metadata resolution, never output serialization."
+      "note": "Context/reply/attachment and normal output helpers inherit the channel entry; core driver checks the trusted caller's source declaration. Category/channel fetches here are metadata resolution, never output serialization."
     },
     "replay": {
       "boundary": "packages/adapters/discord/daimon/adapters/discord/bot.py:_replay_missed_messages",
@@ -196,7 +196,7 @@
       "boundary": "packages/core/daimon/core/turn/driver.py:run_turn",
       "guard": "privacy.check()",
       "regression": "packages/core/tests/test_recruitment_completeness.py:test_universal_driver_and_headless_refuse_direct_discord_callers",
-      "note": "All driver callers must supply explicit source authority (required argument); driver checks before provider I/O. Non-Discord operator/smoke invocations declare their platform explicitly."
+      "note": "All driver callers supply a required TurnPrivacy declaration, checked before provider I/O. It is a trusted-caller contract, not an authenticated credential; the driver cannot detect false platform/settings/tenant/parent declarations."
     },
     "headless": {
       "boundary": "packages/core/daimon/core/headless_runner.py:run_turn",
@@ -209,9 +209,43 @@
       "guard": "privacy.check()",
       "regression": "packages/adapters/scheduler/tests/test_main.py:test_saved_recruitment_routine_stops_after_settings_restart",
       "note": "Saved source/destination settings are rechecked before loading/using trigger text or opening a provider session."
+    },
+    "stored_mcp": {
+      "boundary": "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:_get_routine_impl",
+      "guard": "recruitment=runtime.settings.recruitment",
+      "regression": "packages/core/tests/test_recruitment_stored_routines.py:test_stored_content_readers_follow_settings_restart",
+      "note": "MCP list/get/update/delete/sandbox read with current settings before returning or changing saved content; ordinary owner and admin permissions cannot reveal protected rows."
+    },
+    "stored_cli": {
+      "boundary": "packages/adapters/cli/daimon/adapters/cli/commands/routines.py:run_sandbox_tools",
+      "guard": "recruitment=rt.settings.recruitment",
+      "regression": "packages/core/tests/test_recruitment_stored_routines.py:test_stored_content_readers_follow_settings_restart",
+      "note": "Operator projections and backfill pass settings to the shared store read policy. Missing and protected IDs have the same refusal."
+    },
+    "stored_controls": {
+      "boundary": "packages/adapters/discord/daimon/adapters/discord/routines_panel/read.py:load_guild_routines",
+      "guard": "recruitment=recruitment",
+      "regression": "packages/core/tests/test_recruitment_stored_routines.py:test_stored_content_readers_follow_settings_restart",
+      "note": "Command opening and refresh pass current settings. Direct output/destination/toggle callbacks re-read with settings; reserved source/destination and unknown legacy provenance are withheld."
+    },
+    "stored_internal": {
+      "boundary": "packages/core/daimon/core/stores/routines.py:get_routine",
+      "guard": "recruitment_withholds_routine",
+      "regression": "packages/core/tests/test_recruitment_stored_routines.py:test_stored_content_readers_follow_settings_restart",
+      "note": "Internal mutation/current-creator/execution bookkeeping reads do not serialize content. Raw internal store reads remain available for scheduler state, with adapter projection reads required to pass service settings."
     }
   },
   "entries": {
+    "packages/adapters/cli/daimon/adapters/cli/commands/routines.py:run_backfill_agent_names:stored_routine:f5e32c3c90db": {
+      "count": 1,
+      "boundary": "stored_cli",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
+    "packages/adapters/cli/daimon/adapters/cli/commands/routines.py:run_sandbox_tools:stored_routine:e424e525c586": {
+      "count": 1,
+      "boundary": "stored_cli",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
     "packages/adapters/cli/daimon/adapters/cli/run/command.py:run_conversation_observed:run_turn:4fa8fe12c4bc": {
       "count": 1,
       "boundary": "driver"
@@ -224,15 +258,11 @@
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/agent_setup/channel_skills_view.py:ChannelSkillsView:persistent_control:0f583a79f299": {
-      "count": 1,
-      "boundary": "controls"
-    },
     "packages/adapters/discord/daimon/adapters/discord/agent_setup/channel_skills_view.py:AddChannelSkillModal:persistent_control:13801fa348cf": {
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/agent_setup/details_view.py:DetailsView:persistent_control:0f583a79f299": {
+    "packages/adapters/discord/daimon/adapters/discord/agent_setup/channel_skills_view.py:ChannelSkillsView:persistent_control:0f583a79f299": {
       "count": 1,
       "boundary": "controls"
     },
@@ -240,15 +270,19 @@
       "count": 1,
       "boundary": "controls"
     },
+    "packages/adapters/discord/daimon/adapters/discord/agent_setup/details_view.py:DetailsView:persistent_control:0f583a79f299": {
+      "count": 1,
+      "boundary": "controls"
+    },
     "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_embed_panel.py:GitHubEmbedPanel:persistent_control:637a099d4b9e": {
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_home.py:GitHubLinkView:persistent_control:0dfa486c2a7a": {
+    "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_home.py:GitHubHomeView:persistent_control:0f583a79f299": {
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_home.py:GitHubHomeView:persistent_control:0f583a79f299": {
+    "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_home.py:GitHubLinkView:persistent_control:0dfa486c2a7a": {
       "count": 1,
       "boundary": "controls"
     },
@@ -264,13 +298,13 @@
       "count": 1,
       "boundary": "request_card"
     },
-    "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_waiting.py:GitHubWaitingView:persistent_control:0f583a79f299": {
-      "count": 1,
-      "boundary": "controls"
-    },
     "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_waiting.py:GitHubWaitingView._allowed:fetch_channel:28ba533fdfdd": {
       "count": 1,
       "boundary": "waiting_action"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_waiting.py:GitHubWaitingView:persistent_control:0f583a79f299": {
+      "count": 1,
+      "boundary": "controls"
     },
     "packages/adapters/discord/daimon/adapters/discord/agent_setup/github_waiting.py:load_waiting_view:fetch_channel:28ba533fdfdd": {
       "count": 1,
@@ -288,11 +322,11 @@
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/agent_setup/operator_tokens_view.py:OperatorTokensView:persistent_control:0f583a79f299": {
+    "packages/adapters/discord/daimon/adapters/discord/agent_setup/operator_tokens_view.py:MintOperatorTokenModal:persistent_control:13801fa348cf": {
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/agent_setup/operator_tokens_view.py:MintOperatorTokenModal:persistent_control:13801fa348cf": {
+    "packages/adapters/discord/daimon/adapters/discord/agent_setup/operator_tokens_view.py:OperatorTokensView:persistent_control:0f583a79f299": {
       "count": 1,
       "boundary": "controls"
     },
@@ -312,41 +346,17 @@
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/billing_panel/panel.py:_InvokerOnly:persistent_control:05791b90753b": {
+    "packages/adapters/discord/daimon/adapters/discord/billing_panel/panel.py:BillingPanelView:persistent_control:6f73aab0fe21": {
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/billing_panel/panel.py:BillingPanelView:persistent_control:6f73aab0fe21": {
+    "packages/adapters/discord/daimon/adapters/discord/billing_panel/panel.py:_InvokerOnly:persistent_control:05791b90753b": {
       "count": 1,
       "boundary": "controls"
     },
     "packages/adapters/discord/daimon/adapters/discord/billing_panel/redeem.py:RedeemCodeModal:persistent_control:13801fa348cf": {
       "count": 1,
       "boundary": "controls"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/bot.py:_resolve_category:fetch_channel:bc9786484d16": {
-      "count": 1,
-      "boundary": "gateway"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._retire_orphaned_turns_once.retire:fetch_channel:87a69adcf4cb": {
-      "count": 1,
-      "boundary": "retire"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._retire_orphaned_turns_once.retire:fetch_message:da2b0c7f31e8": {
-      "count": 1,
-      "boundary": "retire"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._reconcile_turn_card_intent:fetch_channel:e2a52f8fb89f": {
-      "count": 1,
-      "boundary": "cards"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._replay_missed_messages:fetch_channel:884536b2bb4d": {
-      "count": 1,
-      "boundary": "replay"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._replay_missed_messages:history:4a6a20a228b3": {
-      "count": 1,
-      "boundary": "replay"
     },
     "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._channel_by_id:fetch_channel:38418e856e0c": {
       "count": 1,
@@ -360,15 +370,39 @@
       "count": 1,
       "boundary": "gateway"
     },
-    "packages/adapters/discord/daimon/adapters/discord/commands/cold_dm_views.py:_PrivateControl:persistent_control:0dfa486c2a7a": {
+    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._reconcile_turn_card_intent:fetch_channel:e2a52f8fb89f": {
       "count": 1,
-      "boundary": "controls"
+      "boundary": "cards"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._replay_missed_messages:fetch_channel:884536b2bb4d": {
+      "count": 1,
+      "boundary": "replay"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._replay_missed_messages:history:4a6a20a228b3": {
+      "count": 1,
+      "boundary": "replay"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._retire_orphaned_turns_once.retire:fetch_channel:87a69adcf4cb": {
+      "count": 1,
+      "boundary": "retire"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/bot.py:DaimonBot._retire_orphaned_turns_once.retire:fetch_message:da2b0c7f31e8": {
+      "count": 1,
+      "boundary": "retire"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/bot.py:_resolve_category:fetch_channel:bc9786484d16": {
+      "count": 1,
+      "boundary": "gateway"
     },
     "packages/adapters/discord/daimon/adapters/discord/commands/cold_dm_views.py:ServerSelector:persistent_control:b4e98958b385": {
       "count": 1,
       "boundary": "controls"
     },
     "packages/adapters/discord/daimon/adapters/discord/commands/cold_dm_views.py:ServerSwitch:persistent_control:b4e98958b385": {
+      "count": 1,
+      "boundary": "controls"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/commands/cold_dm_views.py:_PrivateControl:persistent_control:0dfa486c2a7a": {
       "count": 1,
       "boundary": "controls"
     },
@@ -384,18 +418,6 @@
       "count": 1,
       "boundary": "gateway"
     },
-    "packages/adapters/discord/daimon/adapters/discord/context.py:build_context_xml:history:eff29bb596c4": {
-      "count": 1,
-      "boundary": "gateway"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/context.py:build_context_xml:fetch_message:02c728ef34a4": {
-      "count": 1,
-      "boundary": "gateway"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/context.py:build_delta_xml:history:995a9d925ccd": {
-      "count": 1,
-      "boundary": "gateway"
-    },
     "packages/adapters/discord/daimon/adapters/discord/context.py:build_channel_context_xml:history:34f6efe35869": {
       "count": 1,
       "boundary": "gateway"
@@ -404,15 +426,23 @@
       "count": 1,
       "boundary": "gateway"
     },
+    "packages/adapters/discord/daimon/adapters/discord/context.py:build_context_xml:fetch_message:02c728ef34a4": {
+      "count": 1,
+      "boundary": "gateway"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/context.py:build_context_xml:history:eff29bb596c4": {
+      "count": 1,
+      "boundary": "gateway"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/context.py:build_delta_xml:history:995a9d925ccd": {
+      "count": 1,
+      "boundary": "gateway"
+    },
     "packages/adapters/discord/daimon/adapters/discord/continuation_dispatch.py:_latest_human_message_at:history:b8adb52f7c99": {
       "count": 1,
       "boundary": "continuation"
     },
     "packages/adapters/discord/daimon/adapters/discord/credential_button.py:CredentialRequestButton:persistent_control:a414b8080c22": {
-      "count": 1,
-      "boundary": "controls"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/credential_modals.py:_dispatch_origin_thread:fetch_channel:4a3a1140fcf0": {
       "count": 1,
       "boundary": "controls"
     },
@@ -428,11 +458,15 @@
       "count": 1,
       "boundary": "controls"
     },
+    "packages/adapters/discord/daimon/adapters/discord/credential_modals.py:RepoBindModal:persistent_control:13801fa348cf": {
+      "count": 1,
+      "boundary": "controls"
+    },
     "packages/adapters/discord/daimon/adapters/discord/credential_modals.py:SkillRepoModal:persistent_control:13801fa348cf": {
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/credential_modals.py:RepoBindModal:persistent_control:13801fa348cf": {
+    "packages/adapters/discord/daimon/adapters/discord/credential_modals.py:_dispatch_origin_thread:fetch_channel:4a3a1140fcf0": {
       "count": 1,
       "boundary": "controls"
     },
@@ -444,15 +478,15 @@
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/feedback_reactions.py:FeedbackReactionCog._possible_own_author:fetch_channel:7455329e0a39": {
-      "count": 1,
-      "boundary": "feedback"
-    },
     "packages/adapters/discord/daimon/adapters/discord/feedback_reactions.py:FeedbackReactionCog._is_bot_message_via_fetch:fetch_channel:7455329e0a39": {
       "count": 1,
       "boundary": "feedback"
     },
     "packages/adapters/discord/daimon/adapters/discord/feedback_reactions.py:FeedbackReactionCog._is_bot_message_via_fetch:fetch_message:c99b879b1dab": {
+      "count": 1,
+      "boundary": "feedback"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/feedback_reactions.py:FeedbackReactionCog._possible_own_author:fetch_channel:7455329e0a39": {
       "count": 1,
       "boundary": "feedback"
     },
@@ -468,11 +502,11 @@
       "count": 1,
       "boundary": "native_leads"
     },
-    "packages/adapters/discord/daimon/adapters/discord/output_delivery.py:_AnswerTarget.attach:fetch_message:c9b5881adc2c": {
+    "packages/adapters/discord/daimon/adapters/discord/output_delivery.py:_AnswerTarget._reconcile:fetch_message:9c981b141152": {
       "count": 1,
       "boundary": "gateway"
     },
-    "packages/adapters/discord/daimon/adapters/discord/output_delivery.py:_AnswerTarget._reconcile:fetch_message:9c981b141152": {
+    "packages/adapters/discord/daimon/adapters/discord/output_delivery.py:_AnswerTarget.attach:fetch_message:c9b5881adc2c": {
       "count": 1,
       "boundary": "gateway"
     },
@@ -480,21 +514,21 @@
       "count": 1,
       "boundary": "gateway"
     },
-    "packages/adapters/discord/daimon/adapters/discord/posted_controls/edit.py:edit_posted_card:fetch_channel:d2fea8e5cecd": {
-      "count": 2,
-      "boundary": "posted_cards"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/posted_controls/edit.py:edit_posted_card:fetch:eb98d07a3962": {
+    "packages/adapters/discord/daimon/adapters/discord/posted_controls/edit.py:edit_expired_posted_card:fetch:41c0d6d4cec4": {
       "count": 1,
-      "boundary": "posted_cards"
+      "boundary": "expired_cards"
     },
     "packages/adapters/discord/daimon/adapters/discord/posted_controls/edit.py:edit_expired_posted_card:fetch_channel:eb0653b684ad": {
       "count": 1,
       "boundary": "expired_cards"
     },
-    "packages/adapters/discord/daimon/adapters/discord/posted_controls/edit.py:edit_expired_posted_card:fetch:41c0d6d4cec4": {
+    "packages/adapters/discord/daimon/adapters/discord/posted_controls/edit.py:edit_posted_card:fetch:eb98d07a3962": {
       "count": 1,
-      "boundary": "expired_cards"
+      "boundary": "posted_cards"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/posted_controls/edit.py:edit_posted_card:fetch_channel:d2fea8e5cecd": {
+      "count": 2,
+      "boundary": "posted_cards"
     },
     "packages/adapters/discord/daimon/adapters/discord/posted_controls/fleet.py:FleetControl:persistent_control:eb1bb367e831": {
       "count": 1,
@@ -524,11 +558,44 @@
       "count": 2,
       "boundary": "routine_post"
     },
+    "packages/adapters/discord/daimon/adapters/discord/routine_delivery.py:make_discord_routine_poster.creator_still_cleared:stored_routine:7777d90857a1": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Creator/execution/mutation bookkeeping only; not a stored trigger/result projection."
+    },
     "packages/adapters/discord/daimon/adapters/discord/routines_panel/panel.py:RoutinesPanelView:persistent_control:05791b90753b": {
       "count": 1,
       "boundary": "controls"
     },
+    "packages/adapters/discord/daimon/adapters/discord/routines_panel/panel.py:_DestinationPicker.callback:stored_routine:66afbb050210": {
+      "count": 1,
+      "boundary": "stored_controls",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
+    "packages/adapters/discord/daimon/adapters/discord/routines_panel/panel.py:_PauseButton.callback.load:stored_routine:a1bb9ac4a700": {
+      "count": 1,
+      "boundary": "stored_controls",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
+    "packages/adapters/discord/daimon/adapters/discord/routines_panel/panel.py:_ViewOutputButton.callback:stored_routine:aaa0590f1de7": {
+      "count": 1,
+      "boundary": "stored_controls",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
+    "packages/adapters/discord/daimon/adapters/discord/routines_panel/read.py:load_guild_routines:stored_routine:36cbce4ab564": {
+      "count": 1,
+      "boundary": "stored_controls",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
     "packages/adapters/discord/daimon/adapters/discord/routines_panel/subviews.py:ViewLastOutputSubView:persistent_control:05791b90753b": {
+      "count": 1,
+      "boundary": "controls"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/support_escalation.py:SupportEscalateButton:persistent_control:a414b8080c22": {
+      "count": 1,
+      "boundary": "controls"
+    },
+    "packages/adapters/discord/daimon/adapters/discord/support_escalation.py:SupportModal:persistent_control:13801fa348cf": {
       "count": 1,
       "boundary": "controls"
     },
@@ -539,14 +606,6 @@
     "packages/adapters/discord/daimon/adapters/discord/support_escalation.py:post_to_support_channel:fetch_channel:e30eed11bb4d": {
       "count": 1,
       "boundary": "support"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/support_escalation.py:SupportModal:persistent_control:13801fa348cf": {
-      "count": 1,
-      "boundary": "controls"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/support_escalation.py:SupportEscalateButton:persistent_control:a414b8080c22": {
-      "count": 1,
-      "boundary": "controls"
     },
     "packages/adapters/discord/daimon/adapters/discord/thread_handoff.py:HandOverButton:persistent_control:a414b8080c22": {
       "count": 1,
@@ -560,6 +619,10 @@
       "count": 1,
       "boundary": "controls"
     },
+    "packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py:_reconcile_matching_messages:fetch_message:7b48f9a1a216": {
+      "count": 1,
+      "boundary": "cards"
+    },
     "packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py:expire_unrecoverable_turn_card:fetch_message:7b48f9a1a216": {
       "count": 1,
       "boundary": "cards"
@@ -568,15 +631,11 @@
       "count": 1,
       "boundary": "cards"
     },
-    "packages/adapters/discord/daimon/adapters/discord/turn_card_recovery.py:_reconcile_matching_messages:fetch_message:7b48f9a1a216": {
-      "count": 1,
-      "boundary": "cards"
-    },
-    "packages/adapters/discord/daimon/adapters/discord/views.py:GuardedView:persistent_control:0dfa486c2a7a": {
+    "packages/adapters/discord/daimon/adapters/discord/views.py:CancelView:persistent_control:cb6b523f2753": {
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/views.py:CancelView:persistent_control:cb6b523f2753": {
+    "packages/adapters/discord/daimon/adapters/discord/views.py:GuardedView:persistent_control:0dfa486c2a7a": {
       "count": 1,
       "boundary": "controls"
     },
@@ -592,6 +651,10 @@
       "count": 1,
       "boundary": "continuation"
     },
+    "packages/adapters/discord/daimon/adapters/discord/wizard.py:WizardCustomTextModal:persistent_control:13801fa348cf": {
+      "count": 1,
+      "boundary": "controls"
+    },
     "packages/adapters/discord/daimon/adapters/discord/wizard.py:WizardNavButton:persistent_control:eb1bb367e831": {
       "count": 1,
       "boundary": "controls"
@@ -600,15 +663,11 @@
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/discord/daimon/adapters/discord/wizard.py:WizardCustomTextModal:persistent_control:13801fa348cf": {
-      "count": 1,
-      "boundary": "controls"
-    },
     "packages/adapters/discord/daimon/adapters/discord/wizard_submit.py:WizardSubmitButton:persistent_control:eb1bb367e831": {
       "count": 1,
       "boundary": "controls"
     },
-    "packages/adapters/mcp/daimon/adapters/mcp/services/lead_intake.py:HttpIntakePorts.source:http_messages:0949ddfc1c3d": {
+    "packages/adapters/mcp/daimon/adapters/mcp/services/lead_intake.py:HttpIntakePorts._messages:http_messages:2b61c7bd16b5": {
       "count": 1,
       "boundary": "lead_http"
     },
@@ -616,15 +675,15 @@
       "count": 1,
       "boundary": "lead_http"
     },
-    "packages/adapters/mcp/daimon/adapters/mcp/services/lead_intake.py:HttpIntakePorts._messages:http_messages:2b61c7bd16b5": {
-      "count": 1,
-      "boundary": "lead_http"
-    },
-    "packages/adapters/mcp/daimon/adapters/mcp/services/lead_intake.py:HttpIntakePorts.write:http_messages:6bd59db129d5": {
+    "packages/adapters/mcp/daimon/adapters/mcp/services/lead_intake.py:HttpIntakePorts.source:http_messages:0949ddfc1c3d": {
       "count": 1,
       "boundary": "lead_http"
     },
     "packages/adapters/mcp/daimon/adapters/mcp/services/lead_intake.py:HttpIntakePorts.write:http_messages:4f3bb227c4bf": {
+      "count": 1,
+      "boundary": "lead_http"
+    },
+    "packages/adapters/mcp/daimon/adapters/mcp/services/lead_intake.py:HttpIntakePorts.write:http_messages:6bd59db129d5": {
       "count": 1,
       "boundary": "lead_http"
     },
@@ -640,6 +699,10 @@
       "count": 1,
       "boundary": "mcp_read"
     },
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/discord/_read.py:_get_message_impl:fetch_message:bab64b077a57": {
+      "count": 1,
+      "boundary": "mcp_message"
+    },
     "packages/adapters/mcp/daimon/adapters/mcp/tools/discord/_read.py:_history_page:history:17320234c920": {
       "count": 1,
       "boundary": "mcp_read"
@@ -648,15 +711,11 @@
       "count": 1,
       "boundary": "mcp_read"
     },
-    "packages/adapters/mcp/daimon/adapters/mcp/tools/discord/_read.py:_get_message_impl:fetch_message:bab64b077a57": {
-      "count": 1,
-      "boundary": "mcp_message"
-    },
-    "packages/adapters/mcp/daimon/adapters/mcp/tools/discord/_tidy.py:_fetch_own_bot_message:fetch_message:c6e699d1bad8": {
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/discord/_tidy.py:_delete_thread_impl:history:82145a50a1f5": {
       "count": 1,
       "boundary": "mcp_tidy"
     },
-    "packages/adapters/mcp/daimon/adapters/mcp/tools/discord/_tidy.py:_delete_thread_impl:history:82145a50a1f5": {
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/discord/_tidy.py:_fetch_own_bot_message:fetch_message:c6e699d1bad8": {
       "count": 1,
       "boundary": "mcp_tidy"
     },
@@ -668,13 +727,13 @@
       "count": 1,
       "boundary": "github_connect.py_post_discord_connect_card"
     },
-    "packages/adapters/mcp/daimon/adapters/mcp/tools/github_request_delivery.py:deliver_shared_admin_card:fetch_channel:2072585e4aa0": {
-      "count": 1,
-      "boundary": "github_request_delivery.pydeliver_shared_admin_card"
-    },
     "packages/adapters/mcp/daimon/adapters/mcp/tools/github_request_delivery.py:deliver_private_request_card:fetch_channel:2072585e4aa0": {
       "count": 1,
       "boundary": "github_request_delivery.pydeliver_private_request_card"
+    },
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/github_request_delivery.py:deliver_shared_admin_card:fetch_channel:2072585e4aa0": {
+      "count": 1,
+      "boundary": "github_request_delivery.pydeliver_shared_admin_card"
     },
     "packages/adapters/mcp/daimon/adapters/mcp/tools/here.py:_require_thread_in_channel:fetch_channel:f650f451af0f": {
       "count": 1,
@@ -692,17 +751,77 @@
       "count": 1,
       "boundary": "mcp_lead_destination"
     },
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/lead_intake.py:service.execution:stored_routine:57c8d816f783": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Creator/execution/mutation bookkeeping only; not a stored trigger/result projection."
+    },
     "packages/adapters/mcp/daimon/adapters/mcp/tools/lead_intake.py:service.reauthorize:fetch_channel:3c3378390788": {
       "count": 1,
       "boundary": "mcp_lead_source"
+    },
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:_delete_routine_impl:stored_routine:b2f4a1387cb5": {
+      "count": 1,
+      "boundary": "stored_mcp",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:_get_routine_impl:stored_routine:b2f4a1387cb5": {
+      "count": 1,
+      "boundary": "stored_mcp",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:_list_routines_impl:stored_routine:1aa25f06a6be": {
+      "count": 1,
+      "boundary": "stored_mcp",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
     },
     "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:_resolve_discord_destination:fetch_channel:c14e5e454ed3": {
       "count": 1,
       "boundary": "mcp_routine"
     },
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:_set_routine_sandbox_tools_impl:stored_routine:22be710c5eb7": {
+      "count": 1,
+      "boundary": "stored_mcp",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
+    "packages/adapters/mcp/daimon/adapters/mcp/tools/routines.py:_update_routine_impl:stored_routine:b2f4a1387cb5": {
+      "count": 1,
+      "boundary": "stored_mcp",
+      "note": "Content projection uses the shared current-settings store filter before returning rows."
+    },
     "packages/adapters/scheduler/daimon/adapters/scheduler/main.py:_build_fire._fire:run_turn:5d961d5b3e98": {
       "count": 1,
       "boundary": "scheduler"
+    },
+    "packages/adapters/slack/daimon/adapters/slack/routine_delivery.py:make_slack_routine_poster._post.creator_current:stored_routine:7777d90857a1": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Slack/Teams entrypoints derive their own platform tenant; Discord R UUIDs cannot overlap. Creator checks are metadata-only."
+    },
+    "packages/adapters/slack/daimon/adapters/slack/routines_panel/actions.py:handle_routine_action:stored_routine:3ff3511fde4a": {
+      "count": 2,
+      "boundary": "stored_internal",
+      "note": "Slack/Teams entrypoints derive their own platform tenant; Discord R UUIDs cannot overlap. Creator checks are metadata-only."
+    },
+    "packages/adapters/slack/daimon/adapters/slack/routines_panel/read.py:load_routines:stored_routine:96a77714382f": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Slack/Teams entrypoints derive their own platform tenant; Discord R UUIDs cannot overlap. Creator checks are metadata-only."
+    },
+    "packages/adapters/slack/daimon/adapters/slack/routines_panel/submit.py:run_routines_delete_submission:stored_routine:6c1e9d68d3ac": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Slack/Teams entrypoints derive their own platform tenant; Discord R UUIDs cannot overlap. Creator checks are metadata-only."
+    },
+    "packages/adapters/teams/daimon/adapters/teams/routines_panel.py:RoutinesPanel._act:stored_routine:4d5934ed70aa": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Slack/Teams entrypoints derive their own platform tenant; Discord R UUIDs cannot overlap. Creator checks are metadata-only."
+    },
+    "packages/adapters/teams/daimon/adapters/teams/routines_panel.py:RoutinesPanel._panel:stored_routine:874cf70b2265": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Slack/Teams entrypoints derive their own platform tenant; Discord R UUIDs cannot overlap. Creator checks are metadata-only."
     },
     "packages/core/daimon/core/headless_runner.py:run_turn_impl:run_turn:20a99fabd300": {
       "count": 1,
@@ -711,6 +830,21 @@
     "packages/core/daimon/core/smoke.py:run_smoke_check:run_turn:d3508e9172ea": {
       "count": 1,
       "boundary": "headless"
+    },
+    "packages/core/daimon/core/stores/routines.py:pause_routine:stored_routine:3ff3511fde4a": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Creator/execution/mutation bookkeeping only; not a stored trigger/result projection."
+    },
+    "packages/core/daimon/core/stores/routines.py:resume_routine:stored_routine:3ff3511fde4a": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Creator/execution/mutation bookkeeping only; not a stored trigger/result projection."
+    },
+    "packages/core/daimon/core/stores/routines.py:update_routine:stored_routine:3ff3511fde4a": {
+      "count": 1,
+      "boundary": "stored_internal",
+      "note": "Creator/execution/mutation bookkeeping only; not a stored trigger/result projection."
     },
     "packages/core/daimon/core/turn/run.py:run_prepared_turn_impl._run:run_turn:9a6f29e3f2d6": {
       "count": 1,
@@ -724,5 +858,11 @@
       "count": 1,
       "boundary": "driver"
     }
-  }
+  },
+  "limits": [
+    "Syntax ratchet, not exhaustive discovery or an authorization proof.",
+    "Bound-method assignment aliases, reflection, constructed URL variables and unlisted low-level SDK HTTP readers may not be discovered.",
+    "Boundary guard strings and regression names do not prove guard ordering, reachability or control flow. Manual inventory and behavioral tests are required.",
+    "Stored routine inventory distinguishes content projections, trusted internal bookkeeping, and non-Discord platform tenant readers."
+  ]
 }
