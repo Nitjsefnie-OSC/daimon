@@ -10,7 +10,7 @@ from mux.contracts.resources import Agent, AgentSpec
 from mux.drivers.gemini.flash import FLASH_MODELS, FLASH_PRIMARY, FlashAttempt, FlashTransport
 from mux.drivers.gemini.transport import object_value
 from mux.errors import ProviderError
-from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
 from pydantic import JsonValue
 
 
@@ -197,3 +197,119 @@ async def test_bounded_worker_pins_counted_model_and_never_falls_back():
         await transport.create(body)
     assert len(source.requests) == len(accounting.held) == 1
     assert accounting.held[0].id == FLASH_PRIMARY
+
+
+def argon_request() -> Mapping[str, JsonValue]:
+    return {"agent_config": {"type": "antigravity", "model": ARGON_MODEL}, "input": []}
+
+
+@pytest.mark.parametrize("overloaded", (False, True))
+async def test_argon_primary_is_one_attempt_and_never_falls_back_to_flash(
+    overloaded: bool,
+) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.append(
+        ProviderError("overloaded", retryable=True, native_code="503")
+        if overloaded
+        else {"id": "argon", "status": "completed"}
+    )
+    source.responses.append({"id": "flash", "status": "completed"})
+    policy = FlashTransport(source, accounting, primary=ARGON_MODEL)
+    if overloaded:
+        with pytest.raises(ProviderError):
+            await policy.create(argon_request())
+        assert accounting.receipts[0].outcome == "refused"
+    else:
+        await policy.create(argon_request())
+        assert policy.model_for_interaction("argon") == ModelRef(provider="gemini", id=ARGON_MODEL)
+    assert source.requests == [argon_request()]
+    assert accounting.held == [ModelRef(provider="gemini", id=ARGON_MODEL)]
+
+
+async def test_argon_and_flash_primaries_refuse_each_others_requests() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    with pytest.raises(ProviderError, match="flash_primary_required"):
+        await FlashTransport(source, accounting, primary=ARGON_MODEL).create(request())
+    with pytest.raises(ProviderError, match="flash_primary_required"):
+        await FlashTransport(source, accounting).create(argon_request())
+    assert not source.requests and not accounting.held
+
+
+@pytest.mark.parametrize("primary", (WORKER_MODEL, "gemini-4-argon-preview", "gemini-pro"))
+def test_transport_primary_is_flash_or_argon_only(primary: str) -> None:
+    with pytest.raises(ValueError):
+        FlashTransport(FakeTransport(), Accounting(), primary=primary)
+
+
+async def test_bounded_worker_cannot_use_argon() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    capped: Mapping[str, JsonValue] = {
+        "model": ARGON_MODEL,
+        "tools": [],
+        "generation_config": {"max_output_tokens": 4096},
+        "input": [{"type": "text", "text": "task"}],
+    }
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting, bounded_worker=True, primary=ARGON_MODEL).create(
+            capped
+        )
+    assert not source.requests and not accounting.held
+
+
+def http(category: str, status: int, *, code: str | None = None) -> ProviderError:
+    """What `transport.normalize_error` yields for an HTTP status on create."""
+    return ProviderError(
+        category,  # type: ignore[arg-type]
+        retryable=status == 429 or status >= 500,
+        native_code=code,
+        native_error_code=f"http_{status}",
+    )
+
+
+@pytest.mark.parametrize(
+    ("error", "status"),
+    [
+        (http("invalid_request", 400), 400),
+        (http("auth", 401), 401),
+        (http("permission", 403), 403),
+        (http("not_found", 404), 404),
+        (http("invalid_request", 422), 422),
+    ],
+)
+async def test_definite_4xx_on_create_is_a_refusal_that_never_falls_back(
+    error: ProviderError, status: int
+) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([error, {"id": "unexpected", "status": "completed"}])
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    assert len(source.requests) == len(accounting.held) == 1
+    (receipt,) = accounting.receipts
+    assert (receipt.outcome, receipt.http_status, receipt.interaction_id) == (
+        "refused",
+        status,
+        None,
+    )
+
+
+@pytest.mark.parametrize(
+    "error",
+    [
+        http("upstream", 500),
+        http("upstream", 408),
+        http("rate_limited", 429),
+        http("conflict", 409),
+        http("overloaded", 500, code="high_demand"),
+        ProviderError("transient_network", retryable=True),
+        # A local check after a 200 (Google accepted): no provider status.
+        ProviderError("permission", retryable=False, native_code="gcs_token_echo"),
+        ProviderError("invalid_request", retryable=False, native_code="explicit_tools_required"),
+    ],
+)
+async def test_maybe_accepted_create_failures_stay_unknown(error: ProviderError) -> None:
+    source, accounting = FakeTransport(), Accounting()
+    source.responses.extend([error, {"id": "unexpected", "status": "completed"}])
+    with pytest.raises(ProviderError):
+        await FlashTransport(source, accounting).create(request())
+    assert len(source.requests) == 1
+    assert [(r.outcome, r.http_status) for r in accounting.receipts] == [("unknown", None)]

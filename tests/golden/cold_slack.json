@@ -198,6 +198,25 @@
     {
       "operation": "request",
       "payload": {
+        "data": null,
+        "headers": {
+          "content-type": "application/x-www-form-urlencoded"
+        },
+        "json": null,
+        "method": "GET",
+        "params": {
+          "channel": "C100000"
+        },
+        "url": "https://slack.com/api/conversations.info"
+      },
+      "platform": "platform_http",
+      "result": {
+        "status": 200
+      }
+    },
+    {
+      "operation": "request",
+      "payload": {
         "body": null,
         "method": "GET",
         "path": "/v1/agents",
@@ -884,7 +903,8 @@
                     "text": "\ud83d\udc4d",
                     "type": "plain_text"
                   },
-                  "type": "button"
+                  "type": "button",
+                  "value": "U555000111"
                 },
                 {
                   "action_id": "feedback_vote:down",
@@ -892,7 +912,8 @@
                     "text": "\ud83d\udc4e",
                     "type": "plain_text"
                   },
-                  "type": "button"
+                  "type": "button",
+                  "value": "U555000111"
                 }
               ],
               "type": "actions"

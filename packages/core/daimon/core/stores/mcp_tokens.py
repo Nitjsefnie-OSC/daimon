@@ -18,7 +18,7 @@ inside core logic.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Collection
+from collections.abc import Collection, Sequence
 from datetime import datetime
 from decimal import Decimal
 from typing import Any, cast
@@ -245,7 +245,7 @@ async def prune_expired_ephemeral_tokens(
     session: AsyncSession,
     *,
     expires_before: datetime,
-    chat_label_prefix: str,
+    chat_label_prefixes: Sequence[str],
     panel_label: str,
 ) -> int:
     """Delete bounded system tokens after expiry plus the caller's retention grace.
@@ -259,7 +259,12 @@ async def prune_expired_ephemeral_tokens(
             or_(
                 and_(
                     McpToken.kind == "agent",
-                    McpToken.label == chat_label_prefix + McpToken.jti.cast(String),
+                    or_(
+                        *(
+                            McpToken.label == prefix + McpToken.jti.cast(String)
+                            for prefix in chat_label_prefixes
+                        )
+                    ),
                 ),
                 and_(McpToken.kind == "cli", McpToken.label == panel_label),
             ),

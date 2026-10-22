@@ -333,6 +333,7 @@ async def _prepare_openai(request: ProviderPreparationRequest) -> PreparedTurn:
         raise AdmissionDenied(reason="backend_unsupported")
     if (
         request.admission.shared_owner is not None
+        or request.admission.hold is not None
         or revision.thread_mode != "per_caller"
         or request.transfer is not None
     ):

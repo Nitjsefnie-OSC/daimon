@@ -20,11 +20,12 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import asynccontextmanager
+from dataclasses import replace
 from datetime import datetime, timedelta
-from decimal import Decimal
+from decimal import Decimal, localcontext
 from typing import Any, Literal, cast
 
-from daimon.core._models import Account
+from daimon.core._models import Account, Tenant
 from daimon.core._models import FleetRun as FleetRunRow
 from daimon.core._models import FleetWorker as FleetWorkerRow
 from daimon.core.fleet import (
@@ -38,6 +39,7 @@ from daimon.core.fleet import (
     RunStatus,
     WorkerStatus,
     check_result,
+    holds_slot,
     worker_slot,
 )
 from daimon.core.stores import mux_state, read_persisted_columns, task_continuations, tenant_ledger
@@ -236,8 +238,10 @@ async def add_worker(
 ) -> FleetWorker:
     """A pending worker at `ordinal`, or the same one again; any other input there conflicts.
 
-    The run must be running, the ordinal below its `max_workers`, and the worker's
-    deadline no later than the run's.
+    The run must be running, fewer than `max_workers` of its workers may hold a slot
+    (a spawn refused at admission frees its slot, see `holds_slot`), the ordinal is
+    below twice `max_workers` so refusals stay bounded, and the worker's deadline is
+    no later than the run's.
     """
     intent: dict[str, Any] = {
         "role": role,
@@ -274,7 +278,15 @@ async def add_worker(
             return _worker(existing)
         if run.status != "running":
             raise FleetConflict(f"run {run_id} is {run.status}")
-        if not 0 <= ordinal < run.max_workers:
+        if not 0 <= ordinal < 2 * run.max_workers:
+            raise FleetConflict(f"run {run_id} allows {run.max_workers} workers")
+        rows = (
+            await session.scalars(select(FleetWorkerRow).where(FleetWorkerRow.run_id == run_id))
+        ).all()
+        if (
+            sum(1 for other in rows if other.started_at is not None or holds_slot(_worker(other)))
+            >= run.max_workers
+        ):
             raise FleetConflict(f"run {run_id} allows {run.max_workers} workers")
         if deadline_at > run.deadline_at:
             raise FleetConflict("a worker's deadline cannot outlast its run")
@@ -714,7 +726,16 @@ async def set_run_status(
     run_id: uuid.UUID,
     expected_version: int,
     status: RunStatus,
+    wake_id: uuid.UUID | None = None,
+    unless_waking: bool = False,
 ) -> FleetRun:
+    """Compare-and-set the run's status; an ended run withdraws its wakes.
+
+    `wake_id` is the wake whose turn makes this move; its own claim is kept for
+    the wake owner to settle. With `unless_waking`, another pending or claimed
+    wake of this run refuses the move in the same transaction (FleetConflict),
+    so a turn already owed to the root is never cancelled under it.
+    """
     finished = {"finished_at": func.now()} if status not in RUN_TRANSITIONS else {}
     async with _transaction(sessionmaker) as session:
         row = (
@@ -740,8 +761,12 @@ async def set_run_status(
                 f"run {run_id} cannot become {status} at version {expected_version}"
             )
         run = _run(row)
+        if unless_waking and await task_continuations.count_run_wakes(
+            session, run=run, exclude_id=wake_id
+        ):
+            raise FleetConflict(f"run {run_id} has a pending wake", reason="wake_pending")
         if finished:
-            await task_continuations.retire_worker_finished_rows(session, run=run)
+            await task_continuations.retire_worker_finished_rows(session, run=run, keep_id=wake_id)
     return run
 
 
@@ -867,6 +892,7 @@ async def lock_budget(
     run_id: uuid.UUID | None,
     financial: bool = True,
     persisted: bool = False,
+    locking: bool = True,
 ) -> tuple[BudgetGraph, Mapping[uuid.UUID, datetime | None]]:
     """Join the caller's financial transaction before any fleet row transition.
 
@@ -878,19 +904,24 @@ async def lock_budget(
     requested run for terminal readback. Passive refresh uses tenant KEY SHARE;
     reservation and fresh native admission retain FOR UPDATE. Return original
     allocation stamps.
+
+    Without `locking` this is a read of the caller's snapshot: no tenant lock and no
+    row locks, for a read-only transaction that must never wait behind writers.
     """
     if not session.in_transaction():
         raise FleetConflict("fleet budget requires an active transaction")
-    await session.execute(
-        text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
-        {"key": f"fleet:{tenant_id}"},
-    )
-    # Same tenant/account order as audit and erasure.
-    tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id, financial=financial)
+    if locking:
+        await session.execute(
+            text("SELECT pg_advisory_xact_lock(hashtextextended(:key, 0))"),
+            {"key": f"fleet:{tenant_id}"},
+        )
+        # Same tenant/account order as audit and erasure.
+        tenant = await tenant_ledger.lock_funds(session, tenant_id=tenant_id, financial=financial)
+    else:
+        tenant = await session.scalar(select(Tenant.id).where(Tenant.id == tenant_id))
+    actor_query = select(Account.id).where(Account.id == actor_id, Account.tenant_id == tenant_id)
     actor = await session.scalar(
-        select(Account.id)
-        .where(Account.id == actor_id, Account.tenant_id == tenant_id)
-        .with_for_update(read=True, key_share=True)
+        actor_query.with_for_update(read=True, key_share=True) if locking else actor_query
     )
     if tenant is None or actor is None:
         raise FleetConflict("financial admission requires a live tenant actor")
@@ -903,8 +934,9 @@ async def lock_budget(
             | (FleetRunRow.reserved_usd > FleetRunRow.observed_usd),
         )
         .order_by(FleetRunRow.id)
-        .with_for_update()
     )
+    if locking:
+        run_query = run_query.with_for_update()
     runs = (
         (await read_persisted_columns(session, run_query, reject_new=True)).all()
         if persisted
@@ -917,8 +949,9 @@ async def lock_budget(
             FleetWorkerRow.run_id.in_(run.id for run in runs),
         )
         .order_by(FleetWorkerRow.id)
-        .with_for_update()
     )
+    if locking:
+        worker_query = worker_query.with_for_update()
     workers = (
         (await read_persisted_columns(session, worker_query, reject_new=True)).all()
         if persisted
@@ -930,6 +963,37 @@ async def lock_budget(
         ),
         {w.id: w.started_at for w in workers},
     )
+
+
+def project_budget(
+    graph: BudgetGraph,
+    *,
+    exposures: Mapping[uuid.UUID, Decimal],
+    debits: Mapping[uuid.UUID, Decimal],
+    zero_spend: frozenset[uuid.UUID] = frozenset(),
+) -> BudgetGraph:
+    """What `save_budget` would persist, computed without writing, for a snapshot read.
+
+    The same release rule applies; run sums use the same exact stored amounts.
+    """
+    result: list[tuple[FleetRun, tuple[FleetWorker, ...]]] = []
+    for run, workers in graph:
+        projected: list[FleetWorker] = []
+        for worker in workers:
+            amount = _amount(exposures[worker.id])
+            if amount < worker.reserved_usd and worker.id not in zero_spend:
+                raise FleetConflict("unknown worker exposure cannot be released")
+            projected.append(replace(worker, reserved_usd=amount))
+        with localcontext() as arithmetic:
+            arithmetic.prec = 80  # exact for stored micro-dollar amounts, as SQL sums are
+            total = sum((worker.reserved_usd for worker in projected), Decimal(0))
+        result.append(
+            (
+                replace(run, reserved_usd=total, observed_usd=_amount(debits[run.id])),
+                tuple(projected),
+            )
+        )
+    return tuple(result)
 
 
 async def save_budget(

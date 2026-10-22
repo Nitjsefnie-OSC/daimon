@@ -16,6 +16,7 @@ from daimon.core.stores.selfhosted_resources import (
 from daimon.core.stores.tenants import set_funding_mode
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.outcomes import drain_outcomes
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_account, make_tenant, make_tenant_config
 from daimon.testing.turn_fakes import deps_for_pinned_mux
 from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
@@ -78,6 +79,7 @@ async def test_admits_without_anthropic_key_or_calls(
     result = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="caller",
         channel_id="channel",
@@ -106,6 +108,7 @@ async def test_admits_without_anthropic_key_or_calls(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="caller",
             channel_id="channel",
@@ -116,6 +119,7 @@ async def test_admits_without_anthropic_key_or_calls(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="caller",
             channel_id="channel",
@@ -145,6 +149,7 @@ async def test_admits_without_anthropic_key_or_calls(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="caller",
             channel_id="channel",
@@ -223,6 +228,7 @@ async def test_agent_selected_selfhosted_is_refused_before_anthropic(
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="caller",
             channel_id="channel",

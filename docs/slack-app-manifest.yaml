@@ -104,6 +104,10 @@ settings:
       - group_deleted
       - app_uninstalled
       - tokens_revoked
+      # Slack Connect: record shared channels; see docs/slack.md.
+      - channel_shared
+      - channel_unshared
+      - member_joined_channel
   interactivity:
     is_enabled: true
   socket_mode_enabled: true

@@ -29,6 +29,7 @@ from anthropic.types.beta.vaults.beta_managed_agents_environment_variable_auth_r
     BetaManagedAgentsEnvironmentVariableAuthResponse,
 )
 from daimon.core.mcp_auth import CHAT_TOKEN_REFRESH_MARGIN, chat_token_label, mint_chat_mcp_token
+from daimon.core.mcp_hold import hold_from_metadata, hold_metadata_value, hold_vault_suffix
 from daimon.core.mcp_server_url import same_mcp_url
 from daimon.core.mux_compat import (
     create_vault,
@@ -40,6 +41,7 @@ from daimon.core.mux_compat import (
 )
 from daimon.core.stores.accounts import get_account_with_tenant
 from daimon.core.stores.mcp_tokens import get_mcp_token
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -49,6 +51,9 @@ GITHUB_COPILOT_MCP_URL = "https://api.githubcopilot.com/mcp"
 # Namespace prefix for the pg_advisory_xact_lock key — keeps this subsystem's
 # lock keys distinct from any other advisory-lock user in the same database.
 LOCK_NAMESPACE = "mcp_vault"
+
+#: Credential metadata key that records the hold a held credential was minted with.
+HOLD_METADATA_KEY = "daimon_chat_hold"
 
 
 async def _find_vault_by_name(
@@ -153,8 +158,13 @@ async def chat_mcp_credential(
     public_url: str,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
 ) -> dict[str, Any]:
-    """Build one vault payload and register its individually revocable JWT."""
+    """Build one vault payload and register its individually revocable JWT.
+
+    A ``hold`` is signed into the JWT and recorded in the credential's metadata,
+    where a refresh finds it again.
+    """
     token, jti, expires_at = await mint_chat_mcp_token(
         session,
         account_id=account_id,
@@ -162,6 +172,7 @@ async def chat_mcp_credential(
         secret=jwt_secret,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        hold=hold,
     )
     metadata = {
         "daimon_chat_identity": str(agent_id),
@@ -170,6 +181,8 @@ async def chat_mcp_credential(
     }
     if slack_turn_context_id is not None:
         metadata["daimon_chat_context"] = str(slack_turn_context_id)
+    if hold is not None:
+        metadata[HOLD_METADATA_KEY] = hold_metadata_value(hold)
     return {
         "metadata": metadata,
         "auth": {"type": "static_bearer", "mcp_server_url": public_url, "token": token},
@@ -188,6 +201,7 @@ async def _refresh_chat_credential_locked(
     now: dt.datetime,
     scope: Scope,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
     preserve_context: bool = False,
     registered_payload: dict[str, Any] | None = None,
     create_missing: bool = True,
@@ -204,6 +218,10 @@ async def _refresh_chat_credential_locked(
         metadata = cred.metadata or {}
         if preserve_context and metadata.get("daimon_chat_context") is not None:
             slack_turn_context_id = uuid.UUID(metadata["daimon_chat_context"])
+        if preserve_context and metadata.get(HOLD_METADATA_KEY) is not None:
+            # A mounted vault keeps the hold it was minted with; a refresh never
+            # widens or drops it.
+            hold = hold_from_metadata(metadata[HOLD_METADATA_KEY])
         raw_jti = metadata.get("daimon_chat_jti")
         try:
             jti = uuid.UUID(raw_jti) if isinstance(raw_jti, str) else None
@@ -215,7 +233,7 @@ async def _refresh_chat_credential_locked(
             identity is not None
             and row is not None
             and row.kind == "agent"
-            and row.label == chat_token_label(row.jti)
+            and row.label == chat_token_label(row.jti, held=hold is not None)
             and row.account_id == account_id
             and row.tenant_id == identity.tenant_id
             and row.agent_id == str(agent_id)
@@ -225,6 +243,10 @@ async def _refresh_chat_credential_locked(
             and metadata.get("daimon_chat_identity") == str(agent_id)
             and metadata.get("daimon_chat_context")
             == (None if slack_turn_context_id is None else str(slack_turn_context_id))
+            and metadata.get(HOLD_METADATA_KEY)
+            == (None if hold is None else hold_metadata_value(hold))
+            and (row.platform, row.channel_id)
+            == ((None, None) if hold is None else (hold.platform, hold.channel_id))
         ):
             return
         target = cred
@@ -241,6 +263,7 @@ async def _refresh_chat_credential_locked(
             public_url=public_url,
             now=now,
             slack_turn_context_id=slack_turn_context_id,
+            hold=hold,
         )
         # A running session can observe the provider write before its response
         # returns. Commit first, then re-lock and re-read so another refresh or
@@ -258,6 +281,7 @@ async def _refresh_chat_credential_locked(
             now=now,
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
+            hold=hold,
             registered_payload=payload,
             create_missing=create_missing,
         )
@@ -267,7 +291,11 @@ async def _refresh_chat_credential_locked(
         await store_credential(client, vault_id, registered_payload, scope=scope)
         return
     registered_payload["metadata"] = {
-        **{key: value for key, value in metadata.items() if key != "daimon_chat_context"},
+        **{
+            key: value
+            for key, value in metadata.items()
+            if key not in ("daimon_chat_context", HOLD_METADATA_KEY)
+        },
         **registered_payload["metadata"],
     }
     # Update in place: no empty slot and no cross-thread delete/recreate race.
@@ -344,11 +372,14 @@ async def _ensure_agent_mcp_vault_locked(
     public_url: str,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
     scope: Scope,
 ) -> str:
     display_name = f"daimon-mcp:{account_id}:{agent_id}"
     if slack_turn_context_id is not None:
         display_name += f":slack-turn:{slack_turn_context_id}"
+    if hold is not None:
+        display_name += hold_vault_suffix(hold)
     oldest = await _find_vault_by_name(client, display_name=display_name)
     if oldest is not None:
         await _refresh_chat_credential_locked(
@@ -362,6 +393,7 @@ async def _ensure_agent_mcp_vault_locked(
             now=now,
             scope=scope,
             slack_turn_context_id=slack_turn_context_id,
+            hold=hold,
         )
         return oldest.id
     vault = await create_vault(client, display_name, scope=scope)
@@ -373,6 +405,7 @@ async def _ensure_agent_mcp_vault_locked(
         public_url=public_url,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        hold=hold,
     )
     await store_credential(client, vault.id, payload, scope=scope)
     return vault.id
@@ -398,6 +431,7 @@ async def ensure_agent_mcp_vault(
     now: dt.datetime,
     session_factory: async_sessionmaker[AsyncSession],
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
     scope: Scope | None = None,
 ) -> str:
     """Return the ``ma_vault_id`` for this agent's daimon-mcp vault.
@@ -405,6 +439,12 @@ async def ensure_agent_mcp_vault(
     A Slack DM execution ID selects a separate vault namespace and signed claim;
     it never modifies the shared agent vault. Only sessions for that logical turn
     receive the isolated vault. Completed execution rows revoke DM-read authority.
+
+    A ``hold`` does the same for a held turn: its own vault per (account, agent,
+    platform, channel, client or member), whose credential carries the signed
+    hold and is bound to that channel in the registry. A warm vault whose
+    recorded hold differs is re-minted, never reused. An unheld turn keeps the
+    ordinary vault, which never carries a hold.
 
     Creates the vault + credential on cold path. On warm path, upgrades legacy
     static-bearer credentials once to carry ``chat_agent_id``. If no credential
@@ -454,6 +494,7 @@ async def ensure_agent_mcp_vault(
             public_url=public_url,
             now=now,
             slack_turn_context_id=slack_turn_context_id,
+            hold=hold,
             scope=scope,
         )
 

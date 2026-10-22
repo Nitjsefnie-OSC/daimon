@@ -530,7 +530,14 @@ async def run_action(
             except AccessPolicyUnreadable as exc:
                 raise ToolError("the access settings here could not be read") from exc
             for check in checks:
-                fresh_read = ChannelReadPolicy(policy, read.origin_channel_ids, agent, read.origin)
+                fresh_read = ChannelReadPolicy(
+                    policy,
+                    read.origin_channel_ids,
+                    agent,
+                    read.origin,
+                    subject=read.subject,
+                    hold=read.hold,
+                )
                 for channel, parent in check.sealed:
                     fresh_read.require(channel, parent)
                 await require_channel_writable(

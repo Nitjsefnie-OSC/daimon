@@ -22,6 +22,7 @@ import discord
 import httpx
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
+from daimon.adapters.mcp.tools._authz_facts import mcp_subject
 from daimon.adapters.mcp.tools._channel_policy import get_verified_origin, turn_origin_place
 from daimon.adapters.mcp.tools._ctx import _auth  # pyright: ignore[reportPrivateUsage]
 from daimon.adapters.mcp.tools._rule_view import CallerView, load_isolation_view
@@ -52,8 +53,8 @@ from daimon.adapters.mcp.tools.teams._directory import (
     require_client,
     split_thread,
 )
-from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.authz import Action, AgentRef, Place, Subject, Surface, authorize, build_agent_ref
+from daimon.core.access_policy import OPEN_ACCESS_POLICY, TenantAccessPolicy
+from daimon.core.authz import Action, AgentRef, Place, Surface, authorize, build_agent_ref
 from daimon.core.cron import next_slot_at_or_after
 from daimon.core.defaults.ma_index import find_agent_by_daimon_tag, list_agents_by_tenant
 from daimon.core.ma_identity import derive_agent_uuid
@@ -77,6 +78,27 @@ from sqlalchemy.ext.asyncio import AsyncSession
 class DeleteResult(BaseModel):
     deleted: bool
     routine_id: str
+
+
+def _require_routines_allowed(auth: AuthIdentity) -> None:
+    """A held credential or a client saves, changes and reads no routine.
+
+    Decided before any policy lookup, so no rule or empty policy relaxes it
+    (`authorize(SAVE_ROUTINE)`).
+    """
+    decision = authorize(
+        OPEN_ACCESS_POLICY,
+        subject=mcp_subject(auth),
+        action=Action.SAVE_ROUTINE,
+        surface=Surface.ROUTINE,
+        hold=auth.hold,
+    )
+    if not decision and decision.reason in ("outside_hold", "client_requester"):
+        record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
+        raise ToolError(
+            "this conversation is held to the channel it runs in, so it can't use routines. "
+            "Tell the caller. Do not retry."
+        )
 
 
 def _require_platform_user_id(auth: AuthIdentity) -> str:
@@ -324,9 +346,10 @@ async def _check_destination(
             ) from err
     if not authorize(
         policy,
-        subject=Subject(),
+        subject=mcp_subject(auth),
         action=Action.POST,
         surface=Surface.ROUTINE,
+        hold=auth.hold,
         place=Place(
             channel_id=channel_id, parent_channel_id=parent_channel_id, category_id=category_id
         ),
@@ -354,6 +377,7 @@ async def _load_policy_for_save(session: AsyncSession, *, tenant_id: UUID) -> Te
 def _check_agent_pin(
     policy: TenantAccessPolicy,
     *,
+    auth: AuthIdentity,
     platform: str,
     agent_name: str,
     agent: AgentRef,
@@ -386,12 +410,13 @@ def _check_agent_pin(
             target_channel_id = split_thread(destination_id)[0]
     decision = authorize(
         policy,
-        subject=Subject(),
+        subject=mcp_subject(auth),
         action=Action.SAVE_ROUTINE,
         surface=Surface.ROUTINE,
         agent=agent,
         place=Place(channel_id=target_channel_id, parent_channel_id=destination_channel_id),
         origin=origin,
+        hold=auth.hold,
     )
     if not decision:
         record_authz_denial(Action.SAVE_ROUTINE, decision.reason)
@@ -484,6 +509,7 @@ async def _create_routine_impl(
     destination_id: str | None = None,
     origin_context_id: str | None = None,
 ) -> RoutineRow:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     platform_user_id = _require_platform_user_id(auth)
     next_fire_at = _compute_next_fire_at(cron_expr, timezone)
@@ -514,6 +540,7 @@ async def _create_routine_impl(
         raise ToolError(f"no agent named {agent_name!r} found here")
     _check_agent_pin(
         policy,
+        auth=auth,
         platform=auth.platform or "",
         agent_name=agent_name,
         agent=build_agent_ref(match.name, match.metadata, agent_name),
@@ -554,6 +581,7 @@ async def _list_routines_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
 ) -> list[RoutineRow]:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session:
@@ -567,6 +595,7 @@ async def _get_routine_impl(
     *,
     routine_id: UUID,
 ) -> RoutineRow:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     async with runtime.session_factory() as session:
         row = await routines_store.get_routine(session, routine_id, tenant_id=tenant_id)
@@ -594,6 +623,7 @@ async def _update_routine_impl(
     destination_id: str | None = None,
     clear_destination: bool = False,
 ) -> RoutineRow:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     if clear_destination and (destination_kind is not None or destination_id is not None):
         raise ToolError("clear_destination cannot be combined with a new destination")
@@ -658,6 +688,7 @@ async def _update_routine_impl(
             effective_name = agent_name if new_agent_id is not None else row.agent_name
             _check_agent_pin(
                 update_policy,
+                auth=auth,
                 platform=auth.platform or "",
                 agent_name=effective_name or effective_agent.name,
                 agent=build_agent_ref(
@@ -709,6 +740,7 @@ async def _delete_routine_impl(
     *,
     routine_id: UUID,
 ) -> DeleteResult:
+    _require_routines_allowed(auth)
     tenant_id = auth.tenant_id
     caller = await load_isolation_view(runtime, auth)
     async with runtime.session_factory() as session, session.begin():

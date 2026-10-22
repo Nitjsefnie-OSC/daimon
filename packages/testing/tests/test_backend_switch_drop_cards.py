@@ -153,6 +153,8 @@ async def chat(request: pytest.FixtureRequest, db_preflight, db_committing_engin
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
@@ -336,6 +338,7 @@ class Card:
             turn_deps=chat.turn_deps,
             sessionmaker=chat.runtime.session_factory,
             anthropic=chat.runtime.client,
+            deployment_default=chat.runtime.deployment_default,
         )
         ids = {"tenant_id": chat.auth.tenant_id, "account_id": chat.auth.account_id}
         builder = getattr(self, f"_{chat.platform}")
@@ -359,8 +362,8 @@ class Card:
     def _slack(self, monkeypatch, runtime, admission, ids):
         from daimon.adapters.slack.tool_confirmation import SlackConfirmationCards
 
-        async def resolve_is_admin(client: object, *, user_id: str) -> bool:
-            return user_id in self.admins
+        async def resolve_is_admin(client: object, *, user_id: str, host_team_id: str) -> bool:
+            return host_team_id == "T1" and user_id in self.admins
 
         monkeypatch.setattr("daimon.adapters.slack.admin.resolve_is_admin", resolve_is_admin)
         self.client = MagicMock()
@@ -372,6 +375,7 @@ class Card:
             self.client,
             channel="C1",
             thread_ts="1699.9",
+            team_id="T1",
             runtime=runtime,
             admission=admission,
             **ids,

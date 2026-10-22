@@ -40,6 +40,7 @@ with a new active record.
 daimon selfhosted init \
   --tenant-id <tenant-uuid> \
   --harness-url https://harness.example \
+  --model gpt-6-luna \
   --auth-ref DAIMON_SELFHOSTED__HARNESS_TOKEN_PRIMARY
 ```
 
@@ -304,8 +305,35 @@ session identifier, including event polling, approvals and cancellation.
 Keep admission disabled until live header forwarding and durable state recovery
 have been verified. See `apps/harness/README.md` for routing and authentication
 details.
+Ephemeral harness sandboxes require Blob checkpoints before enabling selfhosted
+admission. Set `HARNESS_CHECKPOINT_ACCOUNT_URL` to the HTTPS storage account
+origin and `HARNESS_CHECKPOINT_CONTAINER` to an existing private container;
+`HARNESS_CHECKPOINT_KEEP` defaults to three snapshots. Use single-session mode
+and a service identity with Storage Blob Data Contributor on that container.
+The harness requires a header-protected managed identity endpoint, captures it
+before scrubbing the tool environment, and refuses an IMDS fallback.
 
-The standalone harness image runs the OpenAI Agents SDK against Azure OpenAI.
+The harness checkpoints workspace files, conversation history and request
+inventory before model I/O and after each terminal turn, including cancellation.
+Before paid work, small Blob write-ahead records protect turn idempotency and
+request inventory independently of workspace uploads. A write-ahead failure
+refuses paid work with a retryable durability error. A new sandbox restores
+checkpoints and write-ahead records before serving authenticated session requests. Storage
+restore failures return 503 and corrupt recovery refuses new work. Checkpoint
+write failures warn once per session and allow polls and later turns to continue.
+Unsupported or oversized workspace entries produce a degraded checkpoint with
+a manifest of skipped entries. Recovery uses the client cursor to report a
+history gap and terminate interrupted turns without reusing event sequences. See
+`apps/harness/README.md` for limits, permissions and deployment verification.
+
+The standalone harness image defaults to the OpenAI Agents SDK against Azure OpenAI.
+`HARNESS_LOOP=codex` opts into the Codex app-server loop using the same harness
+tool policies, UID isolation and Azure credential boundary. The image pins
+Codex 0.162.1. Bundled controller skills are disabled; harness-provided skills
+still use the normal tool and approval boundary. The OpenAI live-test override
+requires `HARNESS_RUNTIME_MODE=probe` and refuses Azure/managed-identity
+configuration; production defaults to Azure. See `apps/harness/README.md` for the experimental backend
+limitations and offline verification; production enablement requires review.
 Build it from the repository root with
 `docker build -f apps/harness/Dockerfile -t daimon-harness .`. Its dependencies
 are exported from `uv.lock`; the image includes NumPy, pandas, PyMC and
@@ -1546,3 +1574,8 @@ operator-verified model tariffs in `DAIMON_BILLING__SELFHOSTED__DEPLOYMENTS` and
 `DAIMON_BILLING__SELFHOSTED__MODELS`. See [selfhosted Azure usage](billing.md#selfhosted-azure-usage)
 for tariff histories, the runtime admission gate and durable snapshot, explicit
 compute-cost attribution, and paginated pending-usage reconciliation.
+
+Harness process cleanup enumerates present `/proc` PIDs, including after PID wrap.
+If procfs uses hidepid, configure `gid=60002` for the trusted cleanup verifier;
+only that helper receives the exemption group. Multi-session harness mode requires
+`hidepid=2,gid=60002`. Ordinary tool processes do not receive the exemption.
