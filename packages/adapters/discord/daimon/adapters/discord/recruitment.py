@@ -19,6 +19,7 @@ from daimon.core.stores.recruitment import (
     RecruitmentBusy,
     RecruitmentStore,
     invalidate_source,
+    invalidate_sources,
 )
 
 import discord
@@ -175,10 +176,20 @@ class RecruitmentCog(commands.Cog):
 
     @commands.Cog.listener()
     async def on_raw_bulk_message_delete(self, payload: discord.RawBulkMessageDeleteEvent) -> None:
-        for message_id in payload.message_ids:
-            await self.raw_revision(
-                payload.guild_id, payload.channel_id, message_id, deleted=True, enrich=False
-            )
+        if payload.guild_id is None:
+            return
+        channel = self.bot.get_channel(payload.channel_id)
+        from daimon.adapters.discord.recruitment_guard import protected
+
+        if not protected(self.runtime.settings.recruitment, channel, str(payload.guild_id)):
+            return
+        await invalidate_sources(
+            self.runtime.sessionmaker,
+            derive_tenant_uuid(platform="discord", workspace_id=str(payload.guild_id)),
+            str(payload.channel_id),
+            {str(message_id) for message_id in payload.message_ids},
+            deleted=True,
+        )
 
     async def ingest_message(
         self, thread: discord.Thread, message_id: int, *, source_channel_id: str | None = None

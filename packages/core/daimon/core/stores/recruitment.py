@@ -487,6 +487,21 @@ async def invalidate_source(
     observed_at: datetime | None = None,
     deleted: bool = False,
 ) -> str | None:
+    affected = await invalidate_sources(
+        sessions, tenant_id, channel_id, {message_id}, observed_at=observed_at, deleted=deleted
+    )
+    return next(iter(affected), None)
+
+
+async def invalidate_sources(
+    sessions: async_sessionmaker[AsyncSession],
+    tenant_id: UUID,
+    channel_id: str,
+    message_ids: set[str],
+    *,
+    observed_at: datetime | None = None,
+    deleted: bool = False,
+) -> set[str]:
     """Accept event metadata and fence approvals before any Discord/model enrichment.
 
     Parent starters map by (parent_id, thread_id=message_id). Deleted evidence
@@ -495,7 +510,7 @@ async def invalidate_source(
     from sqlalchemy import and_, or_
 
     async with sessions.begin() as session:
-        thread = await session.scalar(
+        threads = await session.scalars(
             select(RecruitmentThreadRecord)
             .where(
                 RecruitmentThreadRecord.tenant_id == tenant_id,
@@ -503,53 +518,64 @@ async def invalidate_source(
                     RecruitmentThreadRecord.thread_id == channel_id,
                     and_(
                         RecruitmentThreadRecord.parent_id == channel_id,
-                        RecruitmentThreadRecord.thread_id == message_id,
+                        RecruitmentThreadRecord.thread_id.in_(message_ids),
                     ),
                 ),
             )
+            .order_by(RecruitmentThreadRecord.thread_id)
             .with_for_update()
         )
-        if thread is None or thread.phase == "expired" or thread.card_id == message_id:
-            return None
-        old = await session.get(RecruitmentMessageRecord, (tenant_id, thread.thread_id, message_id))
-        when = observed_at or (
-            old.observed_at
-            if old and not deleted
-            else datetime.now(UTC)
-            if deleted
-            else datetime.min.replace(tzinfo=UTC)
-        )
-        if old:
-            when = max(when, old.observed_at)
-            deleted = deleted or old.deleted
-        revision = uuid4().hex
-        thread.seen_watermark += 1
-        thread.claim_token = uuid4().hex
-        values = dict(
-            tenant_id=tenant_id,
-            thread_id=thread.thread_id,
-            message_id=message_id,
-            revision=revision if deleted or old is None else old.revision,
-            processed_revision=None,
-            observed_at=when,
-            source_channel_id=channel_id,
-            needs_enrichment=not deleted,
-            deleted=deleted,
-            encrypted_source=old.encrypted_source
-            if old and not deleted and old.raw_expires_at > datetime.now(UTC)
-            else None,
-            raw_expires_at=old.raw_expires_at if old else datetime.now(UTC),
-        )
-        await session.execute(
-            insert(RecruitmentMessageRecord)
-            .values(**values)
-            .on_conflict_do_update(
-                index_elements=["tenant_id", "thread_id", "message_id"],
-                set_={
-                    k: v
-                    for k, v in values.items()
-                    if k not in {"tenant_id", "thread_id", "message_id"}
-                },
-            )
-        )
-        return thread.thread_id
+        affected: set[str] = set()
+        event_deleted = deleted
+        for thread in threads:
+            for message_id in sorted(message_ids):
+                if thread.phase == "expired" or thread.card_id == message_id:
+                    continue
+                if thread.thread_id != channel_id and thread.thread_id != message_id:
+                    continue
+                deleted = event_deleted
+                affected.add(thread.thread_id)
+                old = await session.get(
+                    RecruitmentMessageRecord, (tenant_id, thread.thread_id, message_id)
+                )
+                when = observed_at or (
+                    old.observed_at
+                    if old and not deleted
+                    else datetime.now(UTC)
+                    if deleted
+                    else datetime.min.replace(tzinfo=UTC)
+                )
+                if old:
+                    when = max(when, old.observed_at)
+                    deleted = deleted or old.deleted
+                revision = uuid4().hex
+                thread.seen_watermark += 1
+                thread.claim_token = uuid4().hex
+                values = dict(
+                    tenant_id=tenant_id,
+                    thread_id=thread.thread_id,
+                    message_id=message_id,
+                    revision=revision if deleted or old is None else old.revision,
+                    processed_revision=None,
+                    observed_at=when,
+                    source_channel_id=channel_id,
+                    needs_enrichment=not deleted,
+                    deleted=deleted,
+                    encrypted_source=old.encrypted_source
+                    if old and not deleted and old.raw_expires_at > datetime.now(UTC)
+                    else None,
+                    raw_expires_at=old.raw_expires_at if old else datetime.now(UTC),
+                )
+                await session.execute(
+                    insert(RecruitmentMessageRecord)
+                    .values(**values)
+                    .on_conflict_do_update(
+                        index_elements=["tenant_id", "thread_id", "message_id"],
+                        set_={
+                            k: v
+                            for k, v in values.items()
+                            if k not in {"tenant_id", "thread_id", "message_id"}
+                        },
+                    )
+                )
+    return affected

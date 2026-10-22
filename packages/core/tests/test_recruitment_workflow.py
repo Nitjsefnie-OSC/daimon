@@ -114,7 +114,7 @@ async def test_tenant_filter_and_retention_tombstones(store: RecruitmentStore) -
     await other.purge(datetime.now(UTC) + timedelta(days=99))
     assert await store.messages("20")
     await store.purge(datetime.now(UTC) + timedelta(days=31))
-    assert await store.messages("20") == []
+    assert all(m.deleted and not m.content for m in await store.messages("20"))
     state = await store.get("20")
     assert state and state.phase == "expired" and state.card_id == "30"
     assert "20" in await store.list_threads()
@@ -501,7 +501,7 @@ async def test_new_edit_after_raw_purge_invalidates_derived_review(store) -> Non
     await store.ingest("20", original)
     before = await store.get("20")
     await store.purge(datetime.now(UTC) + timedelta(days=8))
-    assert await store.messages("20") == []
+    assert all(m.deleted and not m.content for m in await store.messages("20"))
     assert not await store.ingest("20", original)  # never resurrect unchanged erased text
     newer = original.model_copy(
         update={
@@ -544,7 +544,7 @@ async def test_partial_event_does_not_repopulate_unchanged_erased_evidence(store
     assert await store.pending_enrichment("20")
     assert not await store.ingest("20", original)
     assert not await store.pending_enrichment("20")
-    assert await store.messages("20") == []
+    assert all(m.deleted and not m.content for m in await store.messages("20"))
     state = await store.get("20")
     assert state.seen_watermark > state.covered_watermark or state.revision != before.revision
 
@@ -564,7 +564,7 @@ async def test_offline_deletion_after_raw_purge_uses_content_free_manifest(store
     await store.ingest("20", message("10", "Synthetic erased email"))
     before = await store.get("20")
     await store.purge(datetime.now(UTC) + timedelta(days=8))
-    assert await store.messages("20") == []
+    assert all(m.deleted and not m.content for m in await store.messages("20"))
     assert [id for id, _, _ in await store.message_manifest("20")] == ["10"]
 
     async def authorize(actor, thread):
@@ -674,7 +674,7 @@ async def test_own_card_echo_is_excluded_and_unknown_bot_recovers_without_new_re
     after = await store.get("20")
     assert after.revision == before.revision
     assert after.seen_watermark == after.covered_watermark
-    assert await store.messages("20") == []
+    assert all(m.deleted and not m.content for m in await store.messages("20"))
 
 
 async def test_confirmation_watermark_is_checked_atomically_with_outbox_insert(store, monkeypatch):
@@ -754,7 +754,7 @@ async def test_scheduler_recovers_unknown_author_bot_edit_without_card_echo_loop
     assert state.revision == "same-review"
     assert state.seen_watermark == state.covered_watermark
     assert not await store.pending_enrichment("20")
-    assert await store.messages("20") == []
+    assert all(m.deleted and not m.content for m in await store.messages("20"))
 
 
 async def test_new_evidence_does_not_deadlock_same_key_uncertainty_resolution(store):
@@ -871,3 +871,86 @@ async def test_control_echo_needs_no_reapproval_for_current_or_pending_confirmat
         await service.deliver("20", force=True)
         assert len(fake.effects) == 1
         assert (await store.get("20")).candidate_id
+
+
+@pytest.mark.parametrize("starter", [False, True])
+async def test_bulk_event_cannot_be_covered_between_tombstones(store, monkeypatch, starter):
+    """A worker paused between IDs holds the event lock through the whole batch."""
+    import asyncio
+
+    from daimon.core.stores.recruitment import invalidate_sources
+    from sqlalchemy.ext.asyncio import AsyncSession
+
+    async def authorize(actor, thread):
+        pass
+
+    fake = SyntheticRecruitmentTransport()
+    async with httpx.AsyncClient(transport=fake) as http:
+        service = RecruitmentService(
+            store,
+            RecruitmentAPI(http, "https://synthetic.invalid", SecretStr("fake")),
+            extract,
+            authorize,
+            backend="synthetic",
+        )
+        for thread in ("20", "21") if starter else ("20",):
+            await service.enroll(thread, "2", "!labs-staffing: Synthetic")
+            await service.ingest(
+                thread, [message("20" if starter else "10"), message("21" if starter else "11")]
+            )
+        second, release = asyncio.Event(), asyncio.Event()
+        original = AsyncSession.execute
+        inserts = 0
+
+        async def paused_execute(session, statement, *args, **kwargs):
+            nonlocal inserts
+            if str(statement).startswith("INSERT INTO recruitment_messages"):
+                inserts += 1
+                if inserts == 2:
+                    second.set()
+                    await release.wait()
+            return await original(session, statement, *args, **kwargs)
+
+        monkeypatch.setattr(AsyncSession, "execute", paused_execute)
+        batch = asyncio.create_task(
+            invalidate_sources(
+                store.sessions,
+                store.tenant_id,
+                "2" if starter else "20",
+                {"20", "21"} if starter else {"10", "11"},
+                deleted=True,
+            )
+        )
+        await asyncio.wait_for(second.wait(), 5)
+
+        async def reconcile():
+            await service.ingest("20", [])
+            current = await store.get("20")
+            if not starter:
+                assert current.phase == "blocked" and current.candidate is None
+                with pytest.raises(ValueError):
+                    await service.confirm(
+                        "20",
+                        current.revision,
+                        "create",
+                        "7",
+                        "bulk-race",
+                        covered_watermark=current.covered_watermark,
+                    )
+                await service.deliver("20")
+
+        worker = asyncio.create_task(reconcile())
+        try:
+            await asyncio.sleep(0.05)
+            assert not worker.done(), "no intermediate covered review may escape the event lock"
+        finally:
+            release.set()
+            await batch
+            await worker
+        affected = ("20", "21") if starter else ("20",)
+        for thread in affected:
+            state = await store.get(thread)
+            assert state and state.seen_watermark > 0
+        if not starter:
+            assert all(m.deleted and not m.content for m in await store.messages("20"))
+        assert fake.effects == {}
