@@ -38,6 +38,9 @@ if TYPE_CHECKING:
 
 
 type Control = Literal["kill", "resume"]
+type SettledStatus = Literal["completed", "cancelled", "failed"]
+
+_ACTIVE = ("pending", "starting", "running")
 
 log = structlog.get_logger(__name__)
 
@@ -177,6 +180,12 @@ class FleetPorts(Protocol):
         Implementations must not fetch remote schemas or trust the excerpt.
         Return the validated output, rather than the model's summary of it.
         """
+        ...
+
+    async def settle_run(
+        self, parent: WorkerPermissions, run: FleetRun, status: SettledStatus
+    ) -> FleetRun:
+        """Move a run with no active worker to its terminal status (version CAS)."""
         ...
 
 
@@ -597,14 +606,14 @@ class FleetOrchestrator:
         run, workers = await self.read_snapshot(parent, policy, run_id)
         await self._controller_authorize(parent)
         if run.status in ("cancelled", "failed"):
-            return {"run_id": str(run.id), "status": "blocked", "reason": "run_stopped"}
+            return {
+                "run_id": str(run.id),
+                "status": "blocked",
+                "reason": "run_stopped",
+            } | await self._partial(parent, policy, run, workers)
         if not workers:
             raise FleetRefused("empty_run")
-        active = {
-            worker.reviewer_of
-            for worker in workers
-            if worker.status in ("pending", "starting", "running")
-        }
+        active = {worker.reviewer_of for worker in workers if worker.status in _ACTIVE}
         if active:
             # The initial phase precedes separate review cohorts for each target.
             for target in {None} if None in active else active:
@@ -613,7 +622,11 @@ class FleetOrchestrator:
                 )
             return {"run_id": str(run.id), "status": "waiting"}
         if any(worker.status != "succeeded" for worker in workers):
-            return {"run_id": str(run.id), "status": "blocked", "reason": "worker_failed"}
+            return {
+                "run_id": str(run.id),
+                "status": "blocked",
+                "reason": "worker_failed",
+            } | await self._partial(parent, policy, run, workers)
         if any(
             worker.reviewer_of is None
             and _review_required(worker.result_contract)
@@ -659,6 +672,75 @@ class FleetOrchestrator:
             if worker.reviewer_of is None
         ]
         return {"run_id": str(run.id), "status": "ready", "results": outputs}
+
+    async def _partial(
+        self,
+        parent: WorkerPermissions,
+        policy: TenantAccessPolicy,
+        run: FleetRun,
+        workers: tuple[FleetWorker, ...],
+    ) -> dict[str, JsonValue]:
+        """Verified results of the workers that succeeded, beside the ones that did not.
+
+        Only a settled run without review cohorts qualifies: a pending worker,
+        a reviewer or a review requirement keeps the run blocked without results.
+        Each result passes the same pointer/journal/contract checks as a ready one.
+        """
+        succeeded = [worker for worker in workers if worker.status == "succeeded"]
+        if (
+            not succeeded
+            or any(worker.status in _ACTIVE or worker.reviewer_of is not None for worker in workers)
+            or any(_review_required(worker.result_contract) for worker in succeeded)
+        ):
+            return {}
+        try:
+            results: list[JsonValue] = [
+                {
+                    "worker_id": str(worker.id),
+                    "role": worker.role,
+                    "result": self._owner().validate_contract(
+                        worker.result_contract,
+                        await self._result(parent, policy, run, worker),
+                    ),
+                }
+                for worker in succeeded
+            ]
+        except FleetRefused:
+            return {}
+        failed: list[JsonValue] = [
+            {
+                "worker_id": str(worker.id),
+                "role": worker.role,
+                "status": worker.status,
+                "error_code": worker.error_code,
+            }
+            for worker in workers
+            if worker.status != "succeeded"
+        ]
+        return {"partial": True, "results": results, "failed": failed}
+
+    async def settle(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, run_id: uuid.UUID
+    ) -> FleetRun | None:
+        """End a run whose root turn finished with no worker left to wake it.
+
+        Zero workers cancel the run; all-terminal workers complete it when every
+        result is collectable, else fail it. An active worker or a run already
+        ended leaves it unchanged (None). Money and native work keep their owners.
+        """
+        run, workers = await self.read_snapshot(parent, policy, run_id)
+        await self._controller_authorize(parent)
+        if run.status not in ("running", "collecting") or any(
+            worker.status in _ACTIVE for worker in workers
+        ):
+            return None
+        status: SettledStatus
+        if not workers:
+            status = "cancelled"
+        else:
+            reply = await self.collect(parent, policy, run_id=run.id)
+            status = "completed" if reply.get("status") == "ready" else "failed"
+        return await self._owner().settle_run(parent, run, status)
 
 
 class HostFleetPorts:
@@ -943,6 +1025,32 @@ class HostFleetPorts:
         if str(run.orchestrator_account_id) != scope.account_id:
             raise FleetRefused("foreign_run")
         return run, workers
+
+    async def settle_run(
+        self, parent: WorkerPermissions, run: FleetRun, status: SettledStatus
+    ) -> FleetRun:
+        from daimon.core.fleet import FleetConflict
+        from daimon.core.stores import fleet
+
+        _scope(parent, run)
+        try:
+            if status == "completed" and run.status == "running":
+                run = await fleet.set_run_status(
+                    self.sessions,
+                    tenant_id=run.tenant_id,
+                    run_id=run.id,
+                    expected_version=run.version,
+                    status="collecting",
+                )
+            return await fleet.set_run_status(
+                self.sessions,
+                tenant_id=run.tenant_id,
+                run_id=run.id,
+                expected_version=run.version,
+                status=status,
+            )
+        except FleetConflict:
+            raise FleetRefused("run_changed") from None
 
     async def read_clone(
         self, parent: WorkerPermissions, ref: ResourceRef, revision: Revision

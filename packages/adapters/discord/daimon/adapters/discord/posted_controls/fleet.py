@@ -9,11 +9,12 @@ from __future__ import annotations
 import asyncio
 import re
 import uuid
-from collections.abc import Awaitable, Callable, Sequence
+from collections.abc import Awaitable, Callable, MutableMapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from typing import TYPE_CHECKING, Any, Self, cast
 
+import structlog
 from daimon.adapters.discord.posted_controls.view import build_card_view
 from daimon.adapters.discord.views import finish_control
 from daimon.core.access_policy import TenantAccessPolicy
@@ -41,6 +42,11 @@ type Send = Callable[..., Awaitable[discord.Message]]
 type Edit = Callable[..., Awaitable[discord.Message | None]]
 
 _MESSAGE_TEXT_LIMIT = 4000
+# Cards remembered per run so a wake turn edits the card its root turn posted.
+_POSTED_CARDS_LIMIT = 512
+_UNAVAILABLE = "Fleet status is unavailable, so there's no fleet result to share."
+
+log = structlog.get_logger(__name__)
 
 
 def _literal(value: str, limit: int) -> str:
@@ -57,6 +63,7 @@ def build_fleet_view(
     *,
     collected: bool = False,
     blocked: bool = False,
+    partial: bool = False,
 ) -> discord.ui.LayoutView:
     """Render only canonical scoped rows; no specs, excerpts or native handles."""
     if (
@@ -70,13 +77,13 @@ def build_fleet_view(
         "applied"
         if collected
         else "refused"
-        if blocked or run.status in ("cancelled", "failed")
+        if partial or blocked or run.status in ("cancelled", "failed")
         else "received"
     )
     facts = tuple(
         f"{worker.ordinal}. **{_literal(worker.role, 60)}** · "
         f"{_literal(worker.backend, 20)} / {_literal(worker.model, 40)} — "
-        f"{worker.status.replace('_', ' ')}"
+        f"{_worker_status(worker)}"
         for worker in sorted(workers, key=lambda row: row.ordinal)
     )
     actions: tuple[tuple[Control, str], ...] = (("kill", "Stop"), ("resume", "Resume"))
@@ -103,8 +110,12 @@ def build_fleet_view(
         headline=(
             "Fleet — collected"
             if collected
+            else "Fleet — partial result"
+            if partial
             else "Fleet — blocked"
             if blocked
+            else "Fleet — no workers started"
+            if not workers and run.status in ("completed", "cancelled", "failed")
             else f"Fleet — {run.status}"
         ),
         facts=facts,
@@ -176,6 +187,30 @@ def build_fleet_view(
         view.stop()
         raise FleetRefused("invalid_card")
     return view
+
+
+def _worker_status(worker: FleetWorker) -> str:
+    """Status words, with the closed error code of a worker that did not succeed."""
+    status = worker.status.replace("_", " ")
+    if worker.status in TERMINAL and worker.status != "succeeded" and worker.error_code:
+        status += f" ({_literal(worker.error_code, 40)})"
+    return status
+
+
+def _worker_list(workers: Sequence[FleetWorker], *, limit: int = 1400) -> str:
+    """Complete role/status pairs within one Discord message, in canonical order."""
+    facts = [
+        f"{_literal(row.role, 60)}: {_worker_status(row)}"
+        for row in sorted(workers, key=lambda row: row.ordinal)
+    ]
+    retained: list[str] = []
+    for fact in facts:
+        if len("; ".join(retained + [fact])) > limit:
+            break
+        retained.append(fact)
+    if len(retained) < len(facts):
+        retained.append(f"+{len(facts) - len(retained)} more")
+    return "; ".join(retained)
 
 
 class FleetControl(
@@ -252,6 +287,9 @@ class DiscordFleetCardFactory:
     def __init__(self, service: FleetOrchestrator, load_parent: ParentResolver) -> None:
         self._service = service
         self._resolve = load_parent
+        # One live card per run in this process: a wake turn edits the card its
+        # root turn posted instead of leaving that one at "running".
+        self._posted: dict[uuid.UUID, discord.Message] = {}
 
     @classmethod
     def from_runtime(cls, service: FleetOrchestrator, deps: TurnDeps) -> Self:
@@ -394,6 +432,7 @@ class DiscordFleetCardFactory:
             send=send,
             edit=edit,
             on_replacement=on_replacement,
+            posted=self._posted,
         )
         return card
 
@@ -411,6 +450,7 @@ class DiscordFleetCard:
         edit: Edit,
         on_replacement: Callable[[discord.Message], Awaitable[None]] | None = None,
         clock: Callable[[], datetime] = lambda: datetime.now(UTC),
+        posted: MutableMapping[uuid.UUID, discord.Message] | None = None,
     ) -> None:
         self._run_id = run_id
         self._service = service
@@ -422,6 +462,7 @@ class DiscordFleetCard:
         self._message: discord.Message | None = None
         self._view: discord.ui.LayoutView | None = None
         self._lock = asyncio.Lock()
+        self._posted = posted
 
     @property
     def run_id(self) -> uuid.UUID | None:
@@ -458,12 +499,14 @@ class DiscordFleetCard:
         *,
         collected: bool = False,
         blocked: bool = False,
+        partial: bool = False,
     ) -> discord.ui.LayoutView:
         return build_fleet_view(
             run,
             workers,
             collected=collected,
             blocked=blocked,
+            partial=partial,
         )
 
     async def refresh(self) -> bool:
@@ -479,9 +522,10 @@ class DiscordFleetCard:
 
     async def _display(self, view: discord.ui.LayoutView) -> None:
         if self._message is None:
-            self._message = await self._send(
-                view=view, allowed_mentions=discord.AllowedMentions.none()
-            )
+            if not await self._adopt(view):
+                self._message = await self._send(
+                    view=view, allowed_mentions=discord.AllowedMentions.none()
+                )
         else:
             previous = self._message
             updated = await self._edit(
@@ -494,6 +538,33 @@ class DiscordFleetCard:
         if self._view is not None:
             self._view.stop()
         self._view = view
+        if self._posted is not None and self._run_id is not None and self._message is not None:
+            self._posted.pop(self._run_id, None)
+            self._posted[self._run_id] = self._message
+            while len(self._posted) > _POSTED_CARDS_LIMIT:
+                self._posted.pop(next(iter(self._posted)))
+
+    async def _adopt(self, view: discord.ui.LayoutView) -> bool:
+        """Edit the card an earlier turn of this run posted in this thread, if any."""
+        previous = (
+            self._posted.get(self._run_id)
+            if self._posted is not None and self._run_id is not None
+            else None
+        )
+        if previous is None:
+            return False
+        try:
+            updated = await self._edit(
+                previous, view=view, allowed_mentions=discord.AllowedMentions.none()
+            )
+        except discord.HTTPException:
+            # The earlier card is gone or no longer ours: post this turn's own.
+            log.info("fleet.card_adopt_failed", run_id=str(self._run_id))
+            return False
+        self._message = updated if updated is not None else previous
+        if updated is not None and updated.id != previous.id and self._on_replacement is not None:
+            await self._on_replacement(updated)
+        return True
 
     async def control(
         self,
@@ -572,43 +643,75 @@ class DiscordFleetCard:
         return allowed
 
     async def summary_gate(self, *, render: bool = True) -> tuple[bool, str | None]:
-        """Allow reviewed text, or supply a status-only explanation of a blocked run."""
+        """Decide what the turn's final answer may show, and end the card with it.
+
+        (True, None): deliver the root's answer (no fleet, a reviewed result, or a
+        run that never started a worker). (True, notice): a partial result; the
+        notice heads the root's answer. (False, notice): the notice replaces it.
+        Every outcome leaves the card in its current or terminal state.
+        """
         async with self._lock:
             try:
                 snapshot = await self._snapshot(None)
                 if snapshot is None:
                     return True, None
                 parent, policy, run, workers = snapshot
+                if not workers:
+                    # The root started nothing, so its answer carries no worker output.
+                    run = await self._settle(parent, policy, run)
+                    if render and self._message is not None:
+                        await self._display(self._render(run, workers))
+                    return True, None
                 reply = await self._service.collect(parent, policy, run_id=run.id)
             except (FleetRefused, WorkerSpecRefused):
-                return False, None
+                return False, _UNAVAILABLE
+            run_id = run.id
             ready = reply.get("status") == "ready"
             blocked = reply.get("status") == "blocked"
-            if render and (blocked or (ready and self._message is not None)):
+            partial = blocked and reply.get("partial") is True
+            if ready or blocked:
+                run = await self._settle(parent, policy, run)
+            if render:
                 # Collect can observe rows newer than the initial snapshot.
                 try:
-                    run, workers = await self._service.read_snapshot(parent, policy, run.id)
-                    view = self._render(run, workers, collected=ready, blocked=blocked)
+                    run, workers = await self._service.read_snapshot(parent, policy, run_id)
+                    view = self._render(
+                        run,
+                        workers,
+                        collected=ready,
+                        blocked=blocked and not partial,
+                        partial=partial,
+                    )
                 except (FleetRefused, WorkerSpecRefused):
-                    return False, None
-                await self._display(view)
-            notice = None
+                    view = None
+                if view is not None and (ready or blocked or self._message is not None):
+                    await self._display(view)
+            details = _worker_list(workers)
+            if partial:
+                done = sum(1 for row in workers if row.status == "succeeded")
+                return True, (
+                    f"Partial result: {done} of {len(workers)} workers finished. "
+                    f"Fleet workers: {details}."
+                )
             if blocked:
-                facts = [
-                    f"{_literal(row.role, 60)}: {row.status.replace('_', ' ')}"
-                    for row in sorted(workers, key=lambda row: row.ordinal)
-                ]
-                # Keep complete role/status pairs within one Discord message.
-                retained: list[str] = []
-                for fact in facts:
-                    if len("; ".join(retained + [fact])) > 1400:
-                        break
-                    retained.append(fact)
-                if len(retained) < len(facts):
-                    retained.append(f"+{len(facts) - len(retained)} more")
-                details = "; ".join(retained)
                 notice = "Fleet run didn't finish. "
                 if details:
                     notice += details + ". "
-                notice += "No reviewed result to share."
-            return ready, notice
+                return False, notice + "No reviewed result to share."
+            if ready:
+                return True, None
+            return False, (
+                f"Fleet is still working: {details}. "
+                "I'll post the result here when the workers finish."
+            )
+
+    async def _settle(
+        self, parent: WorkerPermissions, policy: TenantAccessPolicy, run: FleetRun
+    ) -> FleetRun:
+        """End a run left with no active worker; a lost race keeps the read row."""
+        try:
+            settled = await self._service.settle(parent, policy, run_id=run.id)
+        except (FleetRefused, WorkerSpecRefused) as error:
+            log.info("fleet.run_settle_skipped", run_id=str(run.id), reason=str(error))
+            return run
+        return settled or run

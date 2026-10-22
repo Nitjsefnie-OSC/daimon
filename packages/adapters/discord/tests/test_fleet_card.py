@@ -180,6 +180,11 @@ def setup(provider="anthropic"):
         }
 
     owner.control.side_effect = control
+
+    async def settle_run(_parent, fleet, status):
+        return replace(fleet, status=status, version=fleet.version + 1)
+
+    owner.settle_run.side_effect = settle_run
     loader = AsyncMock(return_value=(parent(provider), POLICY))
     send, edit = AsyncMock(), AsyncMock()
     card = DiscordFleetCard(
@@ -567,18 +572,187 @@ async def test_all_three_backends_render_without_spec_or_result_material():
     assert len(buttons(view)) == 6
 
 
-async def test_waiting_collect_blocks_real_lifecycle_summary_path():
+def _texts(*mocks):
+    return [str(c.kwargs.get("content", "")) for mock in mocks for c in mock.await_args_list]
+
+
+def _headlines(*mocks):
+    return [
+        item.content
+        for mock in mocks
+        for c in mock.await_args_list
+        if c.kwargs.get("view") is not None
+        for item in c.kwargs["view"].walk_children()
+        if isinstance(item, discord.ui.TextDisplay) and item.content.startswith("**Fleet")
+    ]
+
+
+def _message(identifier):
+    value = MagicMock(spec=discord.Message)
+    value.id = identifier
+    return value
+
+
+def _result_event(identifier, text):
+    return Event(
+        id=identifier,
+        session_id=identifier,
+        sequence=4,
+        type="agent.message",
+        turn_id="fixture-turn",
+        observed_at=NOW,
+        authority="record",
+        native=NativeProvenance(provider="anthropic", api_revision="1"),
+        payload={
+            "item_id": identifier,
+            "content": [{"type": "text", "text": text}],
+            "complete": True,
+        },
+    )
+
+
+async def test_waiting_collect_ends_the_turn_card_without_the_premature_answer():
+    # r5 turn 1: workers still running when the root ended its turn. The
+    # "Working on it…" card stayed at 0s; it now ends with a waiting notice.
     card, owner, _, send, edit = setup()
     lifecycle = DiscordTurnLifecycle(
         send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
     )
     state = TurnState(content=[TextBlock(kind="text", text="A premature claimed summary")])
     await lifecycle.on_render(state)
-    send.reset_mock()
     await lifecycle.on_terminal_success(state)
     owner.wait.assert_awaited_once()
-    send.assert_not_awaited()
-    assert not lifecycle.was_answered
+    owner.settle_run.assert_not_awaited()
+    messages = _texts(send, edit)
+    assert not any("premature" in text for text in messages)
+    assert any("Fleet is still working" in text and "pending" in text for text in messages)
+    assert lifecycle.was_answered and lifecycle._terminal
+
+
+@pytest.mark.parametrize("render_first", [False, True])
+async def test_zero_worker_run_delivers_the_roots_answer_and_ends_the_fleet_card(render_first):
+    # r2/r3/r4: the root spawned nothing, so "Working on it…" and
+    # "Fleet — running" stayed stuck and its answer never reached the user.
+    card, owner, _, send, edit = setup()
+    owner.read_run.return_value = (run(), ())
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    state = TurnState(
+        content=[TextBlock(kind="text", text="The fleet run didn't start: root_unavailable.")]
+    )
+    if render_first:
+        await lifecycle.on_render(state)
+    await lifecycle.on_terminal_success(state)
+    assert sum("The fleet run didn't start" in text for text in _texts(send, edit)) == 1
+    assert lifecycle.was_answered and lifecycle._terminal
+    owner.settle_run.assert_awaited_once()
+    assert owner.settle_run.await_args.args[2] == "cancelled"
+    headlines = _headlines(send, edit)
+    if render_first:
+        assert headlines[-1] == "**Fleet — no workers started**"
+    else:
+        assert not headlines
+    owner.wait.assert_not_awaited()
+    owner.read_result.assert_not_awaited()
+
+
+async def test_partial_result_heads_the_roots_answer_with_the_failed_worker():
+    # r5 wake: W1 and W2 succeeded, W3 failed; the reply said only
+    # "No reviewed result to share".
+    card, owner, _, send, edit = setup()
+    output = _result_event("worker-result", "Verified W1 result")
+    pointer = ResultPointer(output.session_id, 4, result_digest(dict(output.payload)), "x")
+    succeeded = worker(role="W1", status="succeeded", result=pointer)
+    failed = worker(
+        ordinal=2, role="W3", status="failed", error_code="dispatch_refused", backend="gemini"
+    )
+    owner.read_run.return_value = (run(), (succeeded, failed))
+    owner.read_result.return_value = output
+    owner.validate_contract.return_value = "Verified W1 result"
+    lifecycle = DiscordTurnLifecycle(
+        send=send, edit=edit, agent_name="root", model_id="fixture-model", fleet_card=card
+    )
+    await lifecycle.on_render(TurnState())
+    state = TurnState(content=[TextBlock(kind="text", text="W1 says: verified. W3 failed.")])
+    await lifecycle.on_terminal_success(state)
+    final = [text for text in _texts(send, edit) if "W1 says: verified." in text]
+    assert len(final) == 1
+    assert final[0].startswith("Partial result: 1 of 2 workers finished.")
+    assert "W3: failed (dispatch\\_refused)" in final[0]
+    assert "No reviewed result to share." not in final[0]
+    assert _headlines(send, edit)[-1] == "**Fleet — partial result**"
+    assert owner.settle_run.await_args.args[2] == "failed"
+    assert lifecycle.was_answered
+
+
+async def test_wake_turn_edits_the_fleet_card_its_root_turn_posted():
+    # r5: the wake posted a second "Fleet — blocked" card and left the first
+    # "Fleet — running" card stuck above it. Both turns share one factory.
+    _, owner, loader, _, _ = setup()
+    posted: dict = {}
+    first_message = _message(1)
+    first_send = AsyncMock(return_value=first_message)
+    first_edit = AsyncMock(side_effect=lambda message, **kwargs: message)
+    first = DiscordFleetCard(
+        run_id=None,
+        service=FleetOrchestrator(owner),
+        load_parent=loader,
+        send=first_send,
+        edit=first_edit,
+        clock=lambda: NOW,
+        posted=posted,
+    )
+    root_turn = DiscordTurnLifecycle(
+        send=first_send, edit=first_edit, agent_name="root", model_id="m", fleet_card=first
+    )
+    await root_turn.on_render(TurnState())
+    await root_turn.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="ok")]))
+    assert posted[RUN] is first_message
+
+    owner.read_run.return_value = (run(), (worker(status="failed", error_code="deadline_expired"),))
+    wake_message = _message(2)
+    wake_send = AsyncMock(return_value=wake_message)
+    wake_edit = AsyncMock(side_effect=lambda message, **kwargs: message)
+    wake = DiscordFleetCard(
+        run_id=None,
+        service=FleetOrchestrator(owner),
+        load_parent=loader,
+        send=wake_send,
+        edit=wake_edit,
+        clock=lambda: NOW,
+        posted=posted,
+    )
+    wake_turn = DiscordTurnLifecycle(
+        send=wake_send, edit=wake_edit, agent_name="root", model_id="m", fleet_card=wake
+    )
+    await wake_turn.on_render(TurnState())
+    await wake_turn.on_terminal_success(TurnState(content=[TextBlock(kind="text", text="x")]))
+    card_sends = [c for c in wake_send.await_args_list if c.kwargs.get("view") is not None]
+    assert not card_sends
+    adopted = [c for c in wake_edit.await_args_list if c.args and c.args[0] is first_message]
+    assert adopted
+    assert _headlines(wake_edit)[-1] == "**Fleet — blocked**"
+    assert any("deadline" in text for text in _texts(wake_send, wake_edit))
+
+
+async def test_wake_turn_posts_its_own_card_when_the_earlier_one_is_gone():
+    _, owner, loader, _, _ = setup()
+    gone = _message(1)
+    response = MagicMock(status=404, reason="Not Found")
+    edit = AsyncMock(side_effect=discord.NotFound(response, "Unknown Message"))
+    send = AsyncMock(return_value=_message(2))
+    card = DiscordFleetCard(
+        run_id=None,
+        service=FleetOrchestrator(owner),
+        load_parent=loader,
+        send=send,
+        edit=edit,
+        clock=lambda: NOW,
+        posted={RUN: gone},
+    )
+    assert await card.refresh()
+    send.assert_awaited_once()
 
 
 @pytest.mark.parametrize(
