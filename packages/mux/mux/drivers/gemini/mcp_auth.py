@@ -21,6 +21,9 @@ GCSSecretResolver = Callable[[Scope, tuple[str, ...]], Awaitable[str]]
 type Object = dict[str, JsonValue]
 _REF = re.compile(r"[A-Za-z0-9_.:/-]{1,128}\Z")
 _NAME = re.compile(r"[A-Za-z_][A-Za-z0-9_.:-]{0,127}\Z")
+# Gemini rejects any other mcp_server name on every interaction read:
+# "MCP server name must be lowercase and snake case".
+_SERVER_NAME = re.compile(r"[a-z][a-z0-9_]{0,127}\Z")
 _PROFILE = "gemini.inline_reuse"
 
 
@@ -74,11 +77,23 @@ def destination(value: object) -> bool:
         return False
 
 
+def native_server_name(name: str) -> str:
+    """Deterministic Gemini-safe server name: daimon-mcp -> daimon_mcp."""
+    native = re.sub(r"[^a-z0-9_]", "_", name.lower())
+    return native if native[:1].isalpha() else "mcp_" + native
+
+
+def server_names(connections: Sequence[MCPConnection]) -> dict[str, str]:
+    """Native mcp_server name -> the declared connection name, for normalization."""
+    return {native_server_name(c.name): c.name for c in connections}
+
+
 def compile_mcp(connections: Sequence[MCPConnection], *, enabled: bool) -> list[JsonValue]:
     bound = any(c.credential_ref is not None for c in connections)
     if bound and (not enabled or len(connections) != 1):
         refuse("one_resolver_bound_mcp_server")
     tools: list[JsonValue] = []
+    native_names: set[str] = set()
     for connection in connections:
         if (
             connection.transport != "streamable_http"
@@ -86,7 +101,15 @@ def compile_mcp(connections: Sequence[MCPConnection], *, enabled: bool) -> list[
             or not _NAME.fullmatch(connection.name)
         ):
             refuse("https_mcp_destination")
-        tool: Object = {"type": "mcp_server", "name": connection.name, "url": connection.url}
+        name = native_server_name(connection.name)
+        if not _SERVER_NAME.fullmatch(name):
+            refuse("mcp_server_name")
+        if name in native_names:
+            # Two declared servers would be indistinguishable to Gemini and
+            # in its tool-call steps; never guess which one a call used.
+            refuse("mcp_server_name_collision")
+        native_names.add(name)
+        tool: Object = {"type": "mcp_server", "name": name, "url": connection.url}
         if bound:
             reference = connection.credential_ref
             if reference is None or not _REF.fullmatch(reference):
@@ -135,7 +158,7 @@ def validate_tools(value: JsonValue) -> None:
             if (
                 not destination(tool["url"])
                 or not isinstance(tool["name"], str)
-                or not _NAME.fullmatch(tool["name"])
+                or not _SERVER_NAME.fullmatch(tool["name"])
             ):
                 refuse("https_mcp_destination")
         else:
