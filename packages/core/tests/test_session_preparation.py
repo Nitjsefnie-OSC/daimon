@@ -2327,6 +2327,130 @@ async def test_tightening_memory_access_never_runs_the_writable_session(
         assert third.ma_session_id == second.ma_session_id
 
 
+async def _repoint_shared_store(
+    sessionmaker: async_sessionmaker[AsyncSession], *, tenant: TenantRow, store_id: str
+) -> None:
+    """Point the agent's shared memory binding at another store, as a place moving
+    to its own store would."""
+    from daimon.core._models import AgentMemoryStore
+    from sqlalchemy import update
+
+    async with sessionmaker.begin() as session:
+        await session.execute(
+            update(AgentMemoryStore)
+            .where(
+                AgentMemoryStore.tenant_id == tenant.id,
+                AgentMemoryStore.agent_id
+                == derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_AGENT_ID),
+            )
+            .values(memory_store_id=store_id)
+        )
+
+
+@pytest.mark.parametrize("budget_moves", [False, True], ids=["store-only", "with-budget-channel"])
+@pytest.mark.parametrize("active", [False, True], ids=["idle", "active"])
+async def test_leaving_a_memory_store_carries_nothing_and_never_reruns_the_old_session(
+    active: bool,
+    budget_moves: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """The old session has read the store it leaves. An idle one is replaced
+    with nothing checkpointed or transferred into the new store; an active one
+    refuses the turn rather than being handed back while replacement waits.
+    A billing channel changing at the same time picks another replacement
+    reason, and must not let the old store's work through either."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    transport = _Transport()
+    deps = _deps(db_session_factory, transport)
+    first_admission = replace(_admission(account=account), budget_channel_id="channel-a")
+    admission = (
+        replace(first_admission, budget_channel_id="channel-b") if budget_moves else first_admission
+    )
+    first = await _prepare(deps, first_admission, tenant=tenant, account=account)
+    assert isinstance(first, PreparedTurn)
+    row = await _live_row(db_session_factory, tenant=tenant, account=account)
+    assert row is not None
+    if active:
+        async with db_session_factory.begin() as session:
+            await mark_turn_active(session, id=row.id, active_turn_message_id="in-flight", now=_NOW)
+    await _repoint_shared_store(db_session_factory, tenant=tenant, store_id="memstore_elsewhere")
+
+    async def forbidden_transfer(**kwargs: Any) -> Any:
+        pytest.fail("work read from the old store must not be carried into another one")
+
+    second = await _prepare(
+        deps, admission, tenant=tenant, account=account, transfer=forbidden_transfer
+    )
+
+    reason = "budget_channel" if budget_moves else "memory_store"
+    if active:
+        assert isinstance(second, PreparationBusy)
+        assert reason in second.pending_reasons
+        assert transport.creates == 1
+    else:
+        assert isinstance(second, PreparedTurn)
+        assert second.ma_session_id != first.ma_session_id
+        assert reason in second.continuity.applied
+        mounted = transport.state.sessions[second.ma_session_id].resources
+        stores = [r for r in mounted if r.type == "memory_store"]
+        assert [getattr(r, "memory_store_id", None) for r in stores][:1] == ["memstore_elsewhere"]
+
+
+@pytest.mark.parametrize(
+    ("recorded", "desired", "leaves"),
+    [
+        (("memstore_a", None), ("memstore_b", None), True),
+        ((None, None), ("memstore_b", None), False),
+        (("memstore_a", "personal_a"), ("memstore_a", "personal_b"), True),
+        (("memstore_a", "personal_a"), ("memstore_a", None), True),
+        (("memstore_a", None), ("memstore_a", "personal_a"), False),
+        (("memstore_a", "personal_a"), ("memstore_a", "personal_a"), False),
+    ],
+    ids=[
+        "shared-changes",
+        "shared-gained",
+        "personal-changes",
+        "personal-dropped",
+        "personal-gained",
+        "unchanged",
+    ],
+)
+def test_only_a_mounted_store_that_changes_is_a_memory_boundary(
+    recorded: tuple[str | None, str | None],
+    desired: tuple[str | None, str | None],
+    leaves: bool,
+) -> None:
+    from daimon.core.session_preparation import (
+        _leaves_memory_store,  # pyright: ignore[reportPrivateUsage]
+    )
+    from daimon.core.session_snapshot import SessionSnapshot
+
+    def snapshot(stores: tuple[str | None, str | None]) -> SessionSnapshot:
+        return SessionSnapshot(
+            ma_agent_id="agent_baseline",
+            model_id="claude-sonnet-5",
+            system_sha256="system-hash",
+            skills_sha256="skills-hash",
+            environment_id="env_baseline",
+            repo_url=None,
+            repo_branch=None,
+            memory_store_id=stores[0],
+            personal_memory_store_id=stores[1],
+            vault_id=None,
+            tools_sha256="tools-hash",
+            mcp_servers_sha256="mcp-hash",
+            env_sha256="env-hash",
+            agent_version=1,
+            agent_name="research-bot",
+        )
+
+    assert _leaves_memory_store(snapshot(recorded), snapshot(desired)) is leaves
+    assert _leaves_memory_store(None, snapshot(desired)) is False
+
+
 @pytest.mark.parametrize(
     ("sealed", "is_dm", "dm_read_only", "expected"),
     [

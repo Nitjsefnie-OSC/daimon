@@ -142,6 +142,23 @@ log = structlog.get_logger(__name__)
 CONTINUED = ContinuityOutcome()
 
 
+def _leaves_memory_store(recorded: SessionSnapshot | None, desired: SessionSnapshot) -> bool:
+    """Whether the conversation moves off a shared or personal store its session had mounted.
+
+    Read from the snapshots themselves, not from the reason a replacement was
+    chosen for: a billing-channel change can replace a session whose store also
+    changed. Gaining a store the session never had carries nothing out of one.
+    """
+    if recorded is None:
+        return False
+    return (
+        recorded.memory_store_id is not None and recorded.memory_store_id != desired.memory_store_id
+    ) or (
+        recorded.personal_memory_store_id is not None
+        and recorded.personal_memory_store_id != desired.personal_memory_store_id
+    )
+
+
 def _with_unavailable_notice(
     continuity: ContinuityOutcome, urls: tuple[str, ...]
 ) -> ContinuityOutcome:
@@ -1000,12 +1017,23 @@ async def _prepare_session_for_turn_locked(
         tightening_memory = admission.memory_read_only and (
             recorded is None or not recorded.memory_read_only
         )
+        # Leaving one memory store for another is a boundary: the old session
+        # has read the store it leaves, so none of its work is carried over and
+        # it never runs again once the place has moved on.
+        # A handoff to another agent moves to that agent's store by design and
+        # keeps its own carry rule (`_destination_may_carry`).
+        leaving_memory = (
+            isinstance(decision, ReplaceSession)
+            and not handed_over
+            and _leaves_memory_store(recorded, desired)
+        )
         if (
             isinstance(decision, ReplaceSession)
             and (
                 "agent_identity" in decision.reasons
                 or "budget_channel" in decision.reasons
                 or tightening_memory
+                or leaving_memory
             )
             and turn_is_active(row, now=moment)
         ):
@@ -1085,8 +1113,9 @@ async def _prepare_session_for_turn_locked(
                 reasons=decision.reasons,
                 fresh_start=fresh_start,
                 # A checkpoint executes the old session. Never run it with
-                # a writable mount after the origin has become read-only.
-                transfer=None if tightening_memory or not carry else transfer,
+                # a writable mount after the origin has become read-only, and
+                # never carry what it read from a store the place has left.
+                transfer=None if tightening_memory or leaving_memory or not carry else transfer,
                 tenant_id=tenant_id,
                 platform=platform,
                 thread_id=thread_id,
