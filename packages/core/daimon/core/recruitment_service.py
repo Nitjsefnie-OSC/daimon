@@ -283,6 +283,8 @@ class RecruitmentService:
             if item.attempts == 0 and item.revision != state.revision:
                 raise ValueError("stale_approval")
             # Mark uncertain before I/O; response loss/restart must use this same key.
+            was_uncertain = item.attempts > 0 and item.possibly_applied
+            item.possibly_applied = True
             item.state, item.attempts = "uncertain", item.attempts + 1
             await self.store.save_outbox(item)
             try:
@@ -316,13 +318,19 @@ class RecruitmentService:
                         for r in response_update.results
                         if r.result in {"conflict", "ignored_stale"}
                     ]
-                item.state, item.error = "completed", None
+                item.state, item.error, item.possibly_applied = "completed", None, False
                 state.phase, state.error, state.outbox_id = "active", None, None
                 if state.revision != item.revision:
                     state.phase, state.error = "blocked", "refresh_required_after_uncertain_request"
                 state.changes = []
             except RecruitmentAPIError as error:
                 item.error = error.code
+                if error.code in {
+                    "validation_error",
+                    "payload_too_large",
+                    "candidate_match_conflict",
+                }:
+                    item.possibly_applied = was_uncertain
                 item.state = "pending" if error.retryable and item.attempts < 5 else "blocked"
                 item.next_attempt_at = datetime.now(UTC) + timedelta(
                     seconds=max(error.retry_after or 0, min(300, 5 * 2**item.attempts))
@@ -336,13 +344,7 @@ class RecruitmentService:
         async with self.store.claim(thread_id):
             state = await self.store.get(thread_id)
             item = await self.store.outbox(state.outbox_id) if state and state.outbox_id else None
-            if (
-                not state
-                or not item
-                or item.attempts
-                and item.error
-                not in {"validation_error", "payload_too_large", "candidate_match_conflict"}
-            ):
+            if not state or not item or not item.may_discard:
                 raise ValueError("uncertain_requests_cannot_be_discarded")
             item.state = "discarded"
             state.outbox_id, state.phase, state.error = None, "blocked", "refresh_required"

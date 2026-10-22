@@ -354,3 +354,52 @@ async def test_disabled_scheduler_still_erases_expired_state(store: RecruitmentS
     await reconcile_recruitment(store.sessions, settings, None, AsyncMock())
     state = await store.get("20")
     assert state and state.phase == "expired" and state.candidate is None
+
+
+@pytest.mark.parametrize(
+    "later_error", ["validation_error", "payload_too_large", "candidate_match_conflict"]
+)
+async def test_accepted_timeout_then_rejection_never_allows_discard(store, later_error) -> None:
+    from daimon.adapters.discord.recruitment_cards import review_card
+
+    fake = SyntheticRecruitmentTransport()
+    attempts = 0
+
+    class Mixed(httpx.AsyncBaseTransport):
+        async def handle_async_request(self, request):
+            nonlocal attempts
+            if request.url.path.endswith("/match"):
+                return await fake.handle_async_request(request)
+            attempts += 1
+            if attempts == 1:
+                await fake.handle_async_request(request)
+                raise httpx.ReadTimeout("accepted then lost", request=request)
+            return httpx.Response(400, json={"code": later_error})
+
+    async def authorize(actor, thread):
+        pass
+
+    async with httpx.AsyncClient(transport=Mixed()) as http:
+        service = RecruitmentService(
+            store,
+            RecruitmentAPI(http, "https://synthetic.invalid", SecretStr("fake")),
+            extract,
+            authorize,
+            backend="synthetic",
+        )
+        await service.enroll("20", "2", "!labs-staffing: Synthetic")
+        await service.ingest("20", [message()])
+        state = await store.get("20")
+        state.scan_complete = True
+        await store.save(state, await service.config())
+        await service.confirm("20", state.revision, "create", "7", "mixed")
+        await service.deliver("20", force=True)
+        await service.deliver("20", force=True)
+        state = await store.get("20")
+        item = await store.outbox(state.outbox_id)
+        assert item.possibly_applied and len(fake.effects) == 1
+        # Reloading is the restart boundary; the latest HTTP error cannot clear uncertainty.
+        with pytest.raises(ValueError, match="uncertain"):
+            await service.discard("20", "7")
+        _, view = review_card(state, item)
+        assert next(b for b in view.children if b.label == "Discard").disabled

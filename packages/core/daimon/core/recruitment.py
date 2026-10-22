@@ -208,5 +208,15 @@ class Outbox(RecruitmentModel):
     backend: str
     state: str = "pending"
     attempts: int = 0
+    # Legacy attempted requests are conservatively uncertain on load.
+    possibly_applied: bool = True
+
+    @property
+    def may_discard(self) -> bool:
+        return self.attempts == 0 or (
+            not self.possibly_applied
+            and self.error in {"validation_error", "payload_too_large", "candidate_match_conflict"}
+        )
+
     next_attempt_at: AwareDatetime | None = None
     error: str | None = None

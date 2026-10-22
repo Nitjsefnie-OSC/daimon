@@ -54,11 +54,7 @@ def review_card(
         button(
             "Discard",
             "discard",
-            disabled=bool(
-                outgoing.attempts
-                and outgoing.error
-                not in {"validation_error", "payload_too_large", "candidate_match_conflict"}
-            ),
+            disabled=not outgoing.may_discard,
         )
     elif state.phase == "review":
         ready = state.scan_complete and state.candidate is not None and not state.error
