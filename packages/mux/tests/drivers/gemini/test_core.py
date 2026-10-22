@@ -756,6 +756,19 @@ def test_worker_model_permission_preserves_default_selections_and_thread_mode() 
     )
 
 
+def test_argon_is_an_opt_in_gemini_selection_that_never_changes_the_default() -> None:
+    from mux.profiles import backend_selection, runnable_selection
+
+    assert backend_selection("gemini").model == "gemini-3.8-flash"
+    argon = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-4-argon")
+    assert runnable_selection(resolve_default(argon))
+    assert not runnable_selection(
+        resolve_default(argon.model_copy(update={"thread_mode": "shared"}))
+    )
+    for near in ("gemini-4-argon-preview", "gemini-4", "Gemini-4-Argon"):
+        assert not runnable_selection(resolve_default(argon.model_copy(update={"model": near})))
+
+
 @pytest.mark.parametrize("ceiling", (False, 0, -1, 65_537, "4096"))
 def test_model_output_cap_is_strict_and_bounded(ceiling) -> None:
     spec = AgentSpec(name="chat", model=ModelRef(provider="gemini", id="gemini-3.8-flash"))

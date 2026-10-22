@@ -112,6 +112,14 @@ with `gemini-3.8-flash`. Anything else is refused as
 `backend_unsupported`, recorded as `admission_denied` in the turn outcome,
 never run on Anthropic in its place.
 
+A channel may also name `gemini-4-argon` (Gemini 4 Argon, 1M-token context)
+on `gemini.inline_reuse`. The agent-preference switch and the default stay on
+`gemini-3.8-flash`; only an explicit channel revision selects Argon. An Argon
+turn makes one attempt: a 503 is the turn's answer, never a fallback to the
+Flash chain. Fleet workers cannot use Argon. Admission refuses Argon whenever
+`provider_prices` has no current Argon row, which today means from 2026-12-01
+(see [billing](billing.md)).
+
 A channel whose configuration says `thread_mode="shared"` shares one session
 per new thread between everyone who writes in it
 (`daimon.core.shared_threads`). Only new threads share: a thread where

@@ -1250,6 +1250,10 @@ were checked on 2026-10-14 against the official OpenAI model/Agents usage pages
 and Gemini pricing/Antigravity pages listed in `PROVIDER_PRICING_SOURCES`.
 Coverage is `gpt-6-luna`, `gemini-3.5-flash-lite`, and `gemini-3.8-flash`;
 unsupported models stay unpriced. Flash promotional rates expire at 2027-01-01.
+`gemini-4-argon` carries only its introductory rate (checked 2026-10-22: input
+$2, output $10, cached input $0.10 = 95% off, per 1M tokens), valid through
+2026-11-30. No post-intro rate is checked in. From 2026-12-01 Argon is unpriced
+and its turns are refused at admission until a new dated row lands.
 These token rates exclude tool, cache-storage and container/session charges.
 The runtime still needs complete measured infrastructure before exact billing.
 

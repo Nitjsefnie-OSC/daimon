@@ -593,6 +593,18 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.075"),
                 valid_before=date(2027, 1, 1),
             ),
+            # Intro tariff only (GA 2026-10-13, through 2026-11-30). The post-intro
+            # price is unpublished here, so from 2026-12-01 Argon is unpriced and
+            # refused at admission until a dated row is added. Cached input: 95% off.
+            ProviderPrice(
+                INLINE_REUSE.provider,
+                "gemini-4-argon",
+                date(2026, 10, 22),
+                Decimal("2.00"),
+                Decimal("10.00"),
+                Decimal("0.10"),
+                valid_before=date(2026, 12, 1),
+            ),
         ),
     }
 )

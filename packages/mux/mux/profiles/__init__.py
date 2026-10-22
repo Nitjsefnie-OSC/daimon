@@ -17,7 +17,7 @@ from mux.contracts.ids import Provider
 from mux.contracts.profile import SUPPORTED, AccountingMode, Profile
 from mux.contracts.resources import AgentSpec, ToolSpec
 from mux.profiles.anthropic import MANAGED_AGENTS
-from mux.profiles.gemini import INLINE_REUSE, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, WORKER_MODEL
 from mux.profiles.openai import CONVERSATION_ONLY, PERSISTENT_WORKSPACE
 from mux.profiles.selfhosted import LOOP
 
@@ -200,7 +200,7 @@ _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "gemini": BackendSelection(
         BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash"),
         ("per_caller",),
-        allowed_models=(WORKER_MODEL,),
+        allowed_models=(WORKER_MODEL, ARGON_MODEL),
     ),
 }
 RUNNABLE_PROFILES: frozenset[str] = frozenset(
