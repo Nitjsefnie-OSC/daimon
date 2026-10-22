@@ -3829,6 +3829,10 @@ class AgentBackendRevisionRecord(Base):
             "backend IS NULL OR backend IN ('anthropic', 'openai', 'gemini')",
             name="ck_agent_backend_provider",
         ),
+        CheckConstraint(
+            "thread_mode IS NULL OR thread_mode IN ('per_caller', 'shared')",
+            name="ck_agent_backend_thread_mode",
+        ),
     )
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -3845,6 +3849,41 @@ class AgentBackendRevisionRecord(Base):
     )
     # The admin-picked model; null is the provider's default (0118, so last).
     model: Mapped[str | None] = mapped_column(Text)
+    # The agent's own profile, requirements and thread mode; null is the
+    # backend's default (0119).
+    profile: Mapped[str | None] = mapped_column(Text)
+    requires: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    thread_mode: Mapped[str | None] = mapped_column(Text)
+
+
+class AgentOwner(Base):
+    """The one account that may edit an agent without being a server admin.
+
+    No row: only server admins may. Recorded when a person creates the agent
+    from chat, or assigned by an admin; never inferred.
+    """
+
+    __tablename__ = "agent_owner"
+    __table_args__ = (
+        PrimaryKeyConstraint("tenant_id", "agent_id", name="pk_agent_owner"),
+        CheckConstraint("source IN ('created', 'admin_assigned')", name="ck_agent_owner_source"),
+        Index("ix_agent_owner_account", "owner_account_id"),
+    )
+    tenant_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("tenants.id", ondelete="CASCADE", name="fk_agent_owner_tenants"),
+        nullable=False,
+    )
+    agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
+    owner_account_id: Mapped[uuid.UUID] = mapped_column(
+        UUID(as_uuid=True),
+        ForeignKey("accounts.id", ondelete="CASCADE", name="fk_agent_owner_accounts"),
+        nullable=False,
+    )
+    source: Mapped[str] = mapped_column(Text, nullable=False)
+    recorded_at: Mapped[datetime] = mapped_column(
+        DateTime(timezone=True), nullable=False, server_default=func.now()
+    )
 
 
 class FleetRun(Base):

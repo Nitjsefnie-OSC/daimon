@@ -890,6 +890,9 @@ async def test_purge_covers_every_account_or_principal_scoped_table() -> None:
             # and is automatically erased by accounts.id ON DELETE CASCADE.
             # The store tests verify this; it needs no separately reported category.
             "turn_origins",
+            # Who may edit an agent: no content, and ON DELETE CASCADE with
+            # accounts.id, after which the agent is admin-only again.
+            "agent_owner",
             # Same shape: a previewed skill add waits at most 15 minutes for its
             # person's reply, holds only a content hash, and cascades with accounts.id.
             "pending_skill_adds",

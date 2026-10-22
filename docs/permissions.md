@@ -203,14 +203,29 @@ allow.
 
 ## Changing agent setup
 
-Server or workspace admins may change an agent's setup. A non-admin must
-administer every channel named by the agent's rule, and every place the agent
-answers or runs must stay inside those channels. This applies to instructions,
-model, description, tools, skills and MCP server attachments, including token
-forms and OAuth connections. Unbound agents, tenant defaults and agents serving
-other channels require a server or workspace admin. Creation metadata and a
-channel default alone do not grant permission to edit setup. Defaults-managed
-specs retain their existing protections, including for admins.
+Server or workspace admins may change an agent's setup, and so may the
+agent's **owner**. The owner is the person who created the agent from chat,
+or the account an admin named with `daimon agents owner set`; an agent has
+at most one. Agents created before owners existed have none and stay
+admin-only. The owner may change the agent's instructions, model,
+description, tools, skills, MCP server attachments, model provider, its
+required capabilities, and its fleet. Making the agent share threads stays
+with admins, because it applies in every channel the agent answers in that
+doesn't pin a backend; the owner may keep an admin's choice or return to one
+thread per person. If two people create agents of the same name at once, one
+is refused; nobody becomes the owner of an agent someone else created. Ownership is read again
+when a change is written and when a confirmation card is clicked, so a
+change of owner applies at once. An agent key or a requester from another
+organisation is never the owner.
+
+The owner may not change what the whole workspace shares: the provider
+allowlist, channel budgets, GitHub access (repo and skill-repo binds, grants),
+deleting a skill from the workspace, archiving or copying the agent, and its
+tool rules stay with admins. In this release, token forms and OAuth
+connections still need an admin, and so do the Discord, Slack and Teams setup
+panels. A channel default alone does not grant permission to edit setup.
+Defaults-managed specs retain their existing protections, including for
+admins.
 
 When approval cards are off, a skill add needs a preview followed by the
 requester's next message of `yes` in that thread. Only one preview is active

@@ -1,8 +1,7 @@
 """Per-target runtime gate: is the named agent currently reachable in this tenant?
 
-An admin may edit a target's setup. A member must administer every channel
-named by its agent rule, and every place it answers or runs must stay inside
-those channels. An unbound agent is never assumed to belong to the caller.
+An admin or the agent's recorded owner may edit a target's setup. An
+unowned agent is never assumed to belong to the caller.
 
 Every spec field, including ``description``, requires mutation ownership. ``tools`` IS in the
 gated set even though ``mcp_servers`` might look like the more obvious target:
@@ -20,6 +19,7 @@ from anthropic.types.beta import BetaManagedAgentsAgent
 from daimon.adapters.mcp.auth.resolver import AuthIdentity
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.tools._authz_facts import mcp_subject
+from daimon.adapters.mcp.tools._owner import caller_owns_agent
 from daimon.adapters.mcp.tools._words import admin_noun
 from daimon.core.agent_pins import POLICY_UNREADABLE_REFUSAL, agent_pin_names
 from daimon.core.authz import Action, AgentRef, Place, authorize
@@ -50,8 +50,21 @@ async def target_facts(
     agent_names: tuple[str | None, ...],
     ma_agent_id: str | None,
     is_daimon_managed: bool,
+    owner_counts: bool = False,
 ) -> TargetFacts:
-    return TargetFacts(is_daimon_managed=is_daimon_managed, is_reachable_in_tenant=False)
+    """The facts `decide_operation` reads.
+
+    `owner_counts` lets the agent's owner make the change. Credential-form
+    paths leave it off until their submit side (the platform panels) checks
+    the owner too, so a card never passes a check its submit then refuses.
+    """
+    return TargetFacts(
+        is_daimon_managed=is_daimon_managed,
+        is_reachable_in_tenant=False,
+        owned_by_caller=owner_counts
+        and ma_agent_id is not None
+        and await caller_owns_agent(runtime, auth, ma_agent_id),
+    )
 
 
 async def require_admin(runtime: McpRuntime, auth: AuthIdentity, *, channel_id: str) -> None:
@@ -126,10 +139,12 @@ async def require_admin_for_reachable_agent(
     agent_name: str,
     agent: BetaManagedAgentsAgent | None = None,
 ) -> None:
-    """Require an admin for an agent setup change."""
+    """Require the agent's owner or an admin for an agent setup change."""
     if auth.is_admin and auth.agent_id is None:
         return
+    if agent is not None and await caller_owns_agent(runtime, auth, agent.id):
+        return
     raise ToolError(
-        f"Changing '{agent_name}' needs {admin_noun(auth.platform)}. Ask one to make "
-        "the requested change. Do not retry."
+        f"Changing '{agent_name}' needs its owner or {admin_noun(auth.platform)}. Ask one "
+        "to make the requested change. Do not retry."
     )

@@ -58,7 +58,7 @@ async def test_non_admin_reachable_agent_raises(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
     )
-    with pytest.raises(ToolError, match="Changing 'daimon' needs an admin"):
+    with pytest.raises(ToolError, match="Changing 'daimon' needs its owner or an admin"):
         await require_admin_for_reachable_agent(
             _runtime(db_session_factory), auth, agent_name="daimon"
         )
@@ -74,7 +74,7 @@ async def test_non_admin_unreachable_agent_is_refused(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
     )
-    with pytest.raises(ToolError, match="Changing 'my-agent' needs an admin"):
+    with pytest.raises(ToolError, match="Changing 'my-agent' needs its owner or an admin"):
         await require_admin_for_reachable_agent(
             _runtime(db_session_factory),
             auth,
@@ -92,7 +92,7 @@ async def test_non_admin_is_gated_when_no_agent_is_resolved(
     auth = AuthIdentity(
         account_id=uuid.uuid4(), tenant_id=tenant.id, role=Role.USER, is_admin=False
     )
-    with pytest.raises(ToolError, match="Changing 'my-agent' needs an admin"):
+    with pytest.raises(ToolError, match="Changing 'my-agent' needs its owner or an admin"):
         await require_admin_for_reachable_agent(
             _runtime(db_session_factory), auth, agent_name="my-agent"
         )

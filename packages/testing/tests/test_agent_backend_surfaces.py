@@ -142,18 +142,30 @@ def seam(monkeypatch):
     )
     service = SimpleNamespace(enabled=True, _sessions=factory)
     service.preview = AsyncMock(
-        side_effect=lambda actual, target, model=None: Preview(
+        side_effect=lambda actual, target, model=None, settings=None: Preview(
             target_backend=target or DEFAULT_BACKEND
         )
     )
     service.current = AsyncMock(return_value=None)
+    # The owner-or-admin read; this fake has no owners, so admins only.
+    service.may_edit = AsyncMock(side_effect=lambda actual, actor: actor.subject.is_admin)
     service.tenant_policy = AsyncMock(
         return_value=SimpleNamespace(enabled_backends=("anthropic", "openai"))
     )
     service.read_selection = cb.AgentBackendService.read_selection.__get__(service)
     service.refused = None
 
-    async def change(actual, target, local, actor, *, expected_preview_digest, model=None):
+    async def change(
+        actual,
+        target,
+        local,
+        actor,
+        *,
+        expected_preview_digest,
+        model=None,
+        settings=None,
+        accepted_drops=None,
+    ):
         calls.append((actual, target, local, actor, expected_preview_digest))
         if service.refused:
             raise Refused(service.refused)
@@ -330,7 +342,11 @@ async def test_direct_mcp_refuses_untrusted_admin_evidence_before_lookup(seam, a
     )
     with pytest.raises(ToolError):
         await mcp_agents._set_agent_backend_impl(seam.runtime, auth, "analyst", backend="openai")
-    seam.loader.assert_not_awaited()
+    if agent_key:
+        seam.loader.assert_not_awaited()
+    else:
+        # Whether a member owns the agent is known only once it is resolved.
+        seam.service.preview.assert_not_awaited()
     assert seam.calls == []
 
 
@@ -956,14 +972,22 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
         (Path(__file__).parent / "data/agent_backend_cli_legacy_help.json").read_text()
     )
     assert actual["exit"] == actual["root_exit"] == 0
-    assert actual["groups"] == ["rule", "tool-rules"]
+    assert actual["groups"] == ["rule", "owner", "tool-rules"]
     # This checks that enabling the backend feature does not alter the
-    # pre-existing CLI surface. The tool-rules command is independently added.
-    tool_rule_lines = [
-        line for line in actual["help"].splitlines(keepends=True) if "│ tool-rules " in line
+    # pre-existing CLI surface. The tool-rules and owner commands are
+    # independently added.
+    added_lines = [
+        line
+        for line in actual["help"].splitlines(keepends=True)
+        if "│ tool-rules " in line or "│ owner " in line
     ]
-    assert len(tool_rule_lines) == 1
-    assert actual["help"].replace(tool_rule_lines[0], "") == reference["stdout"]
+    assert len(added_lines) == 2
+    assert (
+        "".join(
+            line for line in actual["help"].splitlines(keepends=True) if line not in added_lines
+        )
+        == reference["stdout"]
+    )
     assert actual["backend_exit"] == 2
     assert [
         line.strip("│ ")
@@ -977,7 +1001,7 @@ def test_disabled_cli_retains_exact_legacy_command_tree_and_help(tmp_path, path,
 def test_enabled_cli_registers_backend_set_clear_once(tmp_path):
     actual = cli_registration_probe(tmp_path, path="mux", enabled="true")
     assert actual["exit"] == actual["root_exit"] == actual["backend_exit"] == 0
-    assert actual["groups"] == ["rule", "backend", "tool-rules"]
+    assert actual["groups"] == ["rule", "backend", "owner", "tool-rules"]
     assert "backend" in actual["help"] and "backend" in actual["root_help"]
     assert "set" in actual["backend_help"] and "clear" in actual["backend_help"]
 

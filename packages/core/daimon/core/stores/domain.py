@@ -16,6 +16,7 @@ from typing import Any, Literal
 
 import structlog
 from daimon.core.session_snapshot import SessionSnapshot
+from mux.contracts.config import CapabilityRequirement, ThreadMode
 from mux.contracts.ids import PROVIDERS, Provider, Scope
 from mux.contracts.profile import Capability
 from mux.contracts.resources import (
@@ -1224,6 +1225,10 @@ class AgentBackendRevision(_BackendConsentFacts):
     local: int = Field(ge=1)
     backend: Provider | None
     model: str | None = None
+    # The agent's own settings; None is the backend's default.
+    profile: str | None = None
+    requires: dict[Capability, CapabilityRequirement] | None = None
+    thread_mode: ThreadMode | None = None
     agent_name: str
     preview_digest: str
     digest: str
@@ -1269,4 +1274,8 @@ class CompatibilityPreview(_BackendConsentFacts):
     digest: str
     # Set only when an admin picked a model other than the provider default.
     target_model: str | None = Field(default=None, exclude_if=lambda value: value is None)
+    # The agent's own profile, requirements and thread mode, only when any is set.
+    target_settings: dict[str, JsonValue] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
