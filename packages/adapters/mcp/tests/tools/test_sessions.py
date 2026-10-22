@@ -33,16 +33,13 @@ from daimon.adapters.mcp.tools.sessions import (
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.domain import TurnOriginRow
 from daimon.core.turn_origin import render_turn_origin
-from daimon.testing import ma_agent, ma_session
 from daimon.testing.asgi import call_mcp_tool
-from daimon.testing.ma import (
-    MARouter,
-    build_fake_anthropic,
-    list_response,
-)
+from daimon.testing.ma_models import ma_agent
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_session
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from starlette.types import ASGIApp
 

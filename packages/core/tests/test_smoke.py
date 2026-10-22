@@ -55,20 +55,15 @@ from daimon.core.smoke import SMOKE_MODEL, SMOKE_TOPUP_USD, SmokeCheckError, run
 from daimon.core.stores import accounts as accounts_store
 from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.stores import tenants as tenants_store
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     list_response,
     session_response,
     sse_response,
 )
-from daimon.testing.ma_models import (
-    ma_agent,
-    ma_environment,
-    ma_model_usage,
-    ma_session,
-    ma_session_agent,
-)
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage, ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _TENANT_ID = derive_tenant_uuid(platform="cli", workspace_id="smoke")

@@ -56,8 +56,8 @@ from daimon.core.tool_safety import ToolCall
 from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.state import TextBlock, TurnState
 from daimon.core.turn_hold import RequesterOrg
-from daimon.testing import ma_session, ma_session_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from pydantic import SecretStr
 from slack_sdk.errors import SlackApiError
 from slack_sdk.socket_mode.request import SocketModeRequest

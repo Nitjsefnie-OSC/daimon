@@ -45,15 +45,15 @@ from daimon.core.roster import RosterAgent
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import get_scope
-from daimon.testing import ma_environment
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_environment
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     MARouter,
     build_fake_anthropic,
     build_no_retry_anthropic,
     list_response,
 )
-from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001

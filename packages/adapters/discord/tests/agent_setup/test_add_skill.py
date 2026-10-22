@@ -40,9 +40,10 @@ from daimon.core.skills.ingest import bundle_from_markdown
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.user_skills import load_user_skill
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent
+from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
@@ -50,7 +51,6 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from daimon.testing.turn_fakes import deps_for
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 GUILD_ID = 2001

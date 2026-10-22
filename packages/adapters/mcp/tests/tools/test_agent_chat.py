@@ -86,18 +86,9 @@ from daimon.core.stores.github_links import save_verified_link
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import list_events
 from daimon.core.tenant_balance import debit_amount
-from daimon.testing import ma_agent, ma_model_usage, ma_session
 from daimon.testing.asgi import call_mcp_tool, mcp_session
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import (
-    EMPTY_CLOUD_CONFIG,
-    MARouter,
-    build_fake_anthropic,
-    json_body,
-    list_response,
-    send_events_response,
-)
-from daimon.testing.ma_models import SessionStatus
+from daimon.testing.ma_models import ma_agent
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
@@ -105,6 +96,19 @@ from fastmcp.server.transforms import Visibility
 from fastmcp.server.transforms.search.base import serialize_tools_for_output_markdown
 from fastmcp.tools import ToolResult
 from mcp.types import ImageContent
+from mux.testing.drivers.anthropic.ma import (
+    MARouter,
+    build_fake_anthropic,
+    json_body,
+    list_response,
+    send_events_response,
+)
+from mux.testing.drivers.anthropic.ma_models import (
+    EMPTY_CLOUD_CONFIG,
+    SessionStatus,
+    ma_model_usage,
+    ma_session,
+)
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -3970,7 +3974,7 @@ async def test_start_then_continue_rotates_the_mounted_chat_token_inside_the_rea
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
     from daimon.core.config import GithubAppSettings, McpSettings
     from daimon.core.mcp_auth import token_jti
-    from daimon.testing.ma import make_fake_memory_store_handler
+    from mux.testing.drivers.anthropic.ma import make_fake_memory_store_handler
 
     factory = async_sessionmaker(db_nullpool_engine, expire_on_commit=False)
     async with factory.begin() as db:

@@ -6,9 +6,10 @@ import httpx
 import pytest
 from daimon.core import headless_runner
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma import MARouter
-from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
-from daimon.testing.ma_transport import ScriptedTransport
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma import MARouter
+from mux.testing.drivers.anthropic.ma_models import ma_session
+from mux.testing.drivers.anthropic.ma_transport import ScriptedTransport
 
 
 @pytest.mark.parametrize("tenant_id", [None, uuid.UUID(int=8)])

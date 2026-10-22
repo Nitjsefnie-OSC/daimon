@@ -220,9 +220,9 @@ async def test_revoked_grant_refuses_at_claim_but_drain_bypasses_it(root_turn, k
 
 async def test_real_root_allocation_carries_native_budget_and_replays_ack(root_turn):
     from daimon.core.defaults.metadata import MA_METADATA_KEY_ACCOUNT, MA_METADATA_KEY_TENANT
-    from daimon.testing.ma import make_fake_memory_store_handler
-    from daimon.testing.ma_models import ma_session
-    from daimon.testing.ma_transport import ScriptedReply
+    from mux.testing.drivers.anthropic.ma import make_fake_memory_store_handler
+    from mux.testing.drivers.anthropic.ma_models import ma_session
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
 
     callback_calls = []
 

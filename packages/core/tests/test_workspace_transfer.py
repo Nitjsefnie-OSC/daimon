@@ -63,19 +63,19 @@ from daimon.core.workspace_transfer import (
     transfer_workspace,
 )
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_sessions import (
+    FakeSessionsState,
+    make_fake_sessions_handler,
+    session_turn_sse,
+)
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     build_fake_anthropic,
     combine_handlers,
     make_fake_ma_handler,
     make_fake_memory_store_handler,
 )
-from daimon.testing.ma_models import ma_model_usage
-from daimon.testing.ma_sessions import (
-    FakeSessionsState,
-    make_fake_sessions_handler,
-    session_turn_sse,
-)
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from pydantic import JsonValue
 from sqlalchemy import select
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

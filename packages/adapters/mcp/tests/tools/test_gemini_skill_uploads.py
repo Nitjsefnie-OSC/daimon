@@ -36,12 +36,9 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.turn_origins import create_origin
 from daimon.core.tool_safety import ToolSafetyPolicy
 from daimon.core.turn_origin import turn_origin
-from daimon.testing import ma_agent
 from daimon.testing.db import build_test_engine, require_owned_sessionmaker
-from daimon.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.isolated_sdk import build_gemini_client
-from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ModelRef, Scope
@@ -50,6 +47,9 @@ from mux.drivers.gemini import GeminiManagedAgents
 from mux.drivers.gemini.catalog_transport import SDKAgentCatalogTransport
 from mux.drivers.gemini.transport import Object
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
+from mux.testing.drivers.gemini.fake import FakeTransport, MemoryStorage
+from mux.testing.isolated_sdk import build_gemini_client
 from pydantic import TypeAdapter
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

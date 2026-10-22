@@ -1,6 +1,6 @@
 """F2 offline: Daimon's default capabilities on the OpenAI backend, MCP served for real.
 
-The F1 default-capability scenario (`daimon.testing.conformance.default_capability`) runs
+The F1 default-capability scenario (`mux.testing.conformance.default_capability`) runs
 against the OpenAI driver with the default agent's 11 skills and builtin tools,
 exactly as the F1 OpenAI test scripts them. What F2 adds: the `daimon-mcp`
 attachment is authenticated (`credential_ref` resolved per session by the
@@ -28,7 +28,15 @@ from typing import TYPE_CHECKING, Any
 import httpx
 import pytest
 import yaml
-from daimon.testing.conformance.default_capability import (
+from mux.contracts.ids import Scope
+from mux.contracts.resources import AgentSpec, MCPConnection, SkillUpload, SkillUploadFile
+from mux.drivers.openai import OpenAIDriver
+from mux.drivers.openai._common import Context
+from mux.drivers.openai.agents import agent_spec
+from mux.drivers.openai.transport import Object, SDKTransport, object_json
+from mux.drivers.openai.turn import MemoryRecoveryJournal
+from mux.drivers.openai.usage import MemoryUsageRevisions
+from mux.testing.conformance.default_capability import (
     BASH_RESULT,
     FINAL_MESSAGE,
     MCP_TOOLS,
@@ -38,23 +46,15 @@ from daimon.testing.conformance.default_capability import (
     NamedSkill,
     skill_text,
 )
-from daimon.testing.conformance.recording import Audit, Recorder
-from daimon.testing.conformance.runner import run_default_capability
-from daimon.testing.drivers.openai.default_capability import (
+from mux.testing.conformance.recording import Audit, Recorder
+from mux.testing.conformance.runner import run_default_capability
+from mux.testing.drivers.openai.default_capability import (
     BUILTIN_MAPPING,
     MODEL,
     SCOPE,
     OpenAIDefaultCapabilityFactory,
     OpenAIDefaultCapabilityTransport,
 )
-from mux.contracts.ids import Scope
-from mux.contracts.resources import AgentSpec, MCPConnection, SkillUpload, SkillUploadFile
-from mux.drivers.openai import OpenAIDriver
-from mux.drivers.openai._common import Context
-from mux.drivers.openai.agents import agent_spec
-from mux.drivers.openai.transport import Object, SDKTransport, object_json
-from mux.drivers.openai.turn import MemoryRecoveryJournal
-from mux.drivers.openai.usage import MemoryUsageRevisions
 from openai import AsyncOpenAI
 from pydantic import JsonValue
 

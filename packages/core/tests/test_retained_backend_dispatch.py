@@ -21,13 +21,13 @@ from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
 from daimon.core.thread_handoff import switch_thread_on_request
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic
+from daimon.testing.ma_models import ma_agent
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.state.lease import Slot
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 

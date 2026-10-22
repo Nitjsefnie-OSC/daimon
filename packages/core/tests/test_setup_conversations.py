@@ -16,8 +16,8 @@ from daimon.core.setup_conversations import (
     setup_thread_name,
     shared_keys_sentence,
 )
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
 from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 
 
 @pytest.mark.parametrize("missing_target", [False, True])

@@ -16,8 +16,8 @@ from anthropic.types.beta.sessions.beta_managed_agents_span_model_request_end_ev
 )
 from daimon.core.turn import run_turn
 from daimon.core.turn.posture import Billed, BillingExempt
-from daimon.testing.ma_models import ma_model_usage
 from daimon.testing.turn_fakes import FakeAnthropic, RecordingLifecycle, YieldEvent
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
 from .conftest import make_agent_message, make_end_turn, make_status_idle
 

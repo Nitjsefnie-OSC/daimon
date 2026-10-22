@@ -17,10 +17,10 @@ from daimon.adapters.mcp.hub.app import build_hub_app
 from daimon.adapters.mcp.runtime import McpRuntime
 from daimon.adapters.mcp.server import create_mcp_app
 from daimon.core.scope import DeploymentDefault
-from daimon.testing.ma import build_stub_anthropic
 from fastmcp.server.auth.providers.jwt import StaticTokenVerifier
 from fastmcp.server.transforms import Visibility
 from fastmcp.tools import Tool
+from mux.testing.drivers.anthropic.ma import build_stub_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .test_tool_schema_snapshot import (

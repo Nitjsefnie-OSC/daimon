@@ -96,10 +96,11 @@ from daimon.core.stores.thread_agent_bindings import create_binding, update_life
 from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.stores.turn_origins import create_origin, delete_origin, get_active_origin
 from daimon.core.stores.user_skills import upsert_user_skill
-from daimon.testing import ma_agent, ma_environment, ma_session, ma_session_agent
 from daimon.testing.crypto import make_fernet
 from daimon.testing.factories import make_account, make_platform_principal, make_tenant
-from daimon.testing.ma import (
+from daimon.testing.ma_models import ma_agent, ma_environment
+from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import (
     FakeMAState,
     NotHandled,
     build_fake_anthropic,
@@ -107,7 +108,7 @@ from daimon.testing.ma import (
     list_response,
     make_fake_ma_handler,
 )
-from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma_models import ma_session, ma_session_agent
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 

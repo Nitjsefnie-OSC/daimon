@@ -19,8 +19,8 @@ from daimon.core.stores import access_policy
 from daimon.core.stores.access_policy import load_access_policy, set_access_policy
 from daimon.core.stores.domain import Role
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import FakeMAState, build_fake_anthropic, make_fake_ma_handler
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

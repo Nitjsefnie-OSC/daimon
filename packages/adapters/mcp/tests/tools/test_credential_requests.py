@@ -55,11 +55,12 @@ from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.stores.credential_requests import peek_credential_request
 from daimon.core.stores.domain import Role
 from daimon.core.stores.turn_origins import create_origin
-from daimon.testing import ma_agent, ma_model_config
 from daimon.testing.factories import make_account, make_tenant
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp import FastMCP
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from pydantic import SecretStr
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker

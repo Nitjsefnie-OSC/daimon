@@ -29,7 +29,7 @@ from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.termination import TerminationReason, termination_reason
 from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
-from daimon.testing.ma import build_fake_anthropic, resolved_agent_env_router
+from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.contracts.config import (
     BackendConfig,
@@ -39,6 +39,7 @@ from mux.contracts.config import (
 )
 from mux.contracts.ids import ChannelRef
 from mux.errors import InvalidConfig
+from mux.testing.drivers.anthropic.ma import build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from structlog.testing import capture_logs
 
