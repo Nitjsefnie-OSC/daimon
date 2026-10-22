@@ -38,10 +38,13 @@ from mux.contracts.resources import (
     SkillUploadFile,
     ToolSpec,
 )
-from mux.drivers.anthropic import AnthropicManagedAgents
-from mux.drivers.anthropic.resources.vaults import Vaults
-from mux.drivers.anthropic.sessions_lifecycle import AnthropicSessions, SessionReads
-from mux.drivers.anthropic.usage import UsageWalk
+from mux.drivers.anthropic import (
+    AnthropicManagedAgents,
+    AnthropicSessions,
+    SessionReads,
+    UsageWalk,
+    Vaults,
+)
 from mux.testing.conformance.default_capability import (
     DEFAULT_SKILLS,
     DEFAULT_TOOLS,
