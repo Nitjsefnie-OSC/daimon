@@ -2257,7 +2257,8 @@ channel and account. `tenant_id` and `profile` stay exact, and a
 
 On an agent's first turn after the switch is confirmed, source preparation
 proves the drop consent, then the host publishes the confirmed target spec
-into the tenant's catalog once, at
+into the tenant's catalog once per user (catalog entries are scoped to the
+caller's account), at
 `root:<agent>:<MA version>:<profile>:<model>:<target digest>`. Every later
 turn for that agent version reuses it; editing the agent, changing the model
 or a different derived target publishes a new entry. A concurrent first turn

@@ -248,3 +248,77 @@ def test_channel_and_agent_rows_serve_only_their_own_turn_origin(
     assert select_runtime_manifest(request, OpenAIDeployment).agent_id == "agent-fixed"
     request.admission.backend_revision_origin = "agent"
     assert select_runtime_manifest(request, OpenAIDeployment).agent_id == "agent-counterpart"
+
+
+def test_fleet_worker_rows_still_resolve_next_to_channel_and_template_rows(
+    tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    """#fleet-test's worker rows (exact channel, '*' account, source daimon-fleet v1) win."""
+    from uuid import UUID
+
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.turn.gemini_deployment import GeminiPlan
+    from daimon.core.turn.runtime_manifest import validate_counterpart_request
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+    from mux.contracts.ids import ChannelRef
+
+    tenant = "449f4dc5-5990-52c0-96e0-45a4ab3bf0e4"
+    channel = "1562712749321093122"
+    native_agent = "agent_01DiAnUE5dV3E2Pr3ZosHCTS"
+    source = derive_agent_uuid(tenant_id=UUID(tenant), ma_agent_id=native_agent)
+    grant = {"profiles": ["gemini.inline_reuse"], "thread_modes": ["per_caller"], "requires": {}}
+    common = {
+        "profile": "gemini.inline_reuse",
+        "tenant_id": tenant,
+        "project": "gen-lang-client",
+        "api_key_env": "DAIMON_CHANNEL_GEMINI_KEY",
+        "storage_backend": "postgres",
+        "hold_usd": "0.25",
+        "cap_usd": "0.50",
+        "tools": [],
+        "environment": {"name": "remote"},
+    }
+    worker = {
+        **common,
+        "platform": "discord",
+        "channel_id": channel,
+        "account_id": "*",
+        "source_agent_id": str(source),
+        "source_agent_version": 1,
+        "worker_materialization": True,
+        "configuration_grant": {**grant, "models": ["gemini-3.8-flash"]},
+        "agent_name": "daimon-fleet",
+    }
+    star = {"platform": "*", "channel_id": "*", "account_id": "*"}
+    models = {"configuration_grant": {**grant, "models": ["gemini-3.8-flash", "gemini-4-argon"]}}
+    d3 = {**common, **star, **models, "agent_name": "daimon-gemini"}
+    template = {**common, **star, **models, "agent_name": "t", "root_materialization": True}
+    path = tmp_path / "manifest.json"
+    path.write_text(json.dumps([worker, d3, template]))
+    monkeypatch.setenv("DAIMON_TURN__PROVIDER_RUNTIME_FILE", str(path))
+    revision = ConfigRevision.create(
+        ChannelRef(tenant_id=tenant, platform="discord", channel_id=channel),
+        3,
+        resolve_default(
+            BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
+        ),
+    )
+    account = "7c1e0e3a-84d9-4102-9164-40027e27be37"
+    request = SimpleNamespace(
+        admission=SimpleNamespace(
+            backend_revision=revision,
+            backend_revision_origin="agent",
+            account_id=UUID(account),
+            agent=SimpleNamespace(id=native_agent, version=1),
+        ),
+        scope=SimpleNamespace(tenant_id=tenant, account_id=account),
+        deps=SimpleNamespace(channel_backends=True, agent_backends=True, turn_path="mux"),
+        tenant_id=UUID(tenant),
+        session_account_id=UUID(account),
+        platform="discord",
+        worker=object(),
+        before_native=object(),
+    )
+    plan = select_runtime_manifest(request, GeminiPlan)
+    assert plan.worker_materialization and plan.agent_name == "daimon-fleet"
+    assert validate_counterpart_request(plan, request, worker_materialization=True) == revision

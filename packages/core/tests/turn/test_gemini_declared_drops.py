@@ -565,3 +565,119 @@ def test_openai_rows_refuse_the_template_flag():
                 "root_materialization": True,
             }
         )
+
+
+async def test_two_concurrent_first_turns_publish_one_counterpart(ordinary, tmp_path, monkeypatch):
+    from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
+
+    request, plan, canonical, native, calls, posts, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    _as_template(plan, tmp_path, monkeypatch)
+    await service.clear_backend(source, accepted.local, actor)
+    first, _ = scope_channel_runtimes(request)
+    second, _ = scope_channel_runtimes(request)
+    a, b = await asyncio.gather(
+        read_preparation_counterpart(first), read_preparation_counterpart(second)
+    )
+    assert a.counterpart == b.counterpart
+    assert a.counterpart.catalog_id == root_counterpart_catalog_id(a)
+    creates = [c for c in calls if c.method == "POST" and c.url.path.startswith("/v1beta/agents")]
+    native_ids = {json.loads(c.content)["id"] for c in creates}
+    assert len(native_ids) == 1, "one native agent, whatever the race"
+    assert a.counterpart.local_revision == 1
+
+
+async def test_a_template_never_serves_another_tenant(ordinary, tmp_path, monkeypatch):
+    request, plan, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    row = _as_template(plan, tmp_path, monkeypatch)
+    foreign = row.model_copy(update={"tenant_id": "00000000-0000-0000-0000-00000000000b"})
+    (tmp_path / "template.json").write_text(json.dumps([foreign.model_dump(mode="json")]))
+    await service.clear_backend(source, accepted.local, actor)
+    scoped, _ = scope_channel_runtimes(request)
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(scoped)
+
+
+async def test_an_entry_holding_another_agents_spec_refuses(ordinary, tmp_path, monkeypatch):
+    from daimon.core.turn.runtime_manifest import root_counterpart_catalog_id
+
+    request, plan, canonical, native, calls, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    _as_template(plan, tmp_path, monkeypatch)
+    await service.clear_backend(source, accepted.local, actor)
+    scoped, lookup = scope_channel_runtimes(request)
+    prepared = await prepare_source(scoped)
+    backend = lookup.resolved  # noqa: F841 - the scoped runtime the preparation uses
+    foreign = canonical.target_spec.model_copy(update={"system": "Another agent's instructions"})
+    gemini = GeminiManagedAgents(
+        configured_transport(api_key="offline-declared-source"),
+        storage=SQLiteGeminiStorage(
+            tmp_path / "records.sqlite",
+            namespace=json.dumps(
+                [request.scope.tenant_id, request.scope.account_id, "project"],
+                separators=(",", ":"),
+            ),
+        ),
+        state_store=request.deps.state_store,
+        account_scope_id="project",
+        resource_catalog_enabled=True,
+        resource_catalog_transport=configured_catalog_transport(api_key="offline-declared-source"),
+    )
+    host = NeutralResourceHost(
+        gemini,
+        request.deps.sessionmaker,
+        scope=request.scope,
+        account_scope_id="project",
+        operation_key="foreign-publication",
+        resource_catalog_enabled=True,
+        catalog_adapter=gemini.catalog_adapter,
+    )
+    catalog_id = root_counterpart_catalog_id(prepared)
+    await host.publish(catalog_id, foreign, expected_revision=0, key="foreign-publication")
+    again, _ = scope_channel_runtimes(request)
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(again)
+
+
+@pytest.mark.parametrize("consent", ["valid", "missing", "stale"])
+async def test_missing_or_stale_consent_refuses_before_publication(
+    ordinary, tmp_path, monkeypatch, consent
+):
+    from daimon.core.stores import agent_backends
+
+    request, plan, canonical, native, calls, *_ = ordinary
+    service, source, actor, accepted = ordinary[8:]
+    _as_template(plan, tmp_path, monkeypatch)
+    drop = None
+    if consent == "valid":
+        drop = accepted.drop_consent.model_dump(mode="json")
+    if consent == "stale":
+        drop = {**accepted.drop_consent.model_dump(mode="json"), "source_pin": "0" * 64}
+    current = request.admission.backend_revision
+    linked = ConfigRevision.create(current.channel, current.local + 1, current)
+    async with request.deps.sessionmaker.begin() as db:
+        bad = await agent_backends.put_revision(
+            db,
+            tenant_id=accepted.tenant_id,
+            agent_id=accepted.agent_id,
+            agent_name=accepted.agent_name,
+            local=accepted.local + 1,
+            backend="gemini",
+            previous_local=accepted.local,
+            digest="test-" + consent,
+            preview_digest=accepted.preview_digest,
+            drop_consent=drop,
+        )
+        # The turn's agent-origin revision binds the bad consent, as a real switch would.
+        await mux_state.put_config_revision(db, linked, origin="agent", agent_revision=bad)
+    request = replace(request, admission=replace(request.admission, backend_revision=linked))
+    calls.clear()
+    scoped, _ = scope_channel_runtimes(request)
+    if consent == "valid":
+        # The same construction with the confirmed consent publishes: the refusals are consent's.
+        assert (await read_preparation_counterpart(scoped)).verified_counterpart is not None
+        return
+    with pytest.raises(AdmissionDenied):
+        await read_preparation_counterpart(scoped)
+    assert not [c for c in calls if c.method == "POST"], "nothing published without consent"

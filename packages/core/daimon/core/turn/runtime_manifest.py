@@ -2918,6 +2918,16 @@ async def materialize_root_counterpart(
         return await resources.entry(catalog_id)
     except SkillIngestError:
         pass
+    existing = await resources.catalog.get_agent(resources.scope, catalog_id)
+    if existing is not None:
+        # An archived entry is never republished over; this agent version stays refused.
+        log.warning(
+            "turn.root_counterpart_archived",
+            catalog_id=catalog_id,
+            lifecycle=existing.agent.lifecycle,
+            tenant_id=request.scope.tenant_id,
+        )
+        raise AdmissionDenied(reason="backend_unsupported")
     try:
         return await resources.publish(catalog_id, target, expected_revision=0, key=catalog_id)
     except CatalogConflict:
