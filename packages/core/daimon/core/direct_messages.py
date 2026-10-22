@@ -131,6 +131,11 @@ SEALED_SOURCE_MESSAGE = (
 )
 
 
+SHARED_SOURCE_MESSAGE = (
+    "This channel is shared with another organisation, so it can't move to a DM. Keep working here."
+)
+
+
 SEALED_SINCE_MESSAGE = (
     "This DM was closed because its channel no longer lets its conversation move to a DM."
     "\n\nKeep working in that channel."
@@ -214,10 +219,12 @@ def require_unsealed_source(admission: Admission) -> None:
 
     A DM sits outside the seal: copying the channel's recent messages into it
     would carry sealed content into a conversation that can reach unsealed
-    channels.
+    channels. A channel shared with another organisation is refused the same way.
     """
     if admission.source_sealed:
         raise UserFacingError(SEALED_SOURCE_MESSAGE)
+    if admission.source_shared:
+        raise UserFacingError(SHARED_SOURCE_MESSAGE)
 
 
 async def start_dm(

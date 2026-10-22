@@ -317,3 +317,15 @@ def test_hold_contains_a_discord_thread_by_its_parent_and_nothing_without_a_chan
     assert hold.contains("200", "100")
     assert not hold.contains(None)
     assert not hold.contains("200", "300")
+
+
+@pytest.mark.parametrize("action", [Action.READ_SESSION, Action.CONTINUE_SESSION])
+def test_a_client_with_no_hold_is_refused_session_access_it_owns(action: Action) -> None:
+    decision = _allowed(
+        OPEN,
+        subject=CLIENT,
+        action=action,
+        agent=ACME,
+        session=SessionFacts(channel="C_SHARED"),
+    )
+    assert decision == Decision(False, "origin_required")

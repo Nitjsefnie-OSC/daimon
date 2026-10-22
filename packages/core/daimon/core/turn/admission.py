@@ -85,7 +85,11 @@ from daimon.core.stores.access_policy import load_access_policy
 from daimon.core.stores.accounts import set_role
 from daimon.core.stores.channel_skills import list_channel_skills
 from daimon.core.stores.domain import AgentBackendRevision, BackendAgent, Role
-from daimon.core.stores.identity import get_or_create_platform_principal, mark_principal_foreign
+from daimon.core.stores.identity import (
+    find_platform_principal,
+    get_or_create_platform_principal,
+    mark_principal_foreign,
+)
 from daimon.core.stores.neutral_catalog import AgentRevision
 from daimon.core.stores.scoped_config_read import resolve as resolve_config
 from daimon.core.stores.scoped_config_write import clear_agent_references
@@ -163,6 +167,9 @@ class AdmissionGrant:
     # The channel the turn is held to; every question asked again carries it, so
     # a hold never relaxes between admission and the moment the session is built.
     hold: TurnHold | None = None
+    # The platform admitted on; `reauthorize` rereads the requester's foreign
+    # marker and the channel's shared record with it. None only in hand-built grants.
+    platform: str | None = None
 
 
 @dataclass(frozen=True)
@@ -190,6 +197,9 @@ class Admission:
     # The channel or thread itself is sealed (DM memory policy aside). Callers
     # that copy content out of the channel, such as /dm-me, must refuse.
     source_sealed: bool = False
+    # A DM admitted from a channel shared with another organisation
+    # (`dm_source_channel_id`): its history must not be copied into the DM either.
+    source_shared: bool = False
     # Only private Slack orchestration assigns this signed, execution-specific grant.
     slack_turn_context_id: uuid.UUID | None = None
     # The channel the turn is held to (`daimon.core.turn_hold`): the requester is
@@ -443,17 +453,24 @@ async def admit_impl(
             requester_org=requester_org,
             requester_home_id=requester_home_id,
             role=role,
+            already_foreign=principal.foreign_home_id is not None,
         )
         shared = False
-        if not is_dm:
+        source_shared = False
+        # A DM has no channel of its own to share; /dm-me asks about the channel
+        # it copies history from.
+        shared_place = dm_source_channel_id if is_dm else channel_id
+        if shared_place is not None:
             shared = await _record_shared_channel(
                 session,
                 tenant_id=tenant_id,
                 platform=platform,
-                channel_id=channel_id,
+                channel_id=shared_place,
                 requester_org=requester_org,
                 channel_shared=channel_shared,
             )
+            source_shared = is_dm and shared
+            shared = shared and not is_dm
         await session.commit()
         mark("identity")
         if is_dm and client:
@@ -804,6 +821,7 @@ async def admit_impl(
         thread_id=thread_id,
         is_dm=is_dm,
         hold=hold,
+        platform=platform,
     )
     _require_run_agent(policy, grant)
     mark("agent_policy")
@@ -1073,6 +1091,7 @@ async def admit_impl(
         daimon_rule_tools=daimon_rules.tools,
         daimon_rules_need_driver=daimon_rules.needs_driver,
         source_sealed=source_sealed,
+        source_shared=source_shared,
         hold=hold,
         shared_channel=shared,
         origin_channel_id=channel_id,
@@ -1112,12 +1131,15 @@ async def _record_requester(
     requester_org: RequesterOrg,
     requester_home_id: str | None,
     role: Role | None,
+    already_foreign: bool,
 ) -> None:
     """Write what the platform verified about the requester, and nothing it did not.
 
     HOST: the adapter's live role, if any. OTHER: the foreign marker, and role USER
     whatever the caller passed, so a stored admin is demoted. UNKNOWN: nothing at
-    all, so a lookup that failed once never demotes or promotes a stored role.
+    all, so a lookup that failed once never demotes or promotes a stored role. A
+    principal already marked foreign is written USER on any verdict but UNKNOWN,
+    so a HOST claim never restores an admin role it lost.
     """
     if requester_org is RequesterOrg.OTHER:
         if not requester_home_id:
@@ -1125,7 +1147,7 @@ async def _record_requester(
         await mark_principal_foreign(session, principal_id=principal_id, home_id=requester_home_id)
         await set_role(session, account_id, Role.USER)
     elif requester_org is RequesterOrg.HOST and role is not None:
-        await set_role(session, account_id, role)
+        await set_role(session, account_id, Role.USER if already_foreign else role)
 
 
 async def _record_shared_channel(
@@ -1212,6 +1234,42 @@ def _is_own_agent(policy: TenantAccessPolicy, grant: AdmissionGrant) -> bool:
     return at_home(agent_permissions(policy, grant.agent.names), here)
 
 
+async def _tightened_hold(
+    session: AsyncSession, admission: Admission, grant: AdmissionGrant
+) -> tuple[AdmissionGrant, bool]:
+    """The grant and shared flag with what was learned since admission; never relaxed.
+
+    A requester marked foreign, or a channel recorded as shared, since the turn
+    was admitted holds it to its channel now, drops its admin standing and makes
+    the subject a client. Whatever the admission already held stays held.
+    """
+    shared = admission.shared_channel
+    external_id = grant.subject.platform_user_id
+    if grant.platform is None or grant.is_dm or external_id is None:
+        return grant, shared
+    principal = await find_platform_principal(
+        session, tenant_id=grant.tenant_id, platform=grant.platform, external_id=external_id
+    )
+    client = grant.subject.client or (
+        principal is not None and principal.foreign_home_id is not None
+    )
+    shared = shared or await is_channel_shared(
+        session, tenant_id=grant.tenant_id, platform=grant.platform, channel_id=grant.channel_id
+    )
+    if not (client or shared):
+        return grant, shared
+    hold = TurnHold(grant.platform, grant.channel_id, client)
+    if grant.hold is not None:
+        hold = TurnHold(hold.platform, grant.hold.channel_id, client or grant.hold.client)
+    subject = build_subject(
+        is_admin=False,
+        platform_user_id=external_id,
+        via_agent_key=grant.subject.via_agent_key,
+        client=hold.client,
+    )
+    return replace(grant, subject=subject, hold=hold), shared
+
+
 async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
     """Decide an admission again, on the policy as it is now.
 
@@ -1231,6 +1289,7 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         return admission
     async with deps.sessionmaker() as session:
         policy = await load_access_policy(session, tenant_id=grant.tenant_id)
+        grant, shared_channel = await _tightened_hold(session, admission, grant)
     _require_turn_start(policy, grant.subject, grant.turn_place, grant.hold)
     _require_run_agent(policy, grant)
     if deps.backend_selection_enabled and admission.backend_revision is not None:
@@ -1264,7 +1323,9 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         deps.sessionmaker, deps.tool_safety, tenant_id=grant.tenant_id, agent_id=admission.agent.id
     )
     if (
-        seal_ids == admission.origin_seal_ids
+        grant == admission.grant
+        and shared_channel == admission.shared_channel
+        and seal_ids == admission.origin_seal_ids
         and memory_read_only == admission.memory_read_only
         and asks_before_publishing == admission.asks_before_publishing
         and rules.tools == admission.daimon_rule_tools
@@ -1273,6 +1334,9 @@ async def reauthorize(deps: TurnDeps, admission: Admission) -> Admission:
         return admission
     return replace(
         admission,
+        grant=grant,
+        hold=grant.hold,
+        shared_channel=shared_channel,
         origin_seal_ids=seal_ids,
         source_sealed=admission.source_sealed or bool(seal_ids),
         memory_read_only=memory_read_only,
@@ -1322,6 +1386,8 @@ def decide_before_send(deps: TurnDeps, admission: Admission) -> Callable[[], Awa
         if (
             current.origin_seal_ids != admission.origin_seal_ids
             or current.memory_read_only != admission.memory_read_only
+            or current.hold != admission.hold
+            or current.shared_channel != admission.shared_channel
             or (current.asks_before_publishing and not admission.asks_before_publishing)
         ):
             raise SessionBusyError(

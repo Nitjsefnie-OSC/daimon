@@ -663,6 +663,7 @@ async def freeze_prepared_root(
             admission.memory_read_only != prepared.admission.memory_read_only
             or admission.asks_before_publishing != prepared.admission.asks_before_publishing
             or admission.origin_seal_ids != prepared.admission.origin_seal_ids
+            or admission.hold != prepared.admission.hold
         ):
             raise WorkerSpecRefused("origin", "stale")
     default_revision = None

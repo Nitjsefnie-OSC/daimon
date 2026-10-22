@@ -506,6 +506,8 @@ class TeamsDriver:
                 configuration_target_ma_agent_id=agent_id,
                 configuration_target_name=agent_name,
                 role=Role.ADMIN,
+                sender_foreign=False,
+                shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
             )

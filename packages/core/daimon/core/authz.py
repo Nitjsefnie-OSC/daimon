@@ -382,6 +382,12 @@ _HOLD_REFUSED_ACTIONS = frozenset(
 )
 
 
+#: What a client may do only from a named origin channel, so it needs a hold.
+_ORIGIN_BOUND_ACTIONS = frozenset(
+    {Action.READ_CHANNEL, Action.POST, Action.READ_SESSION, Action.CONTINUE_SESSION}
+)
+
+
 def _inside_hold(hold: TurnHold, at: Place) -> bool:
     return not at.own_dm and hold.contains(at.channel_id, at.parent_channel_id)
 
@@ -403,7 +409,7 @@ def _client_refusal(req: Request) -> Decision | None:
         return _deny("client_requester")
     if req.action is Action.PUBLISH and not req.approved:
         return _deny("needs_approval")
-    if req.hold is None and req.action in (Action.READ_CHANNEL, Action.POST):
+    if req.hold is None and req.action in _ORIGIN_BOUND_ACTIONS:
         return _deny("origin_required")
     return None
 

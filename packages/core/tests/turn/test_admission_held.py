@@ -9,7 +9,11 @@ from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import Action, AgentRef, Place, Surface, authorize
 from daimon.core.stores.accounts import get_account, set_role
 from daimon.core.stores.domain import Role, TenantRow
-from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
+from daimon.core.stores.identity import (
+    find_platform_principal,
+    get_or_create_platform_principal,
+    mark_principal_foreign,
+)
 from daimon.core.stores.shared_channels import is_channel_shared, mark_channel_shared
 from daimon.core.turn.admission import Admission, AdmissionDenied, admit, reauthorize
 from daimon.core.turn.deps import TurnDeps
@@ -321,3 +325,118 @@ async def test_a_default_agent_still_runs_in_a_shared_channel_under_agent_rules(
         db_session_factory, tmp_path, tenant, org=RequesterOrg.OTHER, home_id=HOME
     )
     assert admission.hold is not None
+
+
+async def test_a_marked_principal_never_regains_a_stored_admin_role_from_a_host_claim(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    await _admit(db_session_factory, tmp_path, tenant, org=RequesterOrg.OTHER, home_id=HOME)
+
+    await _admit(db_session_factory, tmp_path, tenant, org=RequesterOrg.HOST, role=Role.ADMIN)
+
+    assert await _role_and_marker(db_session, tenant) == (Role.USER, HOME)
+
+
+async def test_a_dm_move_from_a_shared_channel_is_refused_before_history_is_read(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    from daimon.core.direct_messages import require_unsealed_source
+    from daimon.core.errors import UserFacingError
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps_for(db_session_factory, tmp_path, tenant)
+
+    async def move(*, channel_shared: bool | None) -> Admission:
+        return await admit(
+            deps,
+            tenant_id=tenant.id,
+            platform=PLATFORM,
+            external_user_id="U_MEMBER",
+            channel_id=CHANNEL,
+            now=_NOW,
+            role=Role.USER,
+            is_dm=True,
+            dm_source_channel_id=CHANNEL,
+            requester_org=RequesterOrg.HOST,
+            channel_shared=channel_shared,
+        )
+
+    require_unsealed_source(await move(channel_shared=None))
+    reported = await move(channel_shared=True)
+    with pytest.raises(UserFacingError, match="shared with another organisation"):
+        require_unsealed_source(reported)
+    with pytest.raises(UserFacingError):
+        require_unsealed_source(await move(channel_shared=None))  # now in the registry
+
+
+async def test_reauthorize_holds_a_turn_admitted_unheld_once_the_channel_is_marked_shared(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps_for(db_session_factory, tmp_path, tenant)
+    admission = await _admit(db_session_factory, tmp_path, tenant, role=Role.ADMIN)
+    assert admission.hold is None
+    await mark_channel_shared(
+        db_session, tenant_id=tenant.id, platform=PLATFORM, channel_id=CHANNEL, source="client"
+    )
+    await db_session.commit()
+
+    current = await reauthorize(deps, admission)
+
+    assert current.hold == TurnHold(PLATFORM, CHANNEL, client=False)
+    assert current.shared_channel is True
+    assert current.grant is not None and current.grant.hold == current.hold
+    assert current.grant.subject.is_admin is False
+
+
+async def test_reauthorize_makes_a_requester_marked_foreign_since_admission_a_client(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps_for(db_session_factory, tmp_path, tenant)
+    admission = await _admit(db_session_factory, tmp_path, tenant)
+    assert admission.hold is None
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform=PLATFORM, external_id=USER
+    )
+    await mark_principal_foreign(db_session, principal_id=principal.id, home_id=HOME)
+    await db_session.commit()
+
+    current = await reauthorize(deps, admission)
+
+    assert current.hold == TurnHold(PLATFORM, CHANNEL, client=True)
+    assert current.grant is not None and current.grant.subject.client is True
+
+
+async def test_before_send_waits_when_the_turn_was_tightened_after_its_session_was_built(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    from daimon.core.turn.admission import decide_before_send
+    from daimon.core.turn.errors import SessionBusyError
+
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps_for(db_session_factory, tmp_path, tenant)
+    admission = await _admit(db_session_factory, tmp_path, tenant)
+    await decide_before_send(deps, admission)()
+    await mark_channel_shared(
+        db_session, tenant_id=tenant.id, platform=PLATFORM, channel_id=CHANNEL, source="client"
+    )
+    await db_session.commit()
+
+    with pytest.raises(SessionBusyError):
+        await decide_before_send(deps, admission)()
+
+
+async def test_reauthorize_never_relaxes_a_hold(
+    db_session: AsyncSession, db_session_factory: async_sessionmaker[AsyncSession], tmp_path: Path
+) -> None:
+    tenant = await _seed_admittable_tenant(db_session, policy=None)
+    deps = _deps_for(db_session_factory, tmp_path, tenant)
+    admission = await _admit(db_session_factory, tmp_path, tenant, channel_shared=True)
+    await db_session.execute(text("DELETE FROM shared_channels"))
+    await db_session.commit()
+
+    current = await reauthorize(deps, admission)
+
+    assert current.hold == admission.hold and current.shared_channel is True
