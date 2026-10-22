@@ -9,6 +9,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Added
 
+- Opt-in recruiter-reviewed Discord staffing threads with a tenant-scoped encrypted ledger and durable recruitment API outbox.
+
+### Added
+
 - Built-in sandbox tools (bash, file reads and edits and the rest) can be turned back on for one channel or thread routine at a time, for that routine's own scheduled runs. The supported way today is the operator's `daimon routines sandbox-tools --tenant TENANT ROUTINE_ID... [--off] [--dry-run]`, which also opts in a confirmed list of routines at once and leaves any already set alone. An opt-in covers exactly the routine's current agent version and environment: a run gets built-ins only when its agent version and environment are the ones recorded, so after anyone edits the agent or its environment the next run goes without them and the opt-in is cleared until the operator approves the routine again. The `set_routine_sandbox_tools` MCP tool accepts only a live Discord server admin's own token, which no Daimon surface issues yet; it is kept for a future admin surface and refuses agents, operator tokens, legacy tokens and Slack or Teams callers. DM routines cannot be opted in, and editing a routine's agent, trigger message, destination or budget channel turns the opt-in off. Every change records who made it, when, the routine id and the agent version and environment it covers. `get_routine`, `list_routines` and the Discord `/routines` panel show whether a routine has sandbox tools. Watches, timers and wakes, agent chat, fleet workers, `daimon run` and workspace checkpoints keep them off with no opt-in.
 
 - Native tenant-scoped lead intake with encrypted capture, Gmail qualification,

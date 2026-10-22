@@ -1751,6 +1751,36 @@ class WatchesSettings(BaseModel):
     )
 
 
+class RecruitmentBackendSettings(BaseModel):
+    base_url: str = Field(
+        default="https://synthetic.invalid",
+        description="Recruitment API base URL for this tenant; trusted services only.",
+    )
+    api_key: SecretStr = Field(
+        default=SecretStr(""),
+        description="Service-only recruitment Bearer key; never mounted in agent tools or provider sessions.",
+    )
+
+
+class RecruitmentSettings(BaseModel):
+    enabled: bool = Field(
+        default=False,
+        description="Enable staffing reconciliation in existing Discord/scheduler processes. Each tenant must also be enabled by operator configuration.",
+    )
+    backends: dict[uuid.UUID, RecruitmentBackendSettings] = Field(
+        default_factory=dict,
+        description="Tenant UUID to service-only recruitment base_url/api_key map. Supply only to Discord and scheduler, never public sidecar or MCP.",
+    )
+    synthetic: bool = Field(
+        default=False,
+        description="Use an in-process synthetic recruitment backend instead of any network calls. For synthetic QA only; disabled by default. Real backend parity requires separate validation.",
+    )
+    model: str = Field(
+        default="claude-haiku-4-5",
+        description="Model for stateless structured recruitment extraction without tools, memory or conversational provider sessions.",
+    )
+
+
 class Settings(BaseSettings):
     security_audit_retention_days: int = Field(
         default=90,
@@ -1845,6 +1875,7 @@ class Settings(BaseSettings):
     turn_queue: TurnQueueSettings = Field(default_factory=TurnQueueSettings)
     fleet: FleetSettings = Field(default_factory=FleetSettings)
     watches: WatchesSettings = Field(default_factory=WatchesSettings)
+    recruitment: RecruitmentSettings = Field(default_factory=RecruitmentSettings)
     private_channel_messages: PrivateChannelMessagesSettings = Field(
         default_factory=PrivateChannelMessagesSettings
     )
@@ -1990,6 +2021,7 @@ def load_turn_settings(*, _env_file: str | None = ".env") -> TurnSettings:
 
 class _WatchesSettingsSource(BaseSettings):
     watches: WatchesSettings = Field(default_factory=WatchesSettings)
+    recruitment: RecruitmentSettings = Field(default_factory=RecruitmentSettings)
     model_config = SettingsConfigDict(
         env_prefix="DAIMON_", env_nested_delimiter="__", extra="ignore", hide_input_in_errors=True
     )
