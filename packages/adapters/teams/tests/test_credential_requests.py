@@ -48,9 +48,9 @@ from daimon.core.stores.credential_requests import (
 from daimon.core.stores.domain import CredentialRequestRow
 from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.stores.tenants import get_tenant
-from daimon.testing import build_fake_anthropic, ma_agent
 from daimon.testing.factories import make_account
-from daimon.testing.ma import MARouter, list_response
+from daimon.testing.ma_models import ma_agent
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from pydantic import SecretStr
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

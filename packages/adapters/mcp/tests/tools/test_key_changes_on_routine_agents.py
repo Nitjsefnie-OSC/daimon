@@ -29,10 +29,10 @@ from daimon.adapters.mcp.tools.self_edit import (
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores.agent_files import get_agent_file, put_agent_file
-from daimon.testing import ma_agent
 from daimon.testing.factories import make_account, make_routine, make_tenant, make_thread_session
-from daimon.testing.ma import MARouter, build_fake_anthropic, list_response
+from daimon.testing.ma_models import ma_agent
 from fastmcp.exceptions import ToolError
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, list_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 _MA_ID = "ag_routine"

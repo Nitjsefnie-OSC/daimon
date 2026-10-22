@@ -28,7 +28,6 @@ from daimon.core.stores import tenant_ledger, usage_events
 from daimon.core.turn.posture import Billed
 from daimon.core.usage_recording import record_turn_usage
 from daimon.testing.factories import make_tenant
-from daimon.testing.ma_models import ma_model_usage
 from daimon.testing.turn_fakes import (
     FakeAnthropic,
     RaiseConnection,
@@ -37,6 +36,7 @@ from daimon.testing.turn_fakes import (
     YieldEvent,
     run_turn_on_leg,
 )
+from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import make_end_turn, make_status_idle

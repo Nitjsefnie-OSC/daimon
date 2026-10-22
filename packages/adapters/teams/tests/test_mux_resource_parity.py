@@ -19,7 +19,7 @@ from daimon.core.defaults.report import Action, ResourceOutcome
 from daimon.core.roster import RosterAgent
 from daimon.core.skills.ingest import SkillBundle
 from daimon.testing.ma_models import ma_agent
-from daimon.testing.ma_transport import ScriptedReply, ScriptedTransport
+from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 
 async def test_a_foreign_reread_keeps_the_existing_refusal_and_does_not_upload() -> None:

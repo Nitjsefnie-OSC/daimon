@@ -58,8 +58,9 @@ from daimon.core.config import Settings
 from daimon.core.db import build_engine
 from daimon.core.stores import tenant_ledger
 from daimon.core.stores.routines import create_routine, get_routine
-from daimon.testing import ma_agent, ma_environment, ma_model_config
 from daimon.testing.factories import make_tenant
+from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.testing.drivers.anthropic.ma_models import ma_model_config
 from sqlalchemy import text
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 

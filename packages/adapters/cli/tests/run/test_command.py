@@ -27,7 +27,7 @@ from daimon.core.ma_resolver import new_resolver_cache
 from daimon.core.scope import DeploymentDefault
 from daimon.core.turn.ceiling import CEILING_MESSAGE
 from daimon.core.turn.state import TurnState
-from daimon.testing.ma import MARouter, sse_response
+from mux.testing.drivers.anthropic.ma import MARouter, sse_response
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 from typer.testing import CliRunner
 

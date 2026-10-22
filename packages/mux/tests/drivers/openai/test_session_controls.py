@@ -6,7 +6,6 @@ import json
 
 import httpx
 import pytest
-from daimon.testing.isolated_sdk import build_async_openai
 from mux.contracts.actions import UserMessage
 from mux.contracts.events import TextPart
 from mux.contracts.ids import Revision
@@ -17,6 +16,7 @@ from mux.drivers.openai.transport import SDKTransport
 from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import UnsupportedCapability
+from mux.testing.isolated_sdk import build_async_openai
 from pydantic import ValidationError
 
 from .conftest import REF, SCOPE, native_session

@@ -37,9 +37,9 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED
 from daimon.core.ma_identity import derive_agent_uuid
 from daimon.core.operation_policy import TargetFacts, decide_operation
 from daimon.testing.factories import make_tenant, make_tenant_config
-from daimon.testing.ma import MARouter, build_fake_anthropic, make_fake_ma_handler
 from daimon.testing.ma_models import ma_agent
 from daimon.testing.turn_fakes import deps_for
+from mux.testing.drivers.anthropic.ma import MARouter, build_fake_anthropic, make_fake_ma_handler
 from slack_sdk.web.async_client import AsyncWebClient
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 

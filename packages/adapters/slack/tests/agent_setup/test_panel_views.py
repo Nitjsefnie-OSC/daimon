@@ -62,7 +62,7 @@ from daimon.core.scope import ChannelConfigRow, DeploymentDefault, ResolvedConfi
 from daimon.core.stores.domain import (
     AgentFileRow,
 )
-from daimon.testing import ma_agent
+from daimon.testing.ma_models import ma_agent
 
 _TEAM_ID = "T_PANEL"
 _CHANNEL_ID = "C0HERE1111"

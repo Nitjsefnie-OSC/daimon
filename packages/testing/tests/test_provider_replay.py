@@ -8,7 +8,6 @@ from typing import cast
 
 import httpx
 import pytest
-from daimon.testing.drivers.gemini.fake import MemoryStorage
 from daimon.testing.provider_fixtures import (
     BackendFixture,
     FixturePack,
@@ -48,6 +47,7 @@ from mux.drivers.openai.turn import MemoryRecoveryJournal
 from mux.drivers.openai.usage import MemoryUsageRevisions
 from mux.errors import ProviderError, UnsupportedCapability
 from mux.state.memory import MemoryStateStore
+from mux.testing.drivers.gemini.fake import MemoryStorage
 from pydantic import JsonValue, ValidationError
 
 pytestmark = pytest.mark.usefixtures("gemini_recorded_clock")
