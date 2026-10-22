@@ -244,17 +244,18 @@ async def latest_config_revision_and_sharing(
                 ChannelConfigRevision.local > 0,
             )
         )
-    row = (
-        await session.execute(
-            select(ChannelConfigRevision.revision, ever_shared)
-            .where(*selection)
-            .order_by(ChannelConfigRevision.local.desc())
-            .limit(1)
-        )
-    ).one_or_none()
-    if row is None:
-        return None, False
-    return ConfigRevision.model_validate(row[0]), bool(row[1])
+    latest = (
+        select(ChannelConfigRevision.revision)
+        .where(*selection)
+        .order_by(ChannelConfigRevision.local.desc())
+        .limit(1)
+        .scalar_subquery()
+    )
+    # One row even with no override: agent-origin revisions may have shared threads.
+    revision, shared = (await session.execute(select(latest, ever_shared))).one()
+    if revision is None:
+        return None, bool(shared)
+    return ConfigRevision.model_validate(revision), bool(shared)
 
 
 async def thread_has_caller_sessions(

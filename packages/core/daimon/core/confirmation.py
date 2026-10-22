@@ -521,8 +521,7 @@ def backend_switch_callbacks(
     shared service's compare-and-set after the approved tool call.
     """
     from daimon.core.authz import build_subject
-    from daimon.core.channel_backend import load_backend_agent
-    from daimon.core.channel_skills import may_set_channel_skills
+    from daimon.core.channel_backend import BackendActor, load_backend_agent
     from daimon.core.stores.accounts import get_account_with_tenant
 
     async def verified(
@@ -559,8 +558,9 @@ def backend_switch_callbacks(
         ):
             raise ValueError("This preview changed. Preview and confirm again.")
         subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
-        if not may_set_channel_skills(subject, ""):
-            raise ValueError("This change needs a current workspace admin.")
+        # The agent's owner or a current workspace admin, as the write re-checks.
+        if not await service.may_edit(agent, BackendActor(tenant_id, account_id, subject)):
+            raise ValueError("This change needs the agent's owner or a current workspace admin.")
         # Recheck the scoped identity after the platform lookup has yielded.
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)

@@ -97,6 +97,9 @@ async def put_revision(
     fleet_grant: JsonValue | None = None,
     drop_consent: JsonValue | None = None,
     model: str | None = None,
+    profile: str | None = None,
+    requires: JsonValue | None = None,
+    thread_mode: str | None = None,
 ) -> AgentBackendRevision:
     row = AgentBackendRevisionRecord(
         tenant_id=tenant_id,
@@ -104,6 +107,9 @@ async def put_revision(
         local=local,
         backend=backend,
         model=model,
+        profile=profile,
+        requires=requires,
+        thread_mode=thread_mode,
         digest=digest,
         previous_local=previous_local,
         agent_name=agent_name,

@@ -51,7 +51,7 @@ from daimon.core.pricing import (
     provider_prices,
 )
 from daimon.core.stores import access_policy as policy_store
-from daimon.core.stores import agent_backends, mux_state, security_audit
+from daimon.core.stores import agent_backends, agent_owners, mux_state, security_audit
 from daimon.core.stores.domain import (
     AgentBackendRevision,
     BackendAgent,
@@ -66,8 +66,10 @@ from mux.contracts.admission import admit
 from mux.contracts.config import (
     DEFAULT_BACKEND,
     BackendConfig,
+    CapabilityRequirement,
     ConfigRevision,
     ResolvedBackend,
+    ThreadMode,
     resolve_default,
 )
 from mux.contracts.ids import PROVIDERS, ChannelRef, ModelRef, Provider, ThreadRef
@@ -305,6 +307,49 @@ class BackendActor:
 
 
 @dataclass(frozen=True)
+class AgentSettings:
+    """What an agent states about how it runs; unset is its backend's default.
+
+    `profile` must belong to the agent's backend, `requires` names the
+    capabilities the agent needs (a channel pin may refuse a turn over them but
+    never drops one), and `thread_mode="shared"` is the agent's intent to share
+    threads, which a channel pin that keeps them per caller overrides.
+    """
+
+    profile: str | None = None
+    requires: Mapping[Capability, CapabilityRequirement] | None = None
+    thread_mode: ThreadMode | None = None
+
+    @classmethod
+    def of(cls, revision: AgentBackendRevision | None) -> AgentSettings:
+        if revision is None:
+            return cls()
+        return cls(revision.profile, revision.requires or None, revision.thread_mode)
+
+    def is_default(self) -> bool:
+        return self.profile is None and not self.requires and self.thread_mode is None
+
+    def facts(self) -> dict[str, object]:
+        """The set fields, as stored and hashed."""
+        facts: dict[str, object] = {}
+        if self.profile is not None:
+            facts["profile"] = self.profile
+        if self.requires:
+            facts["requires"] = {
+                cap: need.model_dump(mode="json") for cap, need in sorted(self.requires.items())
+            }
+        if self.thread_mode is not None:
+            facts["thread_mode"] = self.thread_mode
+        return facts
+
+    def for_backend(self, backend: Provider | None) -> AgentSettings:
+        """Keep what still applies on `backend`: a profile belongs to one backend only."""
+        if self.profile is None or self.profile.startswith(f"{backend or DEFAULT_BACKEND}."):
+            return self
+        return AgentSettings(None, self.requires, self.thread_mode)
+
+
+@dataclass(frozen=True)
 class BackendSelectionState:
     agent: BackendAgent
     revision: AgentBackendRevision | None
@@ -375,6 +420,9 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "invalid_fleet_grant",
         "fleet_provider_limits_exceed_budget",
         "no_previous_revision",
+        "owner_or_admin_required",
+        "profile_not_selectable",
+        "channel_pin_lacks_capability",
         "re_confirm",
         "revision_busy",
         "source_unavailable",
@@ -482,6 +530,7 @@ def _revision_digest(
     fleet_grant: JsonValue | None,
     drop_consent: JsonValue | None = None,
     model: str | None = None,
+    settings: AgentSettings | None = None,
 ) -> str:
     facts: dict[str, object] = {
         "tenant_id": agent.tenant_id,
@@ -490,6 +539,9 @@ def _revision_digest(
     }
     if model is not None:
         facts["model"] = model
+    if settings is not None:
+        # Only set fields are hashed, so a revision without them keeps its digest.
+        facts.update(settings.facts())
     if fleet_grant is not None:
         facts["fleet_grant"] = fleet_grant
     if drop_consent is not None:
@@ -540,13 +592,14 @@ def compatibility_preview(
     setting_revision: int = 0,
     cost_line: str = "Cost preview pending",
     model: str | None = None,
+    settings: AgentSettings | None = None,
 ) -> CompatibilityPreview:
     """Pure preview from host-resolved agent facts and declared profile metadata."""
     if agent.tenant_id != tenant.tenant_id:
         raise AgentBackendRefused("tenant_mismatch")
     if target_backend == "selfhosted":
         raise AgentBackendRefused("selfhosted_requires_channel_configuration")
-    selection = agent_selection(target_backend, model)
+    selection = agent_selection(target_backend, model, settings)
     profile = get_profile(selection.profile)
 
     preview = CompatibilityPreview(
@@ -567,7 +620,7 @@ def compatibility_preview(
         unsupported_capabilities=tuple(
             sorted(
                 c
-                for c in agent.required_capabilities
+                for c in set(agent.required_capabilities) | set(_required(settings))
                 if compatibility_missing(
                     CompatibilityItem(name=c, requires=(c,)), target_backend, profile
                 )
@@ -575,10 +628,15 @@ def compatibility_preview(
         ),
         shared_thread_limits=("Shared threads are unavailable on this selection.",)
         if not shared_threads_available(target_backend)
+        else ("Shared threads stay per caller wherever a channel pins per-caller threads.",)
+        if selection.thread_mode == "shared"
         else (),
         cost_line=cost_line,
         allowed=backend_is_enabled(target_backend, tenant.enabled_backends),
         target_model=model if model != backend_selection(target_backend).model else None,
+        target_settings=cast(dict[str, JsonValue], settings.facts())
+        if settings is not None and not settings.is_default()
+        else None,
     )
     digest = _digest(
         {
@@ -599,9 +657,7 @@ def resolve_agent_backend(
         return ResolvedBackend.model_validate(
             channel.model_dump(include=set(ResolvedBackend.model_fields))
         )
-    if agent is not None and agent.backend is not None:
-        return agent_selection(agent.backend, agent.model)
-    return resolve_default(None)
+    return revision_selection(agent) or resolve_default(None)
 
 
 def backend_selection_enabled(settings: TurnSettings) -> bool:
@@ -645,6 +701,40 @@ class AgentBackendService:
         if not await agent_backends.actor_exists(session, tenant_id, actor.account_id):
             raise AgentBackendRefused("actor_not_found")
 
+    def _check_editor(self, tenant_id: uuid.UUID, actor: BackendActor) -> None:
+        """The cheap half of `_authorize_edit`, before any transaction opens."""
+        self._require_enabled()
+        if actor.tenant_id != tenant_id:
+            raise AgentBackendRefused("tenant_mismatch")
+
+    async def _authorize_edit(
+        self, session: AsyncSession, agent: BackendAgent, actor: BackendActor
+    ) -> None:
+        """Owner or current server admin, decided inside the write's transaction.
+
+        The owner row is read locked, so an owner change cannot interleave with
+        a write it no longer allows. An agent key or a client is never an owner.
+        Tenant-wide settings (the provider allowlist) stay admin-only: they use
+        `_actor`, never this.
+        """
+        self._check_editor(agent.tenant_id, actor)
+        if not await agent_backends.actor_exists(session, agent.tenant_id, actor.account_id):
+            raise AgentBackendRefused("actor_not_found")
+        policy = await policy_store.load_access_policy(session, tenant_id=agent.tenant_id)
+        if authorize(policy, subject=actor.subject, action=Action.SET_AGENT_RULE):
+            return
+        if not await may_edit_as_owner(session, agent.tenant_id, agent.agent_id, actor):
+            raise AgentBackendRefused("owner_or_admin_required")
+
+    async def may_edit(self, agent: BackendAgent, actor: BackendActor) -> bool:
+        """Whether `actor` may change this agent now: a read for previews and cards."""
+        try:
+            async with self._sessions() as session:
+                await self._authorize_edit(session, agent, actor)
+        except AgentBackendRefused:
+            return False
+        return True
+
     async def _policy(self, session: AsyncSession, tenant_id: uuid.UUID) -> TenantBackendPolicy:
         policy = await policy_store.load_access_policy(session, tenant_id=tenant_id)
         return TenantBackendPolicy(
@@ -676,12 +766,16 @@ class AgentBackendService:
         agent: BackendAgent,
         target: Provider | None,
         model: str | None = None,
+        settings: AgentSettings | None = None,
     ) -> CompatibilityPreview:
         capture = self._capture_source if target is not None else None
+        current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+        if settings is None:
+            # A provider change keeps the agent's settings that still apply.
+            settings = AgentSettings.of(current).for_backend(target)
         target = target or DEFAULT_BACKEND
         if target == "selfhosted":
             raise AgentBackendRefused("selfhosted_requires_channel_configuration")
-        current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
         original = agent
         if capture is not None:
             agent = await capture(agent)
@@ -696,13 +790,14 @@ class AgentBackendService:
             if model is None
             else _default_cost(agent, target, model=model),
             model=model,
+            settings=settings,
         )
 
         if capture is None:
             return preview
         from daimon.core.turn.runtime_manifest import preview_source_drops, source_preservation_pin
 
-        selection = agent_selection(target, model)
+        selection = agent_selection(target, model, settings)
         try:
             proposed = preview_source_drops(
                 agent, ModelRef(provider=selection.backend, id=selection.model or agent.model or "")
@@ -733,11 +828,28 @@ class AgentBackendService:
         agent: BackendAgent,
         target_backend: Provider | None = None,
         model: str | None = None,
+        settings: AgentSettings | None = None,
     ) -> CompatibilityPreview:
+        """Preview a change. `settings` None keeps the agent's current ones that still apply."""
         self._require_enabled()
         model = picked_model(target_backend, model)
         async with self._sessions() as session:
-            return await self._preview(session, agent, target_backend, model)
+            return await self._preview(session, agent, target_backend, model, settings)
+
+    async def preview_settings(
+        self, agent: BackendAgent, settings: AgentSettings
+    ) -> CompatibilityPreview:
+        """Preview new settings on the agent's current provider and model."""
+        self._require_enabled()
+        async with self._sessions() as session:
+            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+            return await self._preview(
+                session,
+                agent,
+                current.backend if current else None,
+                current.model if current else None,
+                settings,
+            )
 
     async def read_selection(
         self,
@@ -776,20 +888,33 @@ class AgentBackendService:
         backend: Provider | None,
         expected_revision: int,
         actor: BackendActor,
-        operation: Literal["set", "clear", "revert", "fleet_grant_set", "fleet_grant_revoke"],
+        operation: Literal[
+            "set", "clear", "revert", "settings", "fleet_grant_set", "fleet_grant_revoke"
+        ],
         expected_preview_digest: str | None,
         *,
         fleet_grant: AgentFleetGrant | None = None,
         accepted_drops: tuple[str, ...] | None = None,
         now: datetime | None = None,
         model: str | None = None,
+        settings: AgentSettings | None = None,
     ) -> AgentBackendRevision:
-        self._check_actor(agent.tenant_id, actor)
+        self._check_editor(agent.tenant_id, actor)
         async with policy_store.policy_write_transaction(
             self._sessions, tenant_id=agent.tenant_id
         ) as session:
-            await self._actor(session, agent.tenant_id, actor)
+            await self._authorize_edit(session, agent, actor)
             current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+            kept = AgentSettings.of(current)
+            if operation == "settings":
+                # A settings change keeps the provider and model and states the rest anew.
+                backend = current.backend if current else None
+                model = current.model if current else None
+                settings = settings or AgentSettings()
+            elif operation in ("set", "clear"):
+                settings = kept.for_backend(backend)
+            else:
+                settings = kept
             local = current.local if current else 0
             if local != expected_revision:
                 raise AgentBackendRefused("stale_revision")
@@ -808,6 +933,7 @@ class AgentBackendService:
                     raise AgentBackendRefused("no_previous_revision")
                 backend = previous.backend if previous else None
                 model = previous.model if previous else None
+                settings = AgentSettings.of(previous)
             grant_operation = operation in ("fleet_grant_set", "fleet_grant_revoke")
             if grant_operation:
                 if now is None:
@@ -818,7 +944,7 @@ class AgentBackendService:
                 previous_local = current.previous_local if current else None
                 retained_grant = preview.fleet_grant
             else:
-                preview = await self._preview(session, agent, backend, model)
+                preview = await self._preview(session, agent, backend, model, settings)
                 if not preview.allowed:
                     raise AgentBackendRefused("backend_not_allowed")
                 previous_local = local or None
@@ -867,7 +993,7 @@ class AgentBackendService:
                             tenant_id=str(agent.tenant_id), platform="cli", channel_id=agent.name
                         ),
                         1,
-                        agent_selection(preview.target_backend, model),
+                        agent_selection(preview.target_backend, model, settings),
                     )
                 )
             try:
@@ -879,11 +1005,16 @@ class AgentBackendService:
                     local=local + 1,
                     backend=backend,
                     previous_local=previous_local,
-                    digest=_revision_digest(agent, backend, retained_grant, consent_json, model),
+                    digest=_revision_digest(
+                        agent, backend, retained_grant, consent_json, model, settings
+                    ),
                     preview_digest=preview.digest,
                     fleet_grant=retained_grant,
                     drop_consent=consent_json,
                     model=model,
+                    profile=settings.profile,
+                    requires=cast(JsonValue, settings.facts().get("requires")),
+                    thread_mode=settings.thread_mode,
                 )
             except IntegrityError:
                 raise AgentBackendRefused("stale_revision") from None
@@ -1068,6 +1199,26 @@ class AgentBackendService:
             agent, None, expected_revision, actor, "clear", expected_preview_digest
         )
 
+    async def set_settings(
+        self,
+        agent: BackendAgent,
+        settings: AgentSettings,
+        expected_revision: int,
+        actor: BackendActor,
+        *,
+        expected_preview_digest: str | None = None,
+    ) -> AgentBackendRevision:
+        """State the agent's profile, requirements and thread mode; provider and model stay."""
+        return await self._change(
+            agent,
+            None,
+            expected_revision,
+            actor,
+            "settings",
+            expected_preview_digest,
+            settings=settings,
+        )
+
     async def revert(
         self,
         agent: BackendAgent,
@@ -1220,15 +1371,17 @@ async def resolve_turn_backend(
     override, ever_shared = await current_backend_and_sharing(session, channel)
     setting: AgentBackendRevision | None = None
     if worker is None:
+        setting = await agent_backends.current(session, tenant_id, agent.agent_id)
         if (
             override is not None
             and await mux_state.config_origin(session, channel, override.local) != "channel_clear"
         ):
+            require_pin_meets_agent(override, setting)
             return override, ever_shared, "channel"
-        setting = await agent_backends.current(session, tenant_id, agent.agent_id)
-        if setting is None or setting.backend is None:
+        agent_choice = revision_selection(setting)
+        if agent_choice is None:
             return None, ever_shared, "default"
-        selection = agent_selection(setting.backend, setting.model)
+        selection = agent_choice
     else:
         fleet = worker.permissions.fleet
         if (
@@ -1396,14 +1549,74 @@ def backend_is_enabled(backend: Provider, enabled_backends: tuple[Provider, ...]
     return backend in enabled_backends
 
 
-def agent_selection(backend: Provider, model: str | None = None) -> ResolvedBackend:
-    """An agent's provider selection, with an admin-picked model or the provider default."""
+def agent_selection(
+    backend: Provider, model: str | None = None, settings: AgentSettings | None = None
+) -> ResolvedBackend:
+    """An agent's provider selection: a picked model or the provider default, and its settings."""
     selection = backend_selection(backend)
-    if model is None or model == selection.model:
+    if model is not None and model != selection.model:
+        if backend == DEFAULT_BACKEND or model not in selectable_models(backend):
+            raise AgentBackendRefused("model_not_selectable")
+        selection = selection.model_copy(update={"model": model})
+    if settings is None or settings.is_default():
         return selection
-    if backend == DEFAULT_BACKEND or model not in selectable_models(backend):
-        raise AgentBackendRefused("model_not_selectable")
-    return selection.model_copy(update={"model": model})
+    update: dict[str, object] = {}
+    if settings.profile is not None and settings.profile != selection.profile:
+        if not settings.profile.startswith(f"{backend}.") or settings.profile not in (
+            RUNNABLE_PROFILES
+        ):
+            raise AgentBackendRefused("profile_not_selectable")
+        update["profile"] = settings.profile
+    if settings.requires:
+        update["requires"] = dict(settings.requires)
+    if settings.thread_mode is not None:
+        update["thread_mode"] = settings.thread_mode
+    try:
+        return ResolvedBackend.model_validate({**dict(selection), **update})
+    except (ValueError, InvalidConfig):
+        raise AgentBackendRefused("profile_not_selectable") from None
+
+
+def revision_selection(revision: AgentBackendRevision | None) -> ResolvedBackend | None:
+    """The agent's own selection, or None when it states nothing (the legacy default path)."""
+    if revision is None:
+        return None
+    settings = AgentSettings.of(revision)
+    if revision.backend is None and settings.is_default():
+        return None
+    return agent_selection(revision.backend or DEFAULT_BACKEND, revision.model, settings)
+
+
+def require_pin_meets_agent(pin: ConfigRevision, setting: AgentBackendRevision | None) -> None:
+    """A channel pin may tighten an agent's settings, never drop a capability it requires.
+
+    The turn is refused visibly instead of running without it.
+    """
+    if setting is None or not setting.requires:
+        return
+    profile = get_profile(pin.profile)
+    if any(
+        need.level == "required" and profile.support_for(cap) not in SUPPORTED
+        for cap, need in setting.requires.items()
+    ):
+        log_backend_unsupported("channel_policy", revision=pin)
+        raise AgentBackendRefused("channel_pin_lacks_capability")
+
+
+async def may_edit_as_owner(
+    session: AsyncSession, tenant_id: uuid.UUID, agent_id: uuid.UUID, actor: BackendActor
+) -> bool:
+    """Whether `actor` is a person who owns the agent. Agent keys and clients never are."""
+    if actor.subject.via_agent_key or actor.subject.client:
+        return False
+    owner = await agent_owners.owner_of(session, tenant_id, agent_id, lock=True)
+    return owner is not None and owner == actor.account_id
+
+
+def _required(settings: AgentSettings | None) -> tuple[Capability, ...]:
+    if settings is None or not settings.requires:
+        return ()
+    return tuple(cap for cap, need in settings.requires.items() if need.level == "required")
 
 
 def picked_model(backend: Provider | None, model: str | None) -> str | None:

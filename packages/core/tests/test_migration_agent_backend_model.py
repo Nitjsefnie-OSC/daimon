@@ -13,9 +13,9 @@ from sqlalchemy import Connection, inspect, text
 from sqlalchemy.ext.asyncio import AsyncSession
 
 
-def migration() -> ModuleType:
-    path = Path(__file__).parents[1] / "alembic/versions/0118_agent_backend_model.py"
-    spec = importlib.util.spec_from_file_location("agent_backend_model_migration", path)
+def migration(name: str = "0118_agent_backend_model") -> ModuleType:
+    path = Path(__file__).parents[1] / f"alembic/versions/{name}.py"
+    spec = importlib.util.spec_from_file_location(f"migration_{name}", path)
     assert spec is not None and spec.loader is not None
     module = importlib.util.module_from_spec(spec)
     spec.loader.exec_module(module)
@@ -32,14 +32,18 @@ async def test_agent_backend_model_migration_down_up_matches_the_model(
 ) -> None:
     connection = await db_session.connection()
     module = migration()
+    # 0119 adds columns after this one; cycle it too so column order is the model's.
+    later = migration("0119_agent_owner_settings")
     table = "agent_backend_revision"
 
     def cycle(sync: Connection) -> None:
         here = sync.scalar(text("SELECT current_schema()"))
         with Operations.context(MigrationContext.configure(sync)):
+            later.downgrade()
             module.downgrade()
             assert "model" not in {c["name"] for c in inspect(sync).get_columns(table, schema=here)}
             module.upgrade()
+            later.upgrade()
             columns = [c["name"] for c in inspect(sync).get_columns(table, schema=here)]
             assert columns == list(Base.metadata.tables[table].columns.keys()), "column order"
             (model,) = [

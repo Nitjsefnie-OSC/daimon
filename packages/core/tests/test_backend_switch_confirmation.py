@@ -909,3 +909,37 @@ async def test_card_names_the_model_and_where_the_switch_applies(
     trace.queue(reply())
     assert await check(other, "requester") is not None
     assert await service.current(agent) is None
+
+
+async def test_the_agents_owner_may_confirm_without_being_an_admin(owned_preview):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+    from daimon.core.stores import agent_owners
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    admin = AsyncMock(return_value=False)
+    _, check = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=admin,
+    )
+    async with sessions.begin() as session:
+        await agent_owners.set_owner(
+            session,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            owner_account_id=actor.account_id,
+            source="admin_assigned",
+        )
+    trace.queue(reply())
+    assert await check(prompt, "requester") is None
+    # Ownership moves away between the card and the click: the click refuses.
+    async with sessions.begin() as session:
+        await agent_owners.clear_owner(session, tenant_id=agent.tenant_id, agent_id=agent.agent_id)
+    trace.queue(reply())
+    assert await check(prompt, "requester") is not None
+    assert await service.current(agent) is None
