@@ -111,7 +111,7 @@ class FlashTransport:
         if required == ARGON_MODEL:
             # A 503 on Argon is the turn's answer, never a silent switch to Flash.
             models = (ARGON_MODEL,)
-        if self._bounded_worker and (not capped or required != FLASH_PRIMARY):
+        if self._bounded_worker and (not capped or required not in (FLASH_PRIMARY, ARGON_MODEL)):
             raise ProviderError(
                 "invalid_request", retryable=False, native_code="worker_model_required"
             )

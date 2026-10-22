@@ -11,6 +11,11 @@ from __future__ import annotations
 from mux.contracts.extensions import OPENAI_EXTENSIONS
 from mux.contracts.profile import AccountingMode, Profile
 
+LUNA_MODEL = "gpt-6-luna"
+ASTRA_MODEL = "gpt-6-astra"
+# Every model the native OpenAI host runs; the admitted revision selects one.
+NATIVE_MODELS = (LUNA_MODEL, ASTRA_MODEL)
+
 PERSISTENT_WORKSPACE = Profile(
     provider="openai",
     profile_id="openai.persistent_workspace",

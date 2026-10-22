@@ -583,3 +583,38 @@ async def test_idle_read_surfaces_as_a_read_timeout_not_a_bare_timeout(
     assert harness.transport.close_count == 1
     with pytest.raises(StopAsyncIteration):
         await stream.__anext__()
+
+
+@pytest.mark.parametrize(
+    ("deployment_tokens", "expected"),
+    [
+        pytest.param(
+            {"max_input_tokens": 30_000, "max_output_tokens": 2048},
+            "gemini-4-argon",
+            id="bounded-worker",
+        ),
+        pytest.param({}, "gemini-4-argon", id="channel"),
+        # The unbounded worker path (a 4096-token cap) is Flash's; Argon never runs it.
+        pytest.param({"max_total_tokens": 4096}, "gemini-3.8-flash", id="unbounded-worker"),
+    ],
+)
+def test_argon_runs_only_bounded_or_as_a_channel(
+    deployment_tokens: dict[str, int], expected: str
+) -> None:
+    from daimon.core.mux_backend import TurnRuntime
+    from daimon.core.turn.gemini import GeminiDeployment, GeminiJournal, _runtime_model
+
+    deployment = GeminiDeployment(
+        "digest",
+        1,
+        "project",
+        AgentSpec(name="w", model=ModelRef(provider="gemini", id="gemini-4-argon")),
+        EnvironmentSpec(name="e"),
+        **deployment_tokens,
+    )
+    runtime = TurnRuntime(
+        transport_factory=lambda config, scope: None,
+        journal=GeminiJournal(MemoryStorage(), MemoryStateStore(), deployment),
+        usage_store=None,
+    )
+    assert _runtime_model(runtime) == expected  # pyright: ignore[reportPrivateUsage]

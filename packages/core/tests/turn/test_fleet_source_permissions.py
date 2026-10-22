@@ -1318,6 +1318,78 @@ def test_bounded_gemini_tokens_fit_the_prompt_and_the_budget():
         bounded_gemini_worker_tokens(system, Decimal("0.02"), model="gemini-3.8-flash")
 
 
+def _in_argon_window(monkeypatch):
+    from daimon.core import pricing
+
+    class InArgonWindow(datetime):
+        @classmethod
+        def now(cls, tz=None):
+            return datetime(2026, 11, 30, tzinfo=UTC)
+
+    monkeypatch.setattr(pricing, "datetime", InArgonWindow)
+
+
+def test_bounded_argon_tokens_fit_the_prompt_the_budget_and_the_hold(monkeypatch):
+    from daimon.core.neutral_resources import (
+        bounded_gemini_worker_tokens,
+        gemini_worker_cost_usd,
+    )
+
+    _in_argon_window(monkeypatch)
+    system = "Real root instructions. " * 1000
+    for budget, markup, hold in (
+        (Decimal("2.00"), Decimal(1), Decimal("0.49")),
+        (Decimal("0.40"), Decimal("1.3"), Decimal("0.49")),
+        (Decimal("2.00"), Decimal(1), None),
+    ):
+        tokens = bounded_gemini_worker_tokens(
+            system, budget, model="gemini-4-argon", markup=markup, hold_usd=hold
+        )
+        assert tokens["max_input_tokens"] == len(system.encode()) + 4096
+        worst = gemini_worker_cost_usd(
+            "gemini-4-argon", tokens["max_input_tokens"], tokens["max_output_tokens"]
+        )
+        limit = budget / markup if hold is None else min(budget / markup, hold)
+        assert worst <= limit
+    # Argon's price is far above Flash's: a Flash-sized budget refuses before dispatch.
+    with pytest.raises(WorkerSpecRefused, match="budget: exhausted"):
+        bounded_gemini_worker_tokens(system, Decimal("0.05"), model="gemini-4-argon")
+
+
+@pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
+async def test_plain_argon_spawn_fills_the_bounded_envelope_or_refuses(captured, monkeypatch):
+    from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused
+    from daimon.core.neutral_resources import gemini_worker_cost_usd, task_worker_spec
+
+    _in_argon_window(monkeypatch)
+    source, _, grant, _, policy, _ = captured
+    argon = ModelRef(provider="gemini", id="gemini-4-argon")
+    widened = grant.model_copy(
+        update={
+            "choices": (
+                *grant.choices,
+                (backend_selection("gemini").model_copy(update={"model": argon.id}), argon),
+            )
+        }
+    )
+    root = compose(captured[:2] + (widened,) + captured[3:])
+    owner = FleetOrchestrator()
+    spec = task_worker_spec(root, role="W3", task="Compare X and Y.", model=argon.id)
+
+    def resolve(limits):
+        return resolve_worker_spec(root, spec, policy=policy, now=NOW, limits=limits)
+
+    base = resolve(root.limits.model_copy(update={"max_turns": 1}))
+    filled = owner._bounded_gemini(root, base, resolve, fill=True, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
+    limits = filled.limits
+    assert limits.max_input_tokens == len(filled.spec.system.encode()) + len("Go.") + 4096
+    worst = gemini_worker_cost_usd(argon.id, limits.max_input_tokens, limits.max_output_tokens)
+    assert worst <= limits.budget_usd
+    # Argon never takes the unbounded 4096-token path: without a fill it refuses.
+    with pytest.raises(FleetRefused, match="argon_requires_bounded_worker"):
+        owner._bounded_gemini(root, base, resolve, fill=False, trigger="Go.")  # pyright: ignore[reportPrivateUsage]
+
+
 @pytest.mark.parametrize("captured", ["haiku55_effort"], indirect=True)
 async def test_fleet_r9_plain_gemini_spawn_fills_limits_only_when_none_are_given(captured):
     from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused

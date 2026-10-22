@@ -228,17 +228,39 @@ def test_transport_primary_is_flash_or_argon_only(primary: str) -> None:
         FlashTransport(FakeTransport(), Accounting(), primary=primary)
 
 
-async def test_bounded_worker_cannot_use_argon() -> None:
+@pytest.mark.parametrize("overloaded", (False, True))
+async def test_bounded_argon_worker_runs_argon_only_and_never_falls_back(overloaded: bool) -> None:
     source, accounting = FakeTransport(), Accounting()
+    source.responses.append(
+        ProviderError("overloaded", retryable=True, native_code="503")
+        if overloaded
+        else {"id": "argon", "status": "in_progress"}
+    )
     capped: Mapping[str, JsonValue] = {
         "model": ARGON_MODEL,
         "tools": [],
         "generation_config": {"max_output_tokens": 4096},
         "input": [{"type": "text", "text": "task"}],
     }
+    policy = FlashTransport(source, accounting, bounded_worker=True, primary=ARGON_MODEL)
+    if overloaded:
+        with pytest.raises(ProviderError):
+            await policy.create(capped)
+    else:
+        await policy.create(capped)
+    assert [r["model"] for r in source.requests] == [ARGON_MODEL]
+    assert accounting.held == [ModelRef(provider="gemini", id=ARGON_MODEL)]
+
+
+async def test_bounded_worker_refuses_an_uncapped_argon_request() -> None:
+    source, accounting = FakeTransport(), Accounting()
+    uncapped: Mapping[str, JsonValue] = {
+        "agent_config": {"type": "antigravity", "model": ARGON_MODEL},
+        "input": [],
+    }
     with pytest.raises(ProviderError):
         await FlashTransport(source, accounting, bounded_worker=True, primary=ARGON_MODEL).create(
-            capped
+            uncapped
         )
     assert not source.requests and not accounting.held
 

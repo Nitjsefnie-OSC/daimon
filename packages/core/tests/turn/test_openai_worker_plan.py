@@ -1353,3 +1353,44 @@ async def test_budgeted_session_without_ack_remains_unknown(claimed_openai_worke
         call.method == "DELETE" or call.method == "POST" and call.url.path.endswith("/events")
         for call in calls
     )
+
+
+def _astra(request):
+    from mux.contracts.config import BackendConfig, ConfigRevision, resolve_default
+
+    revision = request.admission.backend_revision
+    astra = ConfigRevision.create(
+        revision.channel,
+        revision.local,
+        resolve_default(
+            BackendConfig(backend="openai", profile=revision.profile, model="gpt-6-astra")
+        ),
+    )
+    return replace(request, admission=replace(request.admission, backend_revision=astra))
+
+
+async def test_astra_worker_runtime_runs_at_astra_controls_and_price(
+    target: tuple, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    request, _, plan, _, owned = target
+    # The deployment row authorizes Astra alongside Luna, as a fleet row would.
+    grant = plan.configuration_grant
+    assert grant is not None
+    widened = plan.model_copy(
+        update={
+            "configuration_grant": grant.model_copy(
+                update={"models": (*grant.models, "gpt-6-astra")}
+            )
+        }
+    )
+    manifest(monkeypatch, owned.manifest_path, [widened.model_dump(mode="json")])
+    runtime = build_openai_runtime(_astra(request))
+    assert runtime.controls.model == "gpt-6-astra"
+    assert runtime.price is not None and runtime.price.model == "gpt-6-astra"
+    assert (runtime.price.input, runtime.price.output) == (Decimal("10.00"), Decimal("50.00"))
+
+
+async def test_astra_never_runs_an_agent_or_channel_turn(target: tuple) -> None:
+    request, *_ = target
+    with pytest.raises(AdmissionDenied):
+        build_openai_runtime(replace(_astra(request), worker=None))

@@ -649,22 +649,28 @@ def test_root_budget_pair_requires_both_operator_fields(field):
         AgentFleetGrant.model_validate(data)
 
 
-async def test_argon_fleet_grant_is_refused_up_front(owned, monkeypatch):
+async def test_argon_fleet_grant_is_accepted_only_inside_its_price_window(owned, monkeypatch):
     from daimon.core import pricing
 
-    class InIntroWindow(datetime):
+    clock = {"now": datetime(2026, 12, 1, tzinfo=UTC)}
+
+    class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return datetime(2026, 11, 30, tzinfo=UTC)
+            return clock["now"]
 
-    # Argon is priced here, so the refusal is the worker rule, not the tariff.
-    monkeypatch.setattr(pricing, "datetime", InIntroWindow)
+    monkeypatch.setattr(pricing, "datetime", Clock)
     service, agent, actor, _ = owned
     await enable(service, agent, actor)
     argon = (
         backend_selection("gemini").model_copy(update={"model": "gemini-4-argon"}),
         ModelRef(provider="gemini", id="gemini-4-argon"),
     )
+    # After its price window Argon has no tariff, so the grant refuses up front.
     with pytest.raises(AgentBackendRefused, match="invalid fleet grant"):
         await set_grant(service, agent, actor, grant().model_copy(update={"choices": (argon,)}))
     assert await service.current(agent) is None
+    # Inside it, a worker grant may name Argon (it runs on the bounded envelope).
+    clock["now"] = datetime(2026, 11, 30, tzinfo=UTC)
+    await set_grant(service, agent, actor, grant().model_copy(update={"choices": (argon,)}))
+    assert await service.current(agent) is not None

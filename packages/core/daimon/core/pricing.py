@@ -557,6 +557,7 @@ def resolved_worker_prices(
 PROVIDER_PRICING_CHECKED_ON = date(2026, 10, 14)
 PROVIDER_PRICING_SOURCES = (
     "https://developers.openai.com/api/docs/models/gpt-6-luna",
+    "https://developers.openai.com/api/docs/models/gpt-6-astra",
     "https://developers.openai.com/api/docs/guides/agents-api/observability",
     "https://ai.google.dev/gemini-api/docs/pricing",
     "https://ai.google.dev/gemini-api/docs/antigravity-agent",
@@ -572,6 +573,19 @@ _PROVIDER_PRICING: Mapping[str, tuple[ProviderPrice, ...]] = MappingProxyType(
                 Decimal("0.50"),
                 Decimal("0.01"),
                 Decimal("0.125"),
+                max_priced_input_tokens=272_000,
+            ),
+            # Checked 2026-10-22 (official model page). Above 272k input tokens
+            # input/cache double and output is 1.5x; this row stays conservative
+            # by refusing to price, and so to admit, anything above the threshold.
+            ProviderPrice(
+                PERSISTENT_WORKSPACE.provider,
+                "gpt-6-astra",
+                date(2026, 10, 22),
+                Decimal("10.00"),
+                Decimal("50.00"),
+                Decimal("1.00"),
+                Decimal("12.50"),
                 max_priced_input_tokens=272_000,
             ),
         ),

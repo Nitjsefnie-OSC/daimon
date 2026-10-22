@@ -375,5 +375,5 @@ def test_selectable_models_list_the_default_first_and_never_pro() -> None:
     from mux.profiles import selectable_models
 
     assert selectable_models("gemini") == ("gemini-3.8-flash", "gemini-4-argon")
-    assert selectable_models("openai") == ("gpt-6-luna",)
+    assert selectable_models("openai") == ("gpt-6-luna", "gpt-6-astra")
     assert not any("pro" in model for model in selectable_models("gemini"))

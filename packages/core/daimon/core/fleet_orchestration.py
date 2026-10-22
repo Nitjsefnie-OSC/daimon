@@ -439,16 +439,17 @@ class FleetOrchestrator:
         from daimon.core.turn.runtime_manifest import manifest_hold_usd
         from mux.contracts.config import ConfigRevision
         from mux.drivers.gemini import FLASH_PRIMARY
-        from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS
+        from mux.profiles.gemini import ARGON_MODEL, INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS
 
         limits = resolved.limits
         if resolved.backend.profile != INLINE_REUSE.profile_id or limits.max_input_tokens:
             return resolved
         system = resolved.spec.system or ""
+        model = resolved.spec.model.id
         if (
             fill
             and limits.max_output_tokens is None
-            and resolved.spec.model.id == FLASH_PRIMARY
+            and model in (FLASH_PRIMARY, ARGON_MODEL)
             and "sandbox" in resolved.declared_drops
         ):
             markup = getattr(self._ports, "markup", None)
@@ -470,6 +471,9 @@ class FleetOrchestrator:
                 extra_input=trigger,
             )
             return resolve(limits.model_copy(update=tokens))
+        if model == ARGON_MODEL:
+            # Argon runs workers only on the bounded envelope, never the 4096-token cap.
+            raise FleetRefused("argon_requires_bounded_worker")
         # About four characters per token: an estimate, used only to refuse early.
         if (len(system) + len(trigger)) // 4 >= WORKER_MAX_TOTAL_TOKENS:
             raise FleetRefused("prompt_exceeds_worker_token_cap")

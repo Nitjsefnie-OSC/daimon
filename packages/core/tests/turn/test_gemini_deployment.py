@@ -128,11 +128,24 @@ def entry(selected: ProviderPreparationRequest, tmp_path: Path) -> dict[str, Jso
 
 @pytest.fixture
 def worker_target(
-    tmp_path: Path, request: pytest.FixtureRequest
+    tmp_path: Path, request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch
 ) -> tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec]:
     root = parent("gemini")
-    if getattr(request, "param", None) == "cheap":
-        model = ModelRef(provider="gemini", id="gemini-3.5-flash-lite")
+    variant = getattr(request, "param", None)
+    if variant == "argon":
+
+        class InArgonWindow(datetime):
+            @classmethod
+            def now(cls, tz: tzinfo | None = None) -> datetime:  # type: ignore[override]
+                return datetime(2026, 11, 30, tzinfo=UTC)
+
+        # Argon is tariff-gated; its intro price is current through 2026-11-30.
+        monkeypatch.setattr(pricing, "datetime", InArgonWindow)
+    if variant in ("cheap", "argon"):
+        model = ModelRef(
+            provider="gemini",
+            id="gemini-3.5-flash-lite" if variant == "cheap" else "gemini-4-argon",
+        )
         selection = resolve_default(
             BackendConfig(backend="gemini", profile=PROFILE, model=model.id)
         )
@@ -199,6 +212,29 @@ def test_cheap_worker_model_is_canonical_and_admitted_before_compilation(
     assert compile_agent(deployment.agent, max_total_tokens=deployment.max_total_tokens)[
         "agent_config"
     ] == {"type": "antigravity", "model": "gemini-3.5-flash-lite", "max_total_tokens": 4096}
+
+
+@pytest.mark.parametrize("worker_target", ("argon",), indirect=True)
+def test_argon_worker_compiles_only_on_the_bounded_envelope(
+    worker_target: tuple[GeminiPlan, ConfigRevision, ResolvedWorkerSpec],
+) -> None:
+    plan, revision, worker = worker_target
+    check_backend(revision, worker=True)
+    assert worker.backend.model == revision.model == "gemini-4-argon"
+    # Unbounded (the 4096-token cap path is Flash's), Argon is refused.
+    with pytest.raises(AdmissionDenied):
+        plan.worker_deployment(worker, revision)
+    # The envelope the fleet derives (`FleetOrchestration._bounded_gemini`).
+    bounded = replace(
+        worker,
+        limits=worker.limits.model_copy(
+            update={"max_input_tokens": 30_000, "max_output_tokens": 2048, "max_turns": 1}
+        ),
+    )
+    deployment = plan.worker_deployment(bounded, revision)
+    assert deployment.agent.model == ModelRef(provider="gemini", id="gemini-4-argon")
+    assert deployment.max_total_tokens is None
+    assert (deployment.max_input_tokens, deployment.max_output_tokens) == (30_000, 2048)
 
 
 @pytest.mark.parametrize("missing", ("backend", "model"))

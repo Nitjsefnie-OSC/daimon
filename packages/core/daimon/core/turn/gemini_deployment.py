@@ -90,6 +90,9 @@ from pydantic import (
 
 Nonblank = Annotated[str, Field(min_length=1, pattern=r"^\S+$")]
 
+# Models a bounded (token-envelope) fleet worker may run.
+BOUNDED_WORKER_MODELS = (FLASH_PRIMARY, ARGON_MODEL)
+
 
 def _private_storage_credential(
     path: Path, *, storage_until: datetime, current: datetime
@@ -238,7 +241,10 @@ class GeminiPlan(BaseModel):
         spec, drops = worker.spec, worker.declared_drops
         worker.limits.require_profile(INLINE_REUSE)
         bounded = worker.limits.max_input_tokens is not None
-        if bounded and (revision.model != FLASH_PRIMARY or "sandbox" not in drops):
+        if bounded and (revision.model not in BOUNDED_WORKER_MODELS or "sandbox" not in drops):
+            raise AdmissionDenied(reason="backend_unsupported")
+        # Argon runs only bounded; the unbounded path is Flash's 4096-token cap.
+        if revision.model == ARGON_MODEL and not bounded:
             raise AdmissionDenied(reason="backend_unsupported")
         scope = worker.permissions.fleet.scope
         if (
@@ -247,7 +253,7 @@ class GeminiPlan(BaseModel):
             or worker.resources
             or (self.worker_materialization and worker.permissions.seal_ids)
             or revision.profile != self.profile
-            or revision.model not in (FLASH_PRIMARY, WORKER_MODEL)
+            or revision.model not in (FLASH_PRIMARY, WORKER_MODEL, ARGON_MODEL)
             or spec.model != ModelRef(provider="gemini", id=revision.model or "")
             or worker.backend.profile != self.profile
             or worker.backend.model != revision.model
@@ -443,7 +449,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         revision is None
         or revision.model
         not in (
-            (FLASH_PRIMARY, WORKER_MODEL)
+            (FLASH_PRIMARY, WORKER_MODEL, ARGON_MODEL)
             if request.worker is not None
             else selectable_models(INLINE_REUSE.provider)
         )

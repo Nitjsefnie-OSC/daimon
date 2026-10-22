@@ -2168,15 +2168,19 @@ def test_gemini_unknown_or_expanded_execution_envelopes_refuse(update):
         limits.require_profile(get_profile("gemini.inline_reuse"))
 
 
-def test_argon_worker_spec_is_refused_even_when_granted(monkeypatch):
+@pytest.mark.parametrize(
+    ("now", "priced"),
+    [(datetime(2026, 11, 30, tzinfo=UTC), True), (datetime(2026, 12, 1, tzinfo=UTC), False)],
+)
+def test_granted_argon_worker_spec_resolves_only_inside_its_price_window(monkeypatch, now, priced):
     from daimon.core import pricing
 
-    class InIntroWindow(datetime):
+    class Clock(datetime):
         @classmethod
         def now(cls, tz=None):
-            return datetime(2026, 11, 30, tzinfo=UTC)
+            return now
 
-    monkeypatch.setattr(pricing, "datetime", InIntroWindow)
+    monkeypatch.setattr(pricing, "datetime", Clock)
     root = parent("gemini")
     argon = backend_selection("gemini").model_copy(update={"model": "gemini-4-argon"})
     model = ModelRef(provider="gemini", id="gemini-4-argon")
@@ -2186,7 +2190,8 @@ def test_argon_worker_spec_is_refused_even_when_granted(monkeypatch):
         backend_grants=(argon,),
         models=(model,),
     )
-    with pytest.raises(WorkerSpecRefused, match="backend: unsupported"):
-        resolve(root)
-    # The same root on Flash still resolves: only the channel-only model is refused.
-    assert resolve(parent("gemini")).backend == backend_selection("gemini")
+    if priced:
+        assert resolve(root).backend == argon
+    else:
+        with pytest.raises(WorkerSpecRefused, match="backend: unsupported"):
+            resolve(root)
