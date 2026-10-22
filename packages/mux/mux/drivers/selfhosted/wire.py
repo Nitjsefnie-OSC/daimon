@@ -5,6 +5,9 @@ An event validates its data against its type before entering a durable journal.
 Every C3 request carries the nonsecret ``session_id`` query parameter, including
 turn actions and cancellation, so an empty sandbox can restore before handling it.
 The parameter must match the turn body or events path and the sandbox binding.
+
+This module is public: import it as `mux.drivers.selfhosted.wire`. The host, the
+harness and the conformance kit share it; its `__all__` is the protocol surface.
 """
 
 from __future__ import annotations
@@ -28,6 +31,49 @@ from pydantic import (
     model_serializer,
     model_validator,
 )
+
+__all__ = [
+    "ActionRequest",
+    "AgentMessageData",
+    "AgentMessageDeltaData",
+    "CancelResponse",
+    "CheckpointWarningData",
+    "DATA_MODELS",
+    "ErrorData",
+    "Event",
+    "EventData",
+    "EventType",
+    "EventsResponse",
+    "HealthResponse",
+    "HistoryGapData",
+    "ImagePart",
+    "InlineSkill",
+    "InvocationEnvelope",
+    "InvocationRequest",
+    "Limits",
+    "MCPServer",
+    "ModelRequestStartedData",
+    "PROTOCOL",
+    "Part",
+    "RequiresActionData",
+    "ResponseModel",
+    "SKILL_MAX_BYTES",
+    "Skill",
+    "StatusRunningData",
+    "TURN_SKILLS_MAX_BYTES",
+    "TextPart",
+    "ToolResultData",
+    "ToolUseData",
+    "TurnAccepted",
+    "TurnEndedData",
+    "TurnError",
+    "TurnRequest",
+    "URLSkill",
+    "UsageData",
+    "WireModel",
+    "skill_sha256",
+    "validate_skill_path",
+]
 
 PROTOCOL = "daimon-harness/0"
 

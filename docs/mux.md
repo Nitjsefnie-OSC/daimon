@@ -70,7 +70,7 @@ when it supports all nine.
 
 | Profile | Core | Notes |
 | --- | --- | --- |
-| `anthropic.managed_agents` | yes | Every core capability is declared native, but the driver does not implement `reconcile` yet. Steering, stream-cursor replay, environment fork and native schedules are not offered. |
+| `anthropic.managed_agents` | yes | Every core capability is native. `reconcile` reads the session status and the newest 5,000 events; older history is reported as a `history_truncated` gap. Steering, stream-cursor replay, environment fork and native schedules are not offered. |
 | `openai.persistent_workspace` | yes | `reconcile` is emulated from saved items; missed events cannot be replayed. |
 | `openai.conversation_only` | no | No workspace. Runnable for explicitly granted conversation-only fleet workers. |
 | `gemini.inline_reuse` | no | The inline environment expires after inactivity, so workspace persistence is not guaranteed. Its usage reporting is undeclared, so admission refuses it until a driver shows usage observations. |
@@ -351,14 +351,15 @@ listed name exists and has no second path.
 | `mux.state.<module>` | the state protocol and rules |
 | `mux.profiles` | the declared profiles and their lookups |
 | `mux.drivers` | `isolated_ssl_context` |
-| `mux.drivers.anthropic`, `mux.drivers.openai`, `mux.drivers.gemini` | the driver factory and the host-injection API: transports, credential and secret schemas, resource ports, payload and record helpers |
+| `mux.drivers.anthropic`, `mux.drivers.openai`, `mux.drivers.gemini`, `mux.drivers.selfhosted` | the driver factory and the host-injection API: transports, credential and secret schemas, resource ports, payload and record helpers |
 
 Import a driver's names from its package, not from a submodule such as
-`mux.drivers.anthropic.transport`. Submodules and `_`-prefixed modules are
+`mux.drivers.anthropic.transport`. The one public driver submodule is
+`mux.drivers.selfhosted.wire`, the `daimon-harness/0` wire format shared by the
+host, the harness and the conformance kit; it declares its own `__all__`. Submodules and `_`-prefixed modules are
 implementation files and may move. One import-linter contract keeps Daimon's
-own code to this rule. The selfhosted driver is not yet covered, and three
-generic names stay on their submodules: openai `KEY` and `reserved`, and gemini
-`credential`. Two intentional second paths exist: `mux.errors` and
+own code to this rule. Five generic names stay on their submodules: openai
+`KEY` and `reserved`, gemini `credential`, and selfhosted `segment` and `usage`. Two intentional second paths exist: `mux.errors` and
 `mux.contracts.errors`, and `RequiredAction` in `mux.contracts.events` and
 `mux.contracts.actions`.
 

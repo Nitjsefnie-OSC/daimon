@@ -16,7 +16,7 @@ from daimon.core.stores.selfhosted_resources import (
 from mux.contracts.extensions import ExtensionConfig
 from mux.contracts.ids import ModelRef, Scope
 from mux.contracts.resources import Agent, AgentSpec, Environment, EnvironmentSpec
-from mux.drivers.selfhosted.config import HarnessConfig
+from mux.drivers.selfhosted import HarnessConfig
 from mux.errors import ProviderError
 from mux.profiles.selfhosted import LOOP
 from pydantic import ValidationError

@@ -1264,7 +1264,7 @@ class HarnessAuthBinding(McpCredentialBinding):
 
     @model_validator(mode="after")
     def valid_reference(self) -> HarnessAuthBinding:
-        from mux.drivers.selfhosted.config import SESSION_POOL_AUDIENCE, HarnessConfig
+        from mux.drivers.selfhosted import SESSION_POOL_AUDIENCE, HarnessConfig
 
         # A binding authorizes an audience/origin, not an environment's routing.
         # Validate the fixed pool audience in its required routing mode here;

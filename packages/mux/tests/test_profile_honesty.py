@@ -948,12 +948,7 @@ JUSTIFIED: dict[tuple[str, Capability], str] = {}
 # Known overclaims that cannot be fixed by editing the profile. Each is an expected
 # failure that turns into a test error as soon as the driver honours it, so the entry
 # must then be removed.
-PENDING_OVERCLAIMS: dict[tuple[str, Capability], str] = {
-    (
-        "anthropic.managed_agents",
-        "reconcile",
-    ): "core capability; AnthropicEvents.reconcile raises UnsupportedCapability",
-}
+PENDING_OVERCLAIMS: dict[tuple[str, Capability], str] = {}
 
 
 # --------------------------------------------------------------------------- usage grain
