@@ -213,6 +213,8 @@ async def _chat_turn(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN if admin else Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
         )
@@ -675,6 +677,8 @@ async def _setup_thread_origin(world: _World, factory: async_sessionmaker[AsyncS
             configuration_target_ma_agent_id="agent_helper",
             configuration_target_name="helper",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + timedelta(minutes=10),
             now=now,
             is_setup=True,
@@ -839,6 +843,8 @@ async def _reply(
         responder_ma_agent_id="agent_helper",
         responder_name="helper",
         role=auth.role,
+        sender_foreign=False,
+        shared_channel=False,
         message_text=text,
     ) as origin:
         yield str(origin.id)

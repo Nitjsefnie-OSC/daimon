@@ -340,7 +340,7 @@ async def test_a_worker_is_bounded_by_its_run(
     with pytest.raises(FleetConflict, match="exists with other spec_digest"):
         await _worker(db_session_factory, run, 0, digest="d2")
     with pytest.raises(FleetConflict, match="allows 4 workers"):
-        await _worker(db_session_factory, run, 4)
+        await _worker(db_session_factory, run, 8)
     with pytest.raises(FleetConflict, match="outlast"):
         await fleet.add_worker(
             db_session_factory,
@@ -357,6 +357,11 @@ async def test_a_worker_is_bounded_by_its_run(
             deadline_at=LATER + timedelta(seconds=1),
             max_turns=1,
         )
+    for ordinal in (1, 2, 3):
+        await _worker(db_session_factory, run, ordinal)
+    # Four workers hold all four slots; only a spawn refused at admission frees one.
+    with pytest.raises(FleetConflict, match="allows 4 workers"):
+        await _worker(db_session_factory, run, 4)
 
 
 async def test_a_reviewer_must_be_another_worker_of_the_same_run(

@@ -131,6 +131,7 @@ from daimon.core.turn.prepare import bind_session
 from daimon.core.turn.protection import ProtectionState
 from daimon.core.turn.run import RunOutcome, run_prepared_turn
 from daimon.core.turn.slots import QUEUE_TIMED_OUT_TEXT, wait_for_ticket
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_queue import TurnTicket
 from daimon.core.wizard.answers import format_answer_block
 from daimon.core.wizard.apply import apply
@@ -486,6 +487,7 @@ async def run_wizard_submit_turn_observed(
             admission = await admit(
                 bot.runtime.turn_deps,
                 tenant_id=row.tenant_id,
+                requester_org=RequesterOrg.HOST,
                 platform="discord",
                 external_user_id=str(interaction.user.id),
                 channel_id=parent_channel_id,
@@ -524,6 +526,8 @@ async def run_wizard_submit_turn_observed(
                 _log.info("wizard_submit.skipped.agent_pinned_elsewhere", short_id=row.id)
             elif err.reason == "own_agents_only":
                 _log.info("wizard_submit.skipped.channel_isolated", short_id=row.id)
+            elif err.reason == "client_requester":
+                _log.info("wizard_submit.skipped.client_requester", short_id=row.id)
             elif err.reason == "balance_depleted":
                 _log.info("wizard_submit.skipped.over_balance", tenant_id=str(row.tenant_id))
             elif err.reason == "channel_budget_exceeded":

@@ -241,3 +241,81 @@ async def test_publication_and_run_end_race_cannot_leave_or_resurrect_a_wake(poo
         assert not await enqueue_worker_finished(
             db, tenant_id=run.tenant_id, run_id=run.id, now=_NOW
         )
+
+
+async def _one_wait(sm):
+    run = await _run(sm, max_workers=2)
+    worker = await _worker(sm, run, 0)
+    async with sm.begin() as db:
+        row = await _arm(db, run, [worker])
+        assert await _finish_batch(db, run, worker)
+    return run, await _read(sm, row.idempotency_key)
+
+
+async def test_a_run_owed_a_wake_refuses_to_end_unless_waking(pooled):
+    # #1288 review: the root's last answer predates the result; its wake must deliver.
+    run, row = await _one_wait(pooled)
+    async with pooled() as db:
+        assert await task_continuations.count_run_wakes(db, run=run) == 1
+        assert await task_continuations.count_run_wakes(db, run=run, exclude_id=row.id) == 0
+    with pytest.raises(FleetConflict) as refused:
+        await fleet.set_run_status(
+            pooled,
+            tenant_id=run.tenant_id,
+            run_id=run.id,
+            expected_version=run.version,
+            status="failed",
+            unless_waking=True,
+        )
+    assert refused.value.reason == "wake_pending"
+    assert await _read(pooled, row.idempotency_key) == row
+    actual, _ = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
+    assert actual == run
+
+
+async def test_the_wake_that_ends_its_run_keeps_its_own_claim_to_settle(pooled):
+    run, row = await _one_wait(pooled)
+    claim = await claim_wake(pooled, idempotency_key=row.idempotency_key, now=_NOW)
+    assert claim is not None and await start_wake(pooled, claim, now=_NOW)
+    ended = await fleet.set_run_status(
+        pooled,
+        tenant_id=run.tenant_id,
+        run_id=run.id,
+        expected_version=run.version,
+        status="failed",
+        wake_id=row.id,
+        unless_waking=True,
+    )
+    assert ended.status == "failed"
+    assert (await _read(pooled, row.idempotency_key)).status == "claimed"
+    assert await settle_wake(pooled, claim, status="delivered", now=_NOW)
+    assert (await _read(pooled, row.idempotency_key)).status == "delivered"
+
+
+@pytest.mark.parametrize("unless_waking", [True, False])
+async def test_host_settle_defers_to_an_owed_wake_or_retires_a_redundant_one(
+    pooled, monkeypatch, unless_waking
+):
+    from decimal import Decimal
+
+    from daimon.core import fleet_orchestration
+    from daimon.core.fleet_orchestration import FleetRefused, HostFleetPorts
+
+    # Root scope is the unchanged `_scope` check; this exercises the store transaction.
+    monkeypatch.setattr(fleet_orchestration, "_scope", lambda parent, run: None)
+    run, row = await _one_wait(pooled)
+    ports = HostFleetPorts(pooled, prices={}, markup=Decimal(1))
+    parent = object()
+    if unless_waking:
+        with pytest.raises(FleetRefused, match="wake_pending"):
+            await ports.settle_run(parent, run, "completed", wake_id=None, unless_waking=True)
+        actual, _ = await fleet.run_status(pooled, tenant_id=run.tenant_id, run_id=run.id)
+        assert actual == run  # not even moved to collecting
+        assert await _read(pooled, row.idempotency_key) == row
+        assert await ports.pending_wakes(parent, run, exclude=None) == 1
+        assert await ports.pending_wakes(parent, run, exclude=row.id) == 0
+    else:
+        # The root saw the result: a wake would only repeat it.
+        ended = await ports.settle_run(parent, run, "completed", wake_id=None, unless_waking=False)
+        assert ended.status == "completed"
+        assert (await _read(pooled, row.idempotency_key)).status == "cancelled"

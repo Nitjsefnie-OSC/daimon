@@ -404,6 +404,7 @@ class DiscordTurnLifecycle:
         # no progress edit, no terminal card, no replacement for a missing card.
         self._thread_stopped = thread_stopped or (lambda: False)
         self._fleet_card = fleet_card
+        self._fleet_notice: str | None = None
         self._requester_id = requester_id
         # Only an admin sees the request ref on a stop or failure notice.
         self._requester_is_admin = requester_is_admin
@@ -1246,7 +1247,9 @@ class DiscordTurnLifecycle:
                 self._skip_terminal()
                 return
             if self._fleet_card is not None:
-                allowed, notice = await self._fleet_card.summary_gate()
+                from daimon.adapters.discord.posted_controls.fleet import fleet_result_seen
+
+                allowed, notice = await self._fleet_card.summary_gate(seen=fleet_result_seen(state))
                 if not allowed:
                     if notice is None:
                         self._terminal = True
@@ -1256,6 +1259,9 @@ class DiscordTurnLifecycle:
                     state = dataclasses.replace(
                         state, content=[TextBlock(kind="text", text=notice)]
                     )
+                else:
+                    # A partial result names its missing workers above the answer.
+                    self._fleet_notice = notice
             await self._deliver_success(state)
         finally:
             self._mark_ended()
@@ -1267,6 +1273,8 @@ class DiscordTurnLifecycle:
         response_text = self._final_response(state)
         if self._deferred_sealed_text:
             response_text = "\n\n".join([*self._deferred_sealed_text, response_text])
+        if self._fleet_notice:
+            response_text = "\n\n".join(filter(None, [self._fleet_notice, response_text]))
         if self._unprompted and not response_text:
             # No final answer on a turn nobody asked for: leave the thread as
             # it was. A tool trail with nothing to say is noise here, not a
@@ -1578,6 +1586,12 @@ class DiscordTurnLifecycle:
                 self._skip_terminal()
                 return
             await self._deliver_failure(state, err)
+            if self._fleet_card is not None:
+                # The error card is up; the fleet card must not stay "running".
+                try:
+                    await self._fleet_card.end_after_error()
+                except Exception:
+                    log.warning("turn.fleet_card_error_end_failed", exc_info=True)
         finally:
             self._mark_ended()
             self._card_writes.queue_repair()

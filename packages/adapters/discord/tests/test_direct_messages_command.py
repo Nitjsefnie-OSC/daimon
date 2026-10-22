@@ -74,7 +74,9 @@ async def test_dm_move_drops_system_notices_such_as_a_sealed_threads_created_not
     monkeypatch.setattr(
         direct_messages,
         "admit",
-        AsyncMock(return_value=MagicMock(source_sealed=False, memory_read_only=False)),
+        AsyncMock(
+            return_value=MagicMock(source_sealed=False, source_shared=False, memory_read_only=False)
+        ),
     )
     start_dm = AsyncMock()
     monkeypatch.setattr(direct_messages, "start_dm", start_dm)

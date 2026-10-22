@@ -151,7 +151,7 @@ async def handle_here_command(runtime: SlackRuntime, payload: dict[str, Any]) ->
                 public_mcp_url=str(runtime.settings.mcp.public_url)
                 if runtime.settings.mcp.public_url is not None
                 else None,
-                is_admin=await resolve_is_admin(client, user_id=user_id),
+                is_admin=await resolve_is_admin(client, user_id=user_id, host_team_id=team_id),
                 caller_account_id=principal.account_id if principal else None,
                 resolve_setter_display=lambda external_id: _setter_display_name(
                     client, external_id

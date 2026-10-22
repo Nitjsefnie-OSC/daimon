@@ -26,6 +26,7 @@ from daimon.core.turn.admission import AdmissionDecision, AdmissionObserver, adm
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied, MissingTurnConfigError
 from daimon.core.turn.notices import admission_refusal_text
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.admission_evidence import AdmissionEffects, admission_edge
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.discord_surface import OfflineDiscordGateway
@@ -385,6 +386,7 @@ async def test_observer_preserves_real_acceptance_denial_and_warm_dispatch(
 
     kwargs = dict(
         tenant_id=uuid.UUID(scope.tenant_id),
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="103",
         channel_id="101",
@@ -431,6 +433,7 @@ async def test_non_decision_errors_do_not_create_an_admission_receipt(
         await admit(
             deps,
             tenant_id=uuid.UUID(scope.tenant_id),
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="103",
             channel_id="101",

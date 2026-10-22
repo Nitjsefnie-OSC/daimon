@@ -9,6 +9,45 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 - Agent edits now reach an open self-hosted conversation at its next message: changed instructions, model, tools, skills or MCP servers apply on the same session, so workspace files stay. A turn already running finishes on its old configuration and its usage is metered at the model and tariff it used. Environment changes and archived agents still require a fresh session.
 
+- Fleet: whenever a worker is cancelled, the host logs why (`fleet.worker_cancel`, with a reason such as `shutdown`, `budget`, `usage_unavailable`, `run_deadline` or `terminal`), so a worker interrupted at send is no longer left without a cause.
+- Gemini agents need no per-agent setup: one tenant-wide template row in the provider runtime manifest (`"root_materialization": true`) serves every agent switched to Gemini. Each agent version's counterpart is published on its first turn and reused after that. Channel and agent rows now serve only their own kind of turn.
+
+- Fleet: a plain-language Gemini worker no longer fails with a provider 400. When the caller gives no token limits, a Gemini Flash worker gets a bounded envelope derived from its own prompt and budget (max input = the prompt's bytes plus headroom; max output = what the rest of its budget buys, at most 65,536 tokens), and an unbounded Gemini worker whose prompt clearly exceeds the 4096-token turn cap is refused at spawn instead of being sent.
+- Switching an agent to another model provider can name the model: "switch agent to gemini-4-argon" (Gemini: gemini-3.8-flash or gemini-4-argon). The card names the model, says where the switch applies (every channel on the server for the default agent), and lists what won't be available, such as memory. Only where agent backends are on.
+
+- Fleet: slow admissions taking turns on the tenant fleet lock no longer make the budget watcher cancel every worker in the run. While the lock is busy the watcher keeps checking every worker's spend from a lock-free read-only snapshot, logs which transaction holds the lock, and fails closed when one transaction holds it for 10 s or it stays busy for 60 s; a budget read granted late in its lock wait is no longer counted as a slow read.
+
+- Fleet: a plain-language Gemini worker is no longer refused for its deadline. A worker's default deadline is now the sooner of the run's deadline and the Gemini worker runtime limit (120 s), and a later deadline is shortened the same way; Anthropic and OpenAI workers keep the run's deadline.
+- Fleet: a grant whose per-provider caps add up to more than its run budget is refused when it is previewed or set ("fleet provider limits exceed budget"), instead of being accepted and then failing every spawn. `fleet_spawn` takes `planned_models`, the model of each planned worker, so each provider's cap is shared only by the planned workers on that provider; one worker per provider can use its whole provider cap. A plain-language Gemini worker's derived token envelope also counts a reviewer's embedded reviewed result and keeps its worst case within the deployment's per-turn hold.
+
+- Fleet: a plain-language ask such as "compare X vs Y with 3 workers" now works. `fleet_spawn` takes a `task` and an optional granted `model` and fills the rest: the turn's run, the granted backend, an even share of the budget left per remaining worker slot (or per planned worker, when the root passes `planned_workers`), and a spawn refused at admission no longer uses up one of the run's worker slots, and the root's frozen deadline (a later deadline is shortened to it); an exhausted budget is refused before a worker slot is used. `fleet_status` and `fleet_collect` default to the turn's run. The root's own model is allowed in its fleet grant without being listed, and a worker on another model than the root's can declare that it runs without the root's model controls (such as effort); `task` workers do this automatically. Only agents with a fleet grant are affected; every grant cap still applies.
+- Provider runtime manifest: a row for one channel with `"*"` accounts now wins over a deployment-wide `"*"` default for that channel, as documented, instead of both refusing as ambiguous. Rows that name different scope fields, or the same ones, still refuse.
+
+- Fleet: a plain-language ask such as "compare X vs Y with 3 workers" now works. `fleet_spawn` takes a `task` and an optional granted `model` and fills the rest: the turn's run, the granted backend, an even share of the budget left per remaining worker slot, and the root's frozen deadline (a later deadline is shortened to it); an exhausted budget is refused before a worker slot is used. `fleet_status` and `fleet_collect` default to the turn's run. The root's own model is allowed in its fleet grant without being listed, and a worker on another model than the root's can declare that it runs without the root's model controls (such as effort); `task` workers do this automatically. Only agents with a fleet grant are affected; every grant cap still applies.
+
+- A turn held to its channel (its requester is from another organisation, or the channel is shared with one) uses a memory of its own for that channel and never sees the agent's shared memory or anyone's personal memory; shared and personal memory never see the channel's. `/memory` in such a channel shows the channel's memory, and `/memory mine` and `forget-mine` say personal memory is not used there. A routine posting into a shared channel runs held the same way, and its result is never sent by direct message instead. A Teams `memory` answer for a shared channel is never moved to the 1:1 chat. A session that changes memory this way starts clean.
+
+- Teams: people from another organisation are held to the channel they asked in and cannot use DMs.
+- A turn asked by someone from another organisation, or in a channel shared with one, can be held to that channel (groundwork; Teams behaviour is unchanged).
+
+- Slack: an external (Slack Connect) member's role is never taken from their own workspace, a mention from one is refused before anything is stored, and their queued follow-ups no longer run.
+
+- Slack: people from another workspace in a Slack Connect channel can mention Daimon as plain users, held to that channel, and every turn in a shared channel is held to it. Re-apply the app manifest to subscribe `channel_shared`, `channel_unshared` and `member_joined_channel`.
+
+- A conversation that moves to a different memory store starts clean: nothing from the old session is carried over, and the old session is not handed back while a turn is still running in it.
+
+- **The "Working on it…" card shows more of the agent's progress.** On Discord,
+  Slack and Teams it always keeps the agent's last three short updates, oldest
+  first; `DAIMON_TURN__STATUS_LOG` now only decides whether an answer keeps its
+  messages apart. Built-in tools add one safe detail to their line: a web search
+  its query, a web fetch the host name, a file read, write or edit the file's
+  base name; other tools stay name-only. Progress plans, off by default, let the
+  agent keep a short checklist of a longer task's steps on the card: turn them on
+  with `DAIMON_PROGRESS_PLANS__MODE` or per workspace, channel or thread with
+  `set_progress_plans` (`get_progress_plans` reports why), under thread
+  participation's cascade and permissions, Slack included. The default agent's
+  prompt changes, so existing sessions restart once after the upgrade.
+
 - Keep self-hosted tool cleanup independent of PID allocation counters and accept client cursor fences when remote recovery storage is empty.
 
 - Isolate self-hosted checkpoint exporters from tool cleanup, retry interrupted exports, and keep sessions sealed when process termination cannot be verified.

@@ -84,6 +84,10 @@ class OpenAIDeployment(BaseModel):
     worker_materialization: bool = Field(
         default=False, strict=True, exclude_if=lambda value: not value
     )
+    # Agent templates are Gemini-only for now; the field keeps one plan protocol.
+    root_materialization: bool = Field(
+        default=False, strict=True, exclude_if=lambda value: not value
+    )
     source_agent_id: UUID | None = None
     source_agent_version: Annotated[int, Field(gt=0, strict=True)] | None = None
     counterpart_catalog_id: Nonblank | None = None
@@ -102,6 +106,8 @@ class OpenAIDeployment(BaseModel):
                 )
         elif self.environment_id is None:
             raise ValueError("persistent-workspace deployments require an environment identity")
+        if self.root_materialization:
+            raise ValueError("agent templates are not available for OpenAI yet")
         validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
         if self.source_capabilities is not None:
             if (

@@ -54,6 +54,8 @@ async def test_queued_message_cannot_settle_preview_created_during_running_turn(
         responder_ma_agent_id="agent",
         responder_name="Agent",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     )
     async with (
         turn_origin(
@@ -147,6 +149,8 @@ async def test_a_github_grant_proposal_is_approved_only_by_a_whole_message_yes(
         responder_ma_agent_id="agent",
         responder_name="Agent",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     )
     grant = dict(
         tenant_id=tenant.id,
@@ -195,6 +199,8 @@ async def test_simultaneous_origins_keep_separate_snapshots_and_cleanup(
             configuration_target_ma_agent_id="agent_specialist",
             configuration_target_name="specialist",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as first,
         turn_origin(
             db_session_factory,
@@ -208,6 +214,8 @@ async def test_simultaneous_origins_keep_separate_snapshots_and_cleanup(
             configuration_target_ma_agent_id="agent_specialist",
             configuration_target_name="specialist",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ) as second,
     ):
         assert first.id != second.id, "each simultaneous execution needs distinct authority"
@@ -266,6 +274,8 @@ async def test_failed_turn_removes_origin(
             responder_ma_agent_id="agent_daimon",
             responder_name="Daimon",
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
         ) as origin:
             origin_id = origin.id
             raise RuntimeError("failed execution")
