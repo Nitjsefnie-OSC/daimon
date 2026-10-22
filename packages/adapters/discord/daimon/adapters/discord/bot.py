@@ -3866,26 +3866,13 @@ class DaimonBot(commands.Bot):
             else None
         )
 
-        # The follow-up runs as the requester, so it carries their role as it
-        # stands NOW -- re-read from the guild, never from anything the form
-        # or the row recorded. A lookup that fails runs the turn as USER.
+        # Watches require a complete REST-only owner snapshot and fail closed.
+        # Other continuations retain their existing requester-role resolution.
         if row.reason == "watch_fired":
-            from daimon.core.stores.tenants import get_tenant
-
-            async with self.runtime.sessionmaker() as db:
-                tenant = await get_tenant(db, tenant_id)
-            if (
-                tenant is None
-                or tenant.archived_at is not None
-                or tenant.external_id != str(thread.guild.id)
-                or row.thread_id != str(thread.id)
-                or row.parent_channel_id != str(thread.parent_id)
-            ):
-                raise AdmissionDenied(reason="invoker_not_allowed")
-            member = await require_watch_thread_access(self.runtime.sessionmaker, row, thread)
+            member = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
             role = (
                 Role.ADMIN
-                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
+                if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
                 else Role.USER
             )
             _role_ids = member_role_ids(member)
@@ -4001,10 +3988,10 @@ class DaimonBot(commands.Bot):
                 seed = await watch_seed(db, row, now=datetime.now(UTC))
             if seed is None:
                 raise AdmissionDenied(reason="runs_elsewhere")
-            member = await require_watch_thread_access(self.runtime.sessionmaker, row, thread)
+            member = await require_watch_thread_access(self.runtime.sessionmaker, row, self)
             live_role = (
                 Role.ADMIN
-                if is_member_guild_admin(member, guild_owner_id=thread.guild.owner_id)
+                if is_member_guild_admin(member, guild_owner_id=member.guild.owner_id)
                 else Role.USER
             )
             if live_role is not role or set(member_role_ids(member)) != set(_role_ids):

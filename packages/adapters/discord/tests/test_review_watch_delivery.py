@@ -27,6 +27,7 @@ from daimon.testing.ma import (
 from .harness import make_bot
 from .test_continuation_dispatch_entry import _make_guild, _make_member, _make_runtime, _make_thread
 from .watch_fixtures import (
+    WatchDiscordRest,
     cached_watch_session,
     enrolled_page_watch,
     watch_admission_patches,
@@ -93,11 +94,11 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
         async def __aiter__(self):
             await asyncio.wait_for(user_sent.wait(), timeout=5)
             if mode == "private_removed_during_turn":
-                thread.fetch_member.side_effect = discord.NotFound(
+                rest.membership_error = discord.NotFound(
                     MagicMock(status=404, reason="gone"), "Unknown Member"
                 )
             elif mode == "history_revoked_during_turn":
-                parent.permissions_for.return_value.read_message_history = False
+                rest.permissions.read_message_history = False
             yield sse_response(
                 [
                     {
@@ -153,19 +154,15 @@ async def test_review_revocation_before_final_delivery(db_session_factory, mode,
     )
     runtime = replace(runtime, anthropic=fake_client, turn_deps=deps)
     bot = make_bot(runtime)
+    rest = WatchDiscordRest(bot)
     guild = _make_guild(member=_make_member(admin=False))
     guild.id = 710000099
-    guild.fetch_roles = AsyncMock(return_value=[])
     thread = _make_thread(guild=guild)
     thread.locked = False
     thread.permissions_for.return_value = discord.Permissions(
         view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
-    parent = MagicMock(spec=discord.TextChannel)
-    parent.permissions_for.return_value = thread.permissions_for.return_value
-    guild.fetch_channel = AsyncMock(
-        side_effect=lambda channel_id: thread if channel_id == thread.id else parent
-    )
+    rest.private = True
     thread.type = discord.ChannelType.private_thread
     thread.fetch_member = AsyncMock(return_value=MagicMock())
     bot.get_channel = MagicMock(return_value=thread)

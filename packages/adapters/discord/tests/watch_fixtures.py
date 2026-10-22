@@ -193,3 +193,103 @@ def watch_admission_patches(bind):
         patch("daimon.adapters.discord.bot.bind_session", side_effect=bind),
     ):
         yield
+
+
+class WatchDiscordRest:
+    """Mutable REST payloads, independent of all gateway fixtures and caches."""
+
+    def __init__(self, client):
+        import discord
+
+        self.owner_id = "1"
+        self.permissions = discord.Permissions(
+            view_channel=True, read_message_history=True, send_messages_in_threads=True
+        )
+        self.private = False
+        self.locked = False
+        self.overwrites = []
+        self.member_error = None
+        self.membership_error = None
+        self.channel_error = None
+        self.roles_error = None
+        self.guild_error = None
+        self.parent_error = None
+        self.http = client.http
+        self.http.get_guild = AsyncMock(side_effect=self.guild)
+        self.http.get_roles = AsyncMock(side_effect=self.roles)
+        self.http.get_member = AsyncMock(side_effect=self.member)
+        self.http.get_channel = AsyncMock(side_effect=self.channel)
+        self.http.get_thread_member = AsyncMock(side_effect=self.membership)
+
+    def guild(self, guild_id, **kwargs):
+        if self.guild_error:
+            raise self.guild_error
+        assert guild_id == 710000099
+        return {"id": str(guild_id), "name": "REST guild", "owner_id": self.owner_id, "roles": []}
+
+    def roles(self, guild_id):
+        if self.roles_error:
+            raise self.roles_error
+        assert guild_id == 710000099
+        return [
+            {"id": "710000099", "name": "@everyone", "permissions": "0"},
+            {
+                "id": "77",
+                "name": "reader",
+                "permissions": str(self.permissions.value),
+                "position": 1,
+            },
+        ]
+
+    def member(self, guild_id, user_id):
+        if self.member_error:
+            raise self.member_error
+        assert (guild_id, user_id) == (710000099, 555)
+        return {
+            "user": {"id": "555", "username": "owner", "discriminator": "0", "avatar": None},
+            "roles": ["77"],
+            "flags": 0,
+        }
+
+    def channel(self, channel_id):
+        if self.channel_error:
+            raise self.channel_error
+        if channel_id == 4241:
+            if self.parent_error:
+                raise self.parent_error
+            return {
+                "id": "4241",
+                "guild_id": "710000099",
+                "type": 0,
+                "name": "REST parent",
+                "position": 0,
+                "permission_overwrites": self.overwrites,
+            }
+        assert channel_id == 4242
+        return {
+            "id": "4242",
+            "guild_id": "710000099",
+            "parent_id": "4241",
+            "owner_id": "555",
+            "type": 12 if self.private else 11,
+            "name": "REST thread",
+            "message_count": 0,
+            "member_count": 1,
+            "thread_metadata": {
+                "archived": False,
+                "auto_archive_duration": 1440,
+                "archive_timestamp": "2026-10-22T00:00:00+00:00",
+                "locked": self.locked,
+            },
+        }
+
+    def membership(self, thread_id, user_id):
+        if self.membership_error:
+            raise self.membership_error
+        assert (thread_id, user_id) == (4242, 555)
+        return {
+            "id": "4242",
+            "user_id": "555",
+            "join_timestamp": "2026-10-22T00:00:00+00:00",
+            "flags": 0,
+        }

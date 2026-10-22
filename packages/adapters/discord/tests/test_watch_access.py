@@ -1,116 +1,169 @@
-"""Watch ACLs use REST roles and thread state, even when gateway caches disagree."""
+"""Every watch decision uses REST proof; poisoned gateway state is unreachable."""
 
-from unittest.mock import AsyncMock, MagicMock
+from unittest.mock import MagicMock
 
 import discord
 import pytest
 from daimon.adapters.discord.watch_access import require_watch_thread_access
 from daimon.core.stores import watches
+from daimon.core.stores.task_continuations import get_continuation
 from daimon.core.turn.errors import AdmissionDenied
 
-from .watch_fixtures import enrolled_page_watch
+from .watch_fixtures import WatchDiscordRest, enrolled_page_watch
+
+
+class PoisonCache:
+    def __getattribute__(self, name):
+        raise AssertionError(f"Watch authorization read gateway cache attribute: {name}")
+
+
+def gateway_with_stale_owner():
+    client = discord.Client(intents=discord.Intents.none())
+    state = client._connection
+    guild = discord.Guild(
+        data={
+            "id": "710000099",
+            "name": "cached",
+            "owner_id": "555",
+            "roles": [
+                {"id": "710000099", "name": "@everyone", "permissions": "0"},
+                {
+                    "id": "77",
+                    "name": "stale admin",
+                    "permissions": str(discord.Permissions.all().value),
+                },
+            ],
+        },
+        state=state,
+    )
+    member = discord.Member(
+        data={
+            "user": {"id": "555", "username": "cached", "discriminator": "0", "avatar": None},
+            "roles": ["77"],
+            "flags": 0,
+        },
+        guild=guild,
+        state=state,
+    )
+    guild._members[555] = member
+    state._guilds[guild.id] = guild
+    assert member.guild_permissions.administrator  # The former-owner repro.
+    return client
 
 
 @pytest.mark.fresh_schema
 @pytest.mark.parametrize(
     "mode",
     [
-        "stale_view",
+        "former_owner_removed",
+        "former_owner_hidden",
+        "former_owner_locked",
         "stale_history",
         "stale_manager",
         "stale_admin",
-        "roles_failed",
-        "locked",
         "locked_manager",
         "fresh_manager",
+        "poison_public",
+        "poison_private",
+        "poison_manager",
+        "guild_failed",
+        "roles_failed",
+        "member_failed",
+        "thread_failed",
+        "parent_failed",
+        "membership_failed",
+        "parent_overwrite",
+        "member_timeout",
+        "current_owner",
     ],
 )
-async def test_watch_uses_rest_roles_and_locked_state(db_session_factory, monkeypatch, mode):
+async def test_watch_authority_is_entirely_rest(db_session_factory, monkeypatch, mode):
     factory, _, _, _, _, watch, key = await enrolled_page_watch(db_session_factory, monkeypatch)
-    from daimon.core.stores.task_continuations import get_continuation
-
     async with factory() as db:
         row = await get_continuation(db, idempotency_key=key)
-    state = MagicMock()
-    allowed = discord.Permissions(
-        view_channel=True, read_message_history=True, send_messages_in_threads=True
-    )
-    cached = discord.Permissions(allowed.value)
-    cached.manage_threads = True
-    cached.administrator = mode == "stale_admin"
-    role_data = {"id": "77", "name": "reader", "permissions": str(cached.value)}
-    guild = discord.Guild(
-        data={
-            "id": "710000099",
-            "name": "test",
-            "owner_id": "1",
-            "roles": [
-                {"id": "710000099", "name": "@everyone", "permissions": "0"},
-                role_data,
-            ],
-        },
-        state=state,
-    )
-    user_data = {"id": "555", "username": "owner", "discriminator": "0", "avatar": None}
-    state.store_user.return_value = discord.User(state=state, data=user_data)
-    member = discord.Member(
-        data={"user": user_data, "roles": ["77"], "flags": 0}, guild=guild, state=state
-    )
-    parent = discord.TextChannel(
-        state=state,
-        guild=guild,
-        data={
-            "id": "4241",
-            "type": 0,
-            "name": "parent",
-            "position": 0,
-            "permission_overwrites": [],
-        },
-    )
-    thread = MagicMock(spec=discord.Thread)
-    thread.id = 4242
-    thread.parent_id = 4241
-    thread.guild = guild
-    thread.type = discord.ChannelType.private_thread
-    thread.locked = mode in {"locked", "locked_manager"}
-    thread.fetch_member = AsyncMock(return_value=MagicMock())
-    if mode == "stale_view":
-        allowed.view_channel = False
+    client = gateway_with_stale_owner()
+    rest = WatchDiscordRest(client)
+    rest.private = True
+    denied = discord.NotFound(MagicMock(status=404, reason="gone"), "gone")
+    if mode.startswith("poison_"):
+        # Any read of a cached guild, role, member, user, parent or thread --
+        # even cache lookup machinery -- fails the test instead of granting access.
+        client._connection = PoisonCache()
+        client.get_guild = PoisonCache()
+        client.get_channel = PoisonCache()
+        client.get_user = PoisonCache()
+        rest.private = mode != "poison_public"
+    if mode in {
+        "former_owner_removed",
+        "stale_manager",
+        "stale_admin",
+        "fresh_manager",
+        "poison_manager",
+    }:
+        rest.membership_error = denied
+    if mode == "former_owner_hidden":
+        rest.permissions.view_channel = False
     if mode == "stale_history":
-        allowed.read_message_history = False
-    if mode in {"locked_manager", "fresh_manager"}:
-        allowed.manage_threads = True
-    if mode in {"stale_manager", "stale_admin", "fresh_manager"}:
-        thread.fetch_member.side_effect = discord.NotFound(
-            MagicMock(status=404, reason="gone"), "Unknown Member"
+        rest.permissions.read_message_history = False
+    if mode in {"former_owner_locked", "locked_manager"}:
+        rest.locked = True
+    if mode in {"locked_manager", "fresh_manager", "poison_manager"}:
+        rest.permissions.manage_threads = True
+    if mode == "parent_overwrite":
+        rest.overwrites = [
+            {
+                "id": "77",
+                "type": 0,
+                "allow": "0",
+                "deny": str(discord.Permissions(view_channel=True).value),
+            }
+        ]
+    if mode == "member_timeout":
+        member_payload = rest.member(710000099, 555)
+        member_payload["communication_disabled_until"] = "2099-01-01T00:00:00+00:00"
+        rest.http.get_member.side_effect = lambda *_: member_payload
+    if mode == "current_owner":
+        rest.owner_id = "555"
+        rest.permissions = discord.Permissions.none()
+        rest.locked = True
+        rest.membership_error = denied
+    failures = {
+        "guild_failed": "guild_error",
+        "roles_failed": "roles_error",
+        "member_failed": "member_error",
+        "thread_failed": "channel_error",
+        "parent_failed": "parent_error",
+        "membership_failed": "membership_error",
+    }
+    if mode in failures:
+        setattr(
+            rest,
+            failures[mode],
+            discord.Forbidden(MagicMock(status=403, reason="denied"), "denied"),
         )
-    fresh_role = discord.Role(
-        state=state, guild=guild, data=role_data | {"permissions": str(allowed.value)}
-    )
-    monkeypatch.setattr(discord.Guild, "fetch_member", AsyncMock(return_value=member))
-    monkeypatch.setattr(
-        discord.Guild, "fetch_roles", AsyncMock(return_value=[guild.default_role, fresh_role])
-    )
-    monkeypatch.setattr(
-        discord.Guild,
-        "fetch_channel",
-        AsyncMock(side_effect=lambda channel_id: thread if channel_id == thread.id else parent),
-    )
-    if mode == "roles_failed":
-        guild.fetch_roles.side_effect = discord.Forbidden(
-            MagicMock(status=403, reason="denied"), "denied"
-        )
-    # Cache grants Manage Threads (and possibly Administrator) throughout.
-    assert member.guild_permissions.manage_threads
-    if mode in {"locked_manager", "fresh_manager"}:
-        verified = await require_watch_thread_access(factory, row, thread)
-        assert verified.guild_permissions.manage_threads
-        thread.fetch_member.assert_not_awaited()
+    allowed = mode in {
+        "locked_manager",
+        "fresh_manager",
+        "poison_public",
+        "poison_private",
+        "poison_manager",
+        "current_owner",
+    }
+    if allowed:
+        member = await require_watch_thread_access(factory, row, client)
+        assert member.guild.owner_id == int(rest.owner_id)
+        assert member.display_name == "owner"  # Never the cached user named "cached".
+        if rest.permissions.manage_threads or mode == "current_owner" or not rest.private:
+            rest.http.get_thread_member.assert_not_awaited()
+        else:
+            rest.http.get_thread_member.assert_awaited_once_with(4242, 555)
     else:
         with pytest.raises(AdmissionDenied):
-            await require_watch_thread_access(factory, row, thread)
+            await require_watch_thread_access(factory, row, client)
         async with factory() as db:
             paused = await watches.get_watch(db, watch.id)
         assert paused.status == "paused"
         assert paused.source_state["reason"].startswith("Watch paused:")
-    assert member.guild_permissions.manage_threads  # Original guild cache was never mutated.
+        if mode in {"former_owner_removed", "stale_manager", "stale_admin"}:
+            rest.http.get_thread_member.assert_awaited_once_with(4242, 555)
+    rest.http.get_guild.assert_awaited_once_with(710000099, with_counts=False)

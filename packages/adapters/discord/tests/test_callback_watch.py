@@ -27,6 +27,7 @@ from daimon.testing.ma import (
 from .harness import make_bot
 from .test_continuation_dispatch_entry import _make_guild, _make_member, _make_runtime, _make_thread
 from .watch_fixtures import (
+    WatchDiscordRest,
     cached_watch_session,
     enrolled_page_watch,
     watch_admission_patches,
@@ -160,37 +161,33 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
     )
     runtime = replace(runtime, anthropic=fake_client, turn_deps=deps)
     bot = make_bot(runtime)
+    rest = WatchDiscordRest(bot)
     guild = _make_guild(member=_make_member(admin=False))
     if mode == "revoked_owner":
         guild = _make_guild()
+        rest.member_error = discord.NotFound(MagicMock(status=404, reason="gone"), "gone")
     guild.id = 710000099
-    guild.fetch_roles = AsyncMock(return_value=[])
     thread = _make_thread(guild=guild)
     thread.locked = False
     thread.permissions_for.return_value = discord.Permissions(
         view_channel=True, read_message_history=True, send_messages_in_threads=True
     )
-    parent = MagicMock(spec=discord.TextChannel)
-    parent.permissions_for.return_value = thread.permissions_for.return_value
-    guild.fetch_channel = AsyncMock(
-        side_effect=lambda channel_id: thread if channel_id == thread.id else parent
-    )
     thread.type = discord.ChannelType.public_thread
     if mode.startswith("private_"):
+        rest.private = True
         thread.type = discord.ChannelType.private_thread
-        thread.fetch_member = AsyncMock(return_value=MagicMock())
         if mode in {"private_removed", "private_manager"}:
-            thread.fetch_member.side_effect = discord.NotFound(
+            rest.membership_error = discord.NotFound(
                 MagicMock(status=404, reason="gone"), "Unknown Member"
             )
         if mode == "private_manager":
-            parent.permissions_for.return_value.manage_threads = True
+            rest.permissions.manage_threads = True
     if mode == "history_revoked":
-        parent.permissions_for.return_value.read_message_history = False
+        rest.permissions.read_message_history = False
     if mode == "parent_hidden":
-        parent.permissions_for.return_value.view_channel = False
+        rest.permissions.view_channel = False
     if mode == "lookup_failed":
-        guild.fetch_channel.side_effect = discord.Forbidden(
+        rest.channel_error = discord.Forbidden(
             MagicMock(status=403, reason="forbidden"), "forbidden"
         )
     bot.get_channel = MagicMock(return_value=thread)
@@ -216,7 +213,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         original_post = bot_module.post_initial_turn_card
 
         async def revoke_before_card(*args, **kwargs):
-            thread.fetch_member.side_effect = discord.NotFound(
+            rest.membership_error = discord.NotFound(
                 MagicMock(status=404, reason="gone"), "Unknown Member"
             )
             return await original_post(*args, **kwargs)
@@ -240,7 +237,7 @@ async def test_callback_to_bound_discord_mux_turn(db_session_factory, mode, sour
         )
         bound.append(prepared)
         if mode == "private_removed_after_bind":
-            thread.fetch_member.side_effect = discord.NotFound(
+            rest.membership_error = discord.NotFound(
                 MagicMock(status=404, reason="gone"), "Unknown Member"
             )
         return prepared
