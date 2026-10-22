@@ -128,10 +128,11 @@ from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
-from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE, agent_record
-from mux.drivers.anthropic.sessions_lifecycle import (
+from mux.drivers.anthropic import (
+    UNCLASSIFIED_SOURCE_NAMESPACE,
     SessionCreateRequest,
     SessionReads,
+    agent_record,
 )
 from mux.errors import ScopeViolation, UnsupportedCapability
 from sqlalchemy.exc import SQLAlchemyError
@@ -1243,7 +1244,7 @@ async def create_session(
                     assert before_create is not None
                     await before_create()
             if resource_source is not None:
-                from mux.drivers.anthropic.resources.agents import native_tools_match
+                from mux.drivers.anthropic import native_tools_match
 
                 assert observed is not None
                 native_agent, native_resources = (
@@ -1389,7 +1390,7 @@ async def create_session(
                 from daimon.core.turn.run import (
                     _archive_orphaned_session,  # pyright: ignore[reportPrivateUsage]
                 )
-                from mux.drivers.anthropic.transport import single_attempt_mutation
+                from mux.drivers.anthropic import single_attempt_mutation
 
                 with single_attempt_mutation():
                     await _archive_orphaned_session(anthropic, session_id=created.id, scope=scope)

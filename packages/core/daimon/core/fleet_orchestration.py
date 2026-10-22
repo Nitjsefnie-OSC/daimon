@@ -410,7 +410,7 @@ class FleetOrchestrator:
         from daimon.core.neutral_resources import bounded_gemini_worker_tokens
         from daimon.core.turn.runtime_manifest import manifest_hold_usd
         from mux.contracts.config import ConfigRevision
-        from mux.drivers.gemini.flash import FLASH_PRIMARY
+        from mux.drivers.gemini import FLASH_PRIMARY
         from mux.profiles.gemini import INLINE_REUSE, WORKER_MAX_TOTAL_TOKENS
 
         limits = resolved.limits

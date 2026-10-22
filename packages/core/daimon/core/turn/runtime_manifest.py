@@ -1429,7 +1429,7 @@ async def _capture_source_capabilities(
     from daimon.core.stores.domain import SourceRepresentation
     from daimon.core.stores.mcp_tokens import revoke_mcp_token
     from mux.contracts.resources import MCPConnection, SkillUpload, SkillUploadFile
-    from mux.drivers.anthropic.schemas import (
+    from mux.drivers.anthropic import (
         AGENT_TOOLS_NAMESPACE,
         AgentToolsConfig,
         MCPToolset,
@@ -1812,7 +1812,7 @@ def _source_extension_obligation(
     if extension.version != 1:
         return "source_definition"
     if extension.namespace == "anthropic.model_config":
-        from mux.drivers.anthropic.schemas import AgentModelConfig
+        from mux.drivers.anthropic import AgentModelConfig
 
         try:
             native = AgentModelConfig.model_validate(dict(extension.value))
@@ -1901,7 +1901,7 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
 
 def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
     """Normalize native toolsets without changing unrelated field presence."""
-    from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
+    from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE, agent_tools
 
     updates: dict[str, object] = {}
     excluded: set[str] = set()
@@ -1999,7 +1999,7 @@ def classify_source_obligations(
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())
-    from mux.drivers.anthropic.schemas import AGENT_TOOLS_NAMESPACE, agent_tools
+    from mux.drivers.anthropic import AGENT_TOOLS_NAMESPACE, agent_tools
 
     for extension in spec.extensions or ():
         if extension.version != 1:
@@ -2157,7 +2157,7 @@ def classify_source_obligations(
         if not retained:
             missing.add("memory")
     if source.environment is not None and source.environment.spec.native_config is not None:
-        from mux.drivers.anthropic.schemas import EnvironmentConfig
+        from mux.drivers.anthropic import EnvironmentConfig
 
         try:
             EnvironmentConfig.model_validate(dict(source.environment.spec.native_config.value))
