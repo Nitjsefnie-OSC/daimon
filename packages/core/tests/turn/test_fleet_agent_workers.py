@@ -83,7 +83,7 @@ async def capture_agent(owned, scope, *, ma_id, name, model="claude-haiku-5-5"):
 
 
 def any_agent(grant):
-    return grant.model_copy(update={"worker_agents_mode": "any"})
+    return grant.model_copy(update={"worker_agents": "any"})
 
 
 def test_worker_agents_field_has_three_explicit_states():
@@ -96,7 +96,7 @@ def test_worker_agents_field_has_three_explicit_states():
     assert worker_agent_allowed(legacy, root, root)  # the root is always allowed
     assert not worker_agent_allowed(legacy, root, other)  # absent: never silently widened
     anyone = Grant()
-    anyone.worker_agents_mode = "any"
+    anyone.worker_agents = "any"
     assert worker_agent_allowed(anyone, root, other)
     listed = Grant()
     listed.worker_agents = (other,)

@@ -1564,11 +1564,11 @@ def worker_agent_allowed(
     """
     if agent_id == root_agent_id:
         return True
-    mode = getattr(grant, "worker_agents_mode", None)
-    if mode == "any":
+    # PR B's field: None (or absent) = root only, "any", or a tuple of logical ids.
+    allowed: object = getattr(grant, "worker_agents", None)
+    if allowed == "any":
         return True
-    listed = getattr(grant, "worker_agents", None)
-    return listed is not None and agent_id in listed
+    return isinstance(allowed, tuple) and agent_id in allowed
 
 
 def agent_worker_permissions(
