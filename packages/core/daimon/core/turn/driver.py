@@ -92,7 +92,7 @@ from daimon.core.turn.io import (
 )
 from daimon.core.turn.lifecycle import ReconnectReason, TurnLifecycle, acknowledge, stop_rendering
 from daimon.core.turn.outcomes import current_outcome
-from daimon.core.turn.persistence import current_persistence
+from daimon.core.turn.persistence import LeaseWaitCancelled, current_persistence
 from daimon.core.turn.posture import (
     AutoApprove,
     Billed,
@@ -780,7 +780,20 @@ async def run_turn(
             await abandon_native()
         return state
 
-    pump_coro = pump() if persistence is None else persistence.run(pump)
+    async def _run_leased() -> TurnState:
+        assert persistence is not None
+        try:
+            return await persistence.run(pump)
+        except LeaseWaitCancelled:
+            # Stopped while queued behind another turn: nothing was sent, so
+            # this ends as an interrupt, like a Stop before the stream opens.
+            err = TurnError(kind="interrupted", message="interrupted while waiting its turn")
+            queued_state = TurnState(error=err, termination=TerminationReason.INTERRUPTED)
+            log.info("turn.interrupt.while_queued", session_id=session_id)
+            await lifecycle.on_terminal_failure(queued_state, err)
+            return queued_state
+
+    pump_coro = pump() if persistence is None else _run_leased()
     if deadline is None:
         return await pump_coro
 

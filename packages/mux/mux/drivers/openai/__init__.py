@@ -19,7 +19,7 @@ from mux.drivers.openai.normalize import SCHEMA_DATE
 from mux.drivers.openai.session_controls import SessionControls
 from mux.drivers.openai.sessions import BindingLookup, OpenAISessions
 from mux.drivers.openai.skills import OpenAISkills, bundle_digest
-from mux.drivers.openai.transport import Transport, object_json
+from mux.drivers.openai.transport import SDKTransport, Transport, object_json
 from mux.drivers.openai.turn import (
     MemoryRecoveryJournal,
     OpenAIEvents,
@@ -138,6 +138,7 @@ __all__ = [
     "SCHEMA_DATE",
     "SecretResolver",
     "SessionControls",
+    "SDKTransport",
     "Transport",
     "UsageRevisions",
     "bundle_digest",

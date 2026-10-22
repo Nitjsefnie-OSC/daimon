@@ -2,7 +2,10 @@
 
 from __future__ import annotations
 
+from typing import cast
 from uuid import NAMESPACE_URL, uuid5
+
+from pydantic import JsonValue
 
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import ConfigRevision
@@ -16,6 +19,7 @@ from mux.contracts.resources import (
     SessionExport,
     SessionFilter,
     SessionSpec,
+    UpdateOperation,
     UpdatePlan,
 )
 from mux.drivers.selfhosted.context import Context
@@ -162,19 +166,117 @@ class SelfHostedSessions:
         raise self._c.unsupported("session_listing")
 
     async def plan_update(self, scope: Scope, ref: ResourceRef, desired: SessionSpec) -> UpdatePlan:
-        self._c.binding(scope, ref)
+        """Plan an agent edit for the same session: `reuse`, `in_place` or `refuse`.
+
+        The harness takes instructions, model, tool policy, skills and MCP
+        servers on every turn, so an edited agent needs no harness call: the
+        session keeps its id (and workspace) and only the pinned agent
+        revision moves. Anything that would change where or for whom the
+        session runs (another agent or environment, a changed environment
+        revision, an archived agent) is refused.
+        """
+        binding = self._c.binding(scope, ref)
+        current = await self.spec(scope, ref)
+        unmet = await self._update_unmet(scope, binding, current, desired)
+        if unmet:
+            return UpdatePlan(
+                session=ref, expected_revision=desired.agent_revision, action="refuse", unmet=unmet
+            )
+        agent = await self._c.agents.retrieve(scope, desired.agent)
+        pinned = self._c.revision(binding, "agent")
+        if agent.revision == pinned and desired.config_revision == binding.config_revision:
+            return UpdatePlan(session=ref, expected_revision=desired.agent_revision, action="reuse")
+        detail: dict[str, JsonValue] = {
+            "agent_revision_from": pinned.model_dump_json(),
+            "agent_revision_to": agent.revision.model_dump_json(),
+            "config_revision_from": binding.config_revision,
+            "config_revision_to": desired.config_revision,
+        }
         return UpdatePlan(
             session=ref,
-            expected_revision=Revision(local=desired.config_revision),
-            action="refuse",
-            unmet=("session_update",),
+            expected_revision=desired.agent_revision,
+            action="in_place",
+            operations=(UpdateOperation(kind="agent_revision", detail=detail),),
         )
+
+    async def _update_unmet(
+        self, scope: Scope, binding: ProviderBinding, current: SessionSpec, desired: SessionSpec
+    ) -> tuple[str, ...]:
+        environment_ref = current.environment
+        if desired.agent != current.agent:
+            return ("agent_identity",)
+        if environment_ref is None or desired.environment != environment_ref:
+            return ("environment_identity",)
+        if desired.resources or desired.extensions or desired.state_mode != "continue":
+            return ("session_update_options",)
+        self._c.check(scope, desired.agent, "agent")
+        self._c.check(scope, environment_ref, "environment")
+        agent = await self._c.agents.retrieve(scope, desired.agent)
+        environment = await self._c.environments.retrieve(scope, environment_ref)
+        if agent.ref != desired.agent or environment.ref != environment_ref:
+            raise ScopeViolation(desired.agent.id, "resource ports returned foreign identities")
+        if agent.lifecycle != "active":
+            return ("agent_archived",)
+        if agent.spec.model.provider != "selfhosted":
+            return ("agent_provider",)
+        if desired.agent_revision != Revision(local=0) and agent.revision != desired.agent_revision:
+            return ("agent_revision_stale",)
+        if environment.lifecycle != "active" or environment.revision != self._c.revision(
+            binding, "environment"
+        ):
+            return ("environment_revision",)
+        return ()
 
     async def apply_update(
         self, scope: Scope, plan: UpdatePlan, *, expected: Revision, key: str
     ) -> UpdateReceipt:
-        self._c.binding(scope, plan.session)
-        raise self._c.unsupported("session_update")
+        """Advance the session's pinned agent revision and config revision.
+
+        There is no harness call. The advanced binding (next generation) is
+        held by this driver and visible through `retrieve`; the host persists
+        it with a compare-and-swap before the next turn. Replaying an applied
+        plan is a no-op.
+        """
+        binding = self._c.binding(scope, plan.session)
+        if expected != plan.expected_revision:
+            raise OperationConflict(key)
+        if plan.action not in ("reuse", "in_place") or plan.losses or plan.unmet:
+            raise self._c.unsupported(plan.unmet[0] if plan.unmet else "session_update_plan")
+        receipt = UpdateReceipt(
+            operation_id=key, status="processed", applies="next_turn", session=plan.session
+        )
+        if plan.action == "reuse":
+            if plan.operations:
+                raise ValueError("reuse plan must not contain changes")
+            return receipt
+        (operation,) = plan.operations
+        detail = operation.detail
+        origin = Revision.model_validate_json(str(detail["agent_revision_from"]))
+        target = Revision.model_validate_json(str(detail["agent_revision_to"]))
+        config_from = int(cast(int, detail["config_revision_from"]))
+        config_to = int(cast(int, detail["config_revision_to"]))
+        pinned = self._c.revision(binding, "agent")
+        if pinned == target and binding.config_revision == config_to:
+            return receipt
+        if pinned != origin or binding.config_revision != config_from:
+            raise OperationConflict(key)
+        self._c.bindings[plan.session] = binding.model_copy(
+            update={
+                "generation": binding.generation + 1,
+                "config_revision": config_to,
+                "native_refs": {
+                    **binding.native_refs,
+                    "agent_revision": str(target.local),
+                    "agent_revision_pin": target.model_dump_json(),
+                },
+            }
+        )
+        stored = self._c.specs.get(plan.session)
+        if stored is not None:
+            self._c.specs[plan.session] = stored.model_copy(
+                update={"agent_revision": target, "config_revision": config_to}
+            )
+        return receipt
 
     async def archive(self, scope: Scope, ref: ResourceRef, *, key: str) -> Operation:
         self._c.binding(scope, ref)

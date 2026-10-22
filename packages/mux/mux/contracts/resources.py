@@ -231,8 +231,11 @@ class ProviderBinding(Contract):
     """Which provider session backs a thread, at which generation.
 
     Stored apart from the channel's desired config: changing the config
-    affects new threads only, so an existing binding is never rewritten by
-    it. `id` is the binding's identity, the one `ContinuityLost.binding_id`
+    affects new threads only, so an existing binding is not rewritten by it,
+    except where a driver can apply an edit in place. The self-hosted driver
+    does for an edited agent: its `apply_update` yields the next generation
+    with the new pins, which the host writes through `put_binding`'s
+    generation compare-and-swap. `id` is the binding's identity, the one `ContinuityLost.binding_id`
     and the usage adjustment keys name; it is stable across generations.
     `legacy_account_id` is set for a caller-private binding that predates
     shared threads.
