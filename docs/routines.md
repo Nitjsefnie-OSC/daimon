@@ -799,3 +799,9 @@ manage their metadata but cannot read those private previews, errors, delivery
 payloads, or delivery notes. Upgrade migration `0117_clear_legacy_routine_output`
 erases previously retained output for these legacy rows; see the
 [self-hosting rollout instructions](self-hosting.md#clearing-retained-legacy-routine-output).
+
+The existing scheduler also reconciles opt-in [recruitment threads](recruitment.md).
+This is a core workflow with explicit recruiter approval of every backend write,
+not an unattended agent routine. Its retention sweep runs even when recruitment
+is disabled; failed or inaccessible threads retain opaque recovery status and
+never deliver candidate data elsewhere.

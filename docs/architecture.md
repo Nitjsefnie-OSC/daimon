@@ -2511,3 +2511,17 @@ credential. Refresh preserves its routine/execution discriminator and session
 grant; the shared personal-credential vault never receives routine provenance.
 Every unattended confirmation path protects lead resolution, even with general
 tool safety disabled.
+
+## Recruitment threads
+
+Opt-in staffing uses the existing Discord worker for create/rename/message/edit
+events and persistent review cards. Core owns four tenant-filtered encrypted
+config/thread/message/outbox tables, stateless extraction, revision-bound human
+approval and idempotent backend delivery. Every backend mutation requires a live
+configured recruiter with original-thread access. The existing scheduler pages
+new and old history, reconciles delivery and purges expired content; the existing
+Discord recovery sweep repairs cards. There is no new gateway, process, queue
+or database. A shared recruitment-source predicate withholds qualifying and
+enrolled threads from normal/shared turns and agent-facing Discord reads.
+Backend credentials are trusted-service settings, never agent tools or sidecar
+credentials. See [Recruitment threads](recruitment.md) for operation and synthetic QA.
