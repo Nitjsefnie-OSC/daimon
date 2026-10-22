@@ -654,8 +654,6 @@ class SlackDriver:
                 shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
-                sender_foreign=False,
-                shared_channel=False,
             )
 
         with AioResponsesMock() as mock:

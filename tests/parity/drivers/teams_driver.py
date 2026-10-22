@@ -510,8 +510,6 @@ class TeamsDriver:
                 shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
-                sender_foreign=False,
-                shared_channel=False,
             )
         common: dict[str, Any] = {
             "agent_name": agent_name,

@@ -694,8 +694,6 @@ class DiscordDriver:
                 shared_channel=False,
                 expires_at=now + timedelta(minutes=30),
                 now=now,
-                sender_foreign=False,
-                shared_channel=False,
             )
 
         posted: list[dict[str, Any]] = []
