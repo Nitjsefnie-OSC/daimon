@@ -22,6 +22,7 @@ class RecruitmentModel(BaseModel):
 class SourceMessage(RecruitmentModel):
     id: StrictStr = Field(min_length=1)
     content: StrictStr
+    deleted: bool = False
     observed_at: AwareDatetime
     url: StrictStr = Field(min_length=1)
 
@@ -171,6 +172,8 @@ class ThreadState(RecruitmentModel):
     parent_id: str
     phase: str = "discovered"
     revision: str = ""
+    config_revision: int = 0
+    backend: str = ""
     candidate: Candidate | None = None
     candidate_id: str | None = None
     notion_url: str | None = None
@@ -183,6 +186,7 @@ class ThreadState(RecruitmentModel):
     cursor: str = "0"
     scan_before: str | None = None
     scan_complete: bool = False
+    scan_seen: list[str] = Field(default_factory=lambda: list[str]())
     card_id: str | None = None
     card_intent: str = ""
     card_revision: str = ""

@@ -4278,6 +4278,7 @@ class RecruitmentThreadRecord(Base):
     )
     thread_id: Mapped[str] = mapped_column(Text, primary_key=True)
     parent_id: Mapped[str] = mapped_column(Text, nullable=False)
+    claim_token: Mapped[str | None] = mapped_column(Text)
     phase: Mapped[str] = mapped_column(Text, nullable=False)
     revision: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_state: Mapped[bytes | None] = mapped_column(LargeBinary)
@@ -4297,6 +4298,8 @@ class RecruitmentMessageRecord(Base):
     tenant_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), primary_key=True)
     thread_id: Mapped[str] = mapped_column(Text, primary_key=True)
     message_id: Mapped[str] = mapped_column(Text, primary_key=True)
+    raw_expires_at: Mapped[datetime] = mapped_column(DateTime(timezone=True), nullable=False)
+    processed_revision: Mapped[str | None] = mapped_column(Text)
     revision: Mapped[str] = mapped_column(Text, nullable=False)
     encrypted_source: Mapped[bytes | None] = mapped_column(LargeBinary)
 

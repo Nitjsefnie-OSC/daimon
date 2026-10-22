@@ -223,6 +223,30 @@ class SyntheticRecruitmentTransport(httpx.AsyncBaseTransport):
             return httpx.Response(self.fail, json={"code": "notion_unavailable", "retryable": True})
         body = json.loads(request.content)
         scope = request.headers.get("Authorization", "")
+        if request.method != "POST" or not scope.startswith("Bearer "):
+            return httpx.Response(401, json={"code": "unauthorized"})
+        matching = request.url.path == "/recruitment/candidates/match"
+        registration = request.url.path == "/recruitment/registrations"
+        updating = request.url.path.startswith(
+            "/recruitment/candidates/"
+        ) and request.url.path.endswith("/updates")
+        if not (matching or registration or updating):
+            return httpx.Response(404, json={"code": "validation_error"})
+        if not matching and not request.headers.get("Idempotency-Key"):
+            return httpx.Response(400, json={"code": "idempotency_key_required"})
+        if registration and not all(
+            k in body
+            for k in (
+                "discord_guild_id",
+                "discord_channel_id",
+                "discord_thread_id",
+                "discord_thread_url",
+                "source",
+                "confirmation",
+                "action",
+            )
+        ):
+            return httpx.Response(400, json={"code": "validation_error"})
         thread = f"{scope}:{body.get('discord_guild_id')}:{body.get('discord_thread_id')}"
         if request.url.path.endswith("/match"):
             candidate = self.links.get(thread)

@@ -1754,30 +1754,55 @@ class WatchesSettings(BaseModel):
 class RecruitmentBackendSettings(BaseModel):
     base_url: str = Field(
         default="https://synthetic.invalid",
-        description="Recruitment API base URL for this tenant; trusted services only.",
+        description=("Recruitment API base URL for this tenant; trusted services only."),
     )
     api_key: SecretStr = Field(
         default=SecretStr(""),
-        description="Service-only recruitment Bearer key; never mounted in agent tools or provider sessions.",
+        description=(
+            "Service-only recruitment Bearer key; never mounted in agent tools or provider "
+            "sessions."
+        ),
     )
 
 
 class RecruitmentSettings(BaseModel):
     enabled: bool = Field(
         default=False,
-        description="Enable staffing reconciliation in existing Discord/scheduler processes. Each tenant must also be enabled by operator configuration.",
+        description=(
+            "Enable staffing reconciliation in existing Discord/scheduler processes. Each "
+            "tenant must also be enabled by operator configuration."
+        ),
     )
     backends: dict[uuid.UUID, RecruitmentBackendSettings] = Field(
-        default_factory=dict,
-        description="Tenant UUID to service-only recruitment base_url/api_key map. Supply only to Discord and scheduler, never public sidecar or MCP.",
+        default_factory=dict[uuid.UUID, RecruitmentBackendSettings],
+        description=(
+            "Tenant UUID to service-only recruitment base_url/api_key map. Supply only to "
+            "Discord and scheduler, never public sidecar or MCP."
+        ),
     )
     synthetic: bool = Field(
         default=False,
-        description="Use an in-process synthetic recruitment backend instead of any network calls. For synthetic QA only; disabled by default. Real backend parity requires separate validation.",
+        description=(
+            "Use an in-process synthetic recruitment backend instead of any network calls. "
+            "For synthetic QA only; disabled by default. Real backend parity requires "
+            "separate validation."
+        ),
+    )
+    synthetic_failure_status: int = Field(
+        default=0,
+        ge=0,
+        le=599,
+        description=(
+            "Synthetic QA backend response failure status (for example 503); zero succeeds. "
+            "Used only when recruitment.synthetic is enabled."
+        ),
     )
     model: str = Field(
         default="claude-haiku-4-5",
-        description="Model for stateless structured recruitment extraction without tools, memory or conversational provider sessions.",
+        description=(
+            "Model for stateless structured recruitment extraction without tools, memory or "
+            "conversational provider sessions."
+        ),
     )
 
 

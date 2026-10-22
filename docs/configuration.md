@@ -1408,6 +1408,13 @@ Use an in-process synthetic recruitment backend instead of any network calls. Fo
 synthetic QA only; disabled by default. Real backend parity requires separate
 validation.
 
+### `DAIMON_RECRUITMENT__SYNTHETIC_FAILURE_STATUS`
+
+`int` · optional · default `0`
+
+Synthetic QA backend response failure status (for example 503); zero succeeds. Used only
+when recruitment.synthetic is enabled.
+
 ### `DAIMON_RECRUITMENT__MODEL`
 
 `str` · optional · default `claude-haiku-4-5`

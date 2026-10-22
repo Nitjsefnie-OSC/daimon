@@ -5,6 +5,7 @@ from collections.abc import Awaitable, Callable
 from datetime import UTC, datetime, timedelta
 from uuid import uuid4
 
+from anthropic import APIError
 from daimon.core.recruitment import (
     Candidate,
     Extraction,
@@ -69,12 +70,20 @@ class RecruitmentService:
             state = await self.store.get(thread_id)
             if not state or state.phase in {"skipped", "expired"}:
                 return
-            fresh = [m for m in messages if await self.store.ingest(thread_id, m)]
-            if refresh:
+            for message in messages:
+                await self.store.ingest(thread_id, message)
+            fresh = await self.store.messages(thread_id, pending_only=True)
+            if refresh and not state.candidate_id:
                 fresh = messages
+            elif refresh and state.changes:
+                source_ids = {str(c["source_message_id"]) for c in state.changes}
+                fresh = list(
+                    {m.id: m for m in fresh + [m for m in messages if m.id in source_ids]}.values()
+                )
             if not fresh:
                 return
             state.revision = uuid4().hex
+            state.config_revision, state.backend = config.revision, self.backend
             state.card_revision = ""
             # An uncertain request must be reconciled with its original key/body.
             if state.outbox_id:
@@ -89,7 +98,7 @@ class RecruitmentService:
                 state.outbox_id = None
             state.error = "refresh_required"
             await self.store.save(state, config, activity=True)
-            history = await self.store.messages(thread_id)
+            history = [m for m in await self.store.messages(thread_id) if not m.deleted]
             if len(history) > 200 or sum(len(m.content) for m in history) > 60000:
                 state.phase, state.error = "blocked", "history_too_large"
                 await self.store.save(state, config, activity=True)
@@ -98,20 +107,41 @@ class RecruitmentService:
             if state.matches:
                 options = MatchResponse.model_validate(state.matches).field_options
             try:
-                extraction = (
-                    await self.extract(history, None, options)
-                    if not state.candidate_id
-                    else await self.extract(history[-30:-1] + fresh[-1:], state.candidate, options)
-                )
-                state.summary, state.flags = extraction.summary, extraction.flags
-                if extraction.other_candidates:
-                    state.flags.append("Use a separate thread for another candidate.")
-                    state.changes = []
-                elif state.candidate_id:
-                    state.changes = validated_changes(extraction, fresh[-1:], options)
-                else:
+                if not state.candidate_id:
+                    extraction = await self.extract(history, None, options)
+                    state.summary, state.flags = extraction.summary, extraction.flags
                     state.candidate = extraction.candidate
-                if state.candidate:
+                    if extraction.other_candidates:
+                        state.candidate = None
+                        state.flags.append("Use a separate thread for another candidate.")
+                else:
+                    by_field = {str(c["field"]): c for c in state.changes}
+                    for message in sorted(fresh, key=lambda m: (m.observed_at, int(m.id))):
+                        # Replacing an edited source also removes proposals that
+                        # the corrected text no longer supports.
+                        by_field = {
+                            k: v
+                            for k, v in by_field.items()
+                            if v["source_message_id"] != message.id
+                        }
+                        if message.deleted:
+                            continue
+                        context = [m for m in history if m.id != message.id][-29:]
+                        extraction = await self.extract(
+                            context + [message], state.candidate, options
+                        )
+                        state.summary, state.flags = extraction.summary, extraction.flags
+                        if extraction.other_candidates:
+                            state.flags.append("Other candidates were excluded from these updates.")
+                            continue
+                        by_field.update(
+                            {
+                                str(c["field"]): c
+                                for c in validated_changes(extraction, [message], options)
+                            }
+                        )
+                    state.changes = list(by_field.values())
+                if state.candidate and not state.candidate_id:
                     identity = {
                         k: v
                         for k, v in state.candidate.model_dump(
@@ -128,9 +158,11 @@ class RecruitmentService:
                     )
                     state.matches = match.model_dump(mode="json")
                 state.phase, state.error = "review", None
-            except (ValueError, RecruitmentAPIError):
+            except (ValueError, RecruitmentAPIError, APIError, TimeoutError):
                 state.phase, state.error = "blocked", "review_unavailable"
-            await self.store.save(state, config, activity=True)
+            await self.store.save(
+                state, config, activity=True, processed=tuple(fresh) if state.error is None else ()
+            )
 
     async def confirm(
         self, thread_id: str, revision: str, selection: str, actor: str, interaction: str
@@ -145,13 +177,15 @@ class RecruitmentService:
                 or state.revision != revision
                 or state.outbox_id
                 or not state.scan_complete
+                or state.config_revision != config.revision
+                or state.backend != self.backend
             ):
                 raise ValueError("stale_summary")
             if selection == "skip":
                 state.phase = "skipped"
                 await self.store.save(state, config)
                 return
-            if not state.candidate or state.flags or state.error:
+            if not state.candidate or state.error:
                 raise ValueError("clarify_candidate_details")
             now = datetime.now(UTC)
             payload: dict[str, JsonValue]
@@ -194,6 +228,10 @@ class RecruitmentService:
                     )
                 else:
                     payload["candidate_id"] = selection
+                    selected = next(c for c in match.candidates if str(c.candidate_id) == selection)
+                    state.candidate = Candidate(
+                        name=selected.name, email=selected.email, profile_url=selected.profile_url
+                    )
             key = hashlib.sha256(
                 f"{self.store.tenant_id}:{self.backend}:{thread_id}:{revision}:{kind}".encode()
             ).hexdigest()
@@ -260,6 +298,19 @@ class RecruitmentService:
                     response_update = await self.api.update(
                         state.candidate_id, item.payload, item.key
                     )
+                    if state.candidate:
+                        candidate = state.candidate.model_dump(mode="json")
+                        applied = {
+                            r.field
+                            for r in response_update.results
+                            if r.result in {"applied", "unchanged"}
+                        }
+                        changes = item.payload.get("changes")
+                        if isinstance(changes, list):
+                            for change in changes:
+                                if isinstance(change, dict) and change.get("field") in applied:
+                                    candidate[str(change["field"])] = change.get("value")
+                        state.candidate = Candidate.model_validate(candidate)
                     state.flags = [
                         f"{r.field}: {r.result}"
                         for r in response_update.results
@@ -308,3 +359,21 @@ class RecruitmentService:
             state.revision = uuid4().hex
             await self.store.save(state, config)
         await self.ingest(thread_id, await self.store.messages(thread_id), refresh=True)
+
+    async def delete_message(self, thread_id: str, message_id: str) -> None:
+        messages = await self.store.messages(thread_id)
+        for message in messages:
+            if message.id == message_id and not message.deleted:
+                await self.ingest(
+                    thread_id,
+                    [
+                        message.model_copy(
+                            update={
+                                "content": "",
+                                "deleted": True,
+                                "observed_at": datetime.now(UTC),
+                            }
+                        )
+                    ],
+                )
+                return

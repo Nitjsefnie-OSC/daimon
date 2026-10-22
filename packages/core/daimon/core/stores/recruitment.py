@@ -1,7 +1,9 @@
 """Tenant-bound encrypted recruitment ledger; callers never see ORM rows."""
 
+import hashlib
 from collections.abc import AsyncIterator
 from contextlib import asynccontextmanager
+from contextvars import ContextVar
 from datetime import UTC, datetime, timedelta
 from typing import cast
 from uuid import UUID, uuid4
@@ -31,6 +33,9 @@ class RecruitmentStore:
         self, sessions: async_sessionmaker[AsyncSession], fernet: MultiFernet, tenant_id: UUID
     ) -> None:
         self.sessions, self.fernet, self.tenant_id = sessions, fernet, tenant_id
+        self._claim: ContextVar[tuple[str, str] | None] = ContextVar(
+            "recruitment_claim", default=None
+        )
 
     def seal(self, value: BaseModel) -> bytes:
         return self.fernet.encrypt(value.model_dump_json().encode())
@@ -44,7 +49,21 @@ class RecruitmentStore:
             )
             if not acquired:
                 raise RecruitmentBusy
-            yield
+            token = uuid4().hex
+            async with self.sessions.begin() as writer:
+                await writer.execute(
+                    update(RecruitmentThreadRecord)
+                    .where(
+                        RecruitmentThreadRecord.tenant_id == self.tenant_id,
+                        RecruitmentThreadRecord.thread_id == thread_id,
+                    )
+                    .values(claim_token=token)
+                )
+            context = self._claim.set((thread_id, token))
+            try:
+                yield
+            finally:
+                self._claim.reset(context)
 
     async def configure(self, config: RecruitmentConfig) -> None:
         from daimon.core.ma_identity import derive_tenant_uuid
@@ -118,9 +137,11 @@ class RecruitmentStore:
         activity: bool = False,
         outbox: Outbox | None = None,
         update_outbox: bool = False,
+        processed: tuple[SourceMessage, ...] = (),
     ) -> None:
         now = datetime.now(UTC)
         async with self.sessions.begin() as session:
+            claim = self._claim.get()
             values = dict(
                 tenant_id=self.tenant_id,
                 thread_id=state.thread_id,
@@ -128,6 +149,7 @@ class RecruitmentStore:
                 phase=state.phase,
                 revision=state.revision,
                 encrypted_state=self.seal(state),
+                claim_token=claim[1] if claim else None,
                 raw_expires_at=now + timedelta(days=config.raw_retention_days),
                 expires_at=now + timedelta(days=config.retention_days),
             )
@@ -138,11 +160,17 @@ class RecruitmentStore:
                 or activity
                 and k in {"raw_expires_at", "expires_at"}
             }
-            await session.execute(
-                insert(RecruitmentThreadRecord)
-                .values(**values)
-                .on_conflict_do_update(index_elements=["tenant_id", "thread_id"], set_=changes)
+            statement = insert(RecruitmentThreadRecord).values(**values)
+            claim = self._claim.get()
+            saved = await session.scalar(
+                statement.on_conflict_do_update(
+                    index_elements=["tenant_id", "thread_id"],
+                    set_=changes,
+                    where=RecruitmentThreadRecord.claim_token == claim[1] if claim else None,
+                ).returning(RecruitmentThreadRecord.thread_id)
             )
+            if saved is None:
+                raise RecruitmentBusy("claim_expired")
             if outbox:
                 if update_outbox:
                     await session.execute(
@@ -166,14 +194,35 @@ class RecruitmentStore:
                             encrypted_request=self.seal(outbox),
                         )
                     )
+            for message in processed:
+                digest = hashlib.sha256(message.model_dump_json().encode()).hexdigest()
+                await session.execute(
+                    update(RecruitmentMessageRecord)
+                    .where(
+                        RecruitmentMessageRecord.tenant_id == self.tenant_id,
+                        RecruitmentMessageRecord.thread_id == state.thread_id,
+                        RecruitmentMessageRecord.message_id == message.id,
+                        RecruitmentMessageRecord.revision == digest,
+                    )
+                    .values(processed_revision=digest)
+                )
 
-    async def messages(self, thread_id: str) -> list[SourceMessage]:
+    async def messages(self, thread_id: str, *, pending_only: bool = False) -> list[SourceMessage]:
         async with self.sessions() as session:
             rows = await session.scalars(
                 select(RecruitmentMessageRecord).where(
                     RecruitmentMessageRecord.tenant_id == self.tenant_id,
                     RecruitmentMessageRecord.thread_id == thread_id,
                     RecruitmentMessageRecord.encrypted_source.is_not(None),
+                    *(
+                        [
+                            RecruitmentMessageRecord.processed_revision.is_distinct_from(
+                                RecruitmentMessageRecord.revision
+                            )
+                        ]
+                        if pending_only
+                        else []
+                    ),
                 )
             )
             return sorted(
@@ -197,25 +246,39 @@ class RecruitmentStore:
                 old = SourceMessage.model_validate_json(self.fernet.decrypt(row.encrypted_source))
                 if old.observed_at > message.observed_at or old == message:
                     return False
-            thread = await session.get(RecruitmentThreadRecord, (self.tenant_id, thread_id))
+            thread = await session.get(
+                RecruitmentThreadRecord, (self.tenant_id, thread_id), with_for_update=True
+            )
             if not thread or not thread.encrypted_state:
                 raise LookupError("thread_not_enrolled")
+            claim = self._claim.get()
+            if claim and thread.claim_token != claim[1]:
+                raise RecruitmentBusy("claim_expired")
+            if not claim:
+                # A live inbox revision fences a worker that is currently
+                # extracting an older snapshot; it must reread, never overwrite.
+                thread.claim_token = uuid4().hex
             state = ThreadState.model_validate_json(self.fernet.decrypt(thread.encrypted_state))
             state.revision, state.error, state.card_revision = uuid4().hex, "refresh_required", ""
             thread.revision, thread.encrypted_state = state.revision, self.seal(state)
+            configured = await session.get(RecruitmentConfigRecord, self.tenant_id)
+            if not configured:
+                raise PermissionError("recruitment_unconfigured")
+            config = RecruitmentConfig.model_validate(configured.config)
             await session.execute(
                 insert(RecruitmentMessageRecord)
                 .values(
                     tenant_id=self.tenant_id,
                     thread_id=thread_id,
                     message_id=message.id,
-                    revision=message.observed_at.isoformat(),
+                    raw_expires_at=datetime.now(UTC) + timedelta(days=config.raw_retention_days),
+                    revision=hashlib.sha256(message.model_dump_json().encode()).hexdigest(),
                     encrypted_source=self.seal(message),
                 )
                 .on_conflict_do_update(
                     index_elements=["tenant_id", "thread_id", "message_id"],
                     set_={
-                        "revision": message.observed_at.isoformat(),
+                        "revision": hashlib.sha256(message.model_dump_json().encode()).hexdigest(),
                         "encrypted_source": self.seal(message),
                     },
                 )
@@ -233,6 +296,13 @@ class RecruitmentStore:
 
     async def save_outbox(self, item: Outbox) -> None:
         async with self.sessions.begin() as session:
+            claim = self._claim.get()
+            if claim:
+                parent = await session.get(
+                    RecruitmentThreadRecord, (self.tenant_id, item.thread_id), with_for_update=True
+                )
+                if parent is None or parent.claim_token != claim[1]:
+                    raise RecruitmentBusy("claim_expired")
             result = await session.execute(
                 update(RecruitmentOutboxRecord)
                 .where(
@@ -248,10 +318,6 @@ class RecruitmentStore:
 
     async def purge(self, now: datetime) -> None:
         async with self.sessions.begin() as session:
-            raw_expired = select(RecruitmentThreadRecord.thread_id).where(
-                RecruitmentThreadRecord.tenant_id == self.tenant_id,
-                RecruitmentThreadRecord.raw_expires_at <= now,
-            )
             expired = select(RecruitmentThreadRecord.thread_id).where(
                 RecruitmentThreadRecord.tenant_id == self.tenant_id,
                 RecruitmentThreadRecord.expires_at <= now,
@@ -260,7 +326,7 @@ class RecruitmentStore:
                 update(RecruitmentMessageRecord)
                 .where(
                     RecruitmentMessageRecord.tenant_id == self.tenant_id,
-                    RecruitmentMessageRecord.thread_id.in_(raw_expired),
+                    RecruitmentMessageRecord.raw_expires_at <= now,
                 )
                 .values(encrypted_source=None)
             )
@@ -278,7 +344,7 @@ class RecruitmentStore:
                     RecruitmentThreadRecord.tenant_id == self.tenant_id,
                     RecruitmentThreadRecord.thread_id.in_(expired),
                 )
-                .values(encrypted_state=None, phase="expired")
+                .values(encrypted_state=None, phase="expired", claim_token=uuid4().hex)
             )
 
 

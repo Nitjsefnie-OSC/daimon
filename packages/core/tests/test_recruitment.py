@@ -35,7 +35,18 @@ async def test_fake_matches_and_idempotent_registration() -> None:
             "candidate": {"name": "Synthetic"},
         }
         assert (await api.match(payload)).status == "none"
-        registration = {**payload, "action": "create"}
+        registration = {
+            **payload,
+            "action": "create",
+            "discord_channel_id": "3",
+            "discord_thread_url": "https://synthetic.invalid/2",
+            "source": "staffing",
+            "confirmation": {
+                "discord_user_id": "7",
+                "discord_interaction_id": "i",
+                "confirmed_at": datetime.now(UTC).isoformat(),
+            },
+        }
         first = await api.register(registration, "stable")
         assert await api.register(registration, "stable") == first
         assert len(fake.effects) == 1
@@ -49,3 +60,31 @@ def test_source_revision_uses_real_timestamp() -> None:
     )
     assert source.observed_at.tzinfo is not None
     assert Candidate(name="Synthetic").name == "Synthetic"
+
+
+async def test_synthetic_runtime_extracts_updates_without_provider_calls() -> None:
+    from types import SimpleNamespace
+    from unittest.mock import AsyncMock
+    from uuid import uuid4
+
+    from daimon.core.config import Settings
+    from daimon.core.recruitment_runtime import backend_client, build_service
+
+    settings = Settings(_env_file=None)
+    settings.recruitment.enabled = True
+    settings.recruitment.synthetic = True
+    model = AsyncMock()
+    async with backend_client(settings) as http:
+        service = build_service(
+            settings, SimpleNamespace(tenant_id=uuid4()), SimpleNamespace(), http, model
+        )
+        source = SourceMessage(
+            id="10",
+            content="Synthetic phone: 555-0100",
+            observed_at=datetime.now(UTC),
+            url="https://synthetic.invalid/10",
+        )
+        extraction = await service.extract([source], Candidate(name="Synthetic"), {})
+        assert extraction.changes[0].value == "555-0100"
+        assert extraction.changes[0].source_message_id == "10"
+        model.messages.parse.assert_not_awaited()

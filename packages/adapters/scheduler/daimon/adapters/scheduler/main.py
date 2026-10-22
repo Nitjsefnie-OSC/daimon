@@ -1576,6 +1576,7 @@ async def run(
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
             await _sweep_lead_intake(sm)
+            await _sweep_recruitment(sm, settings, push_resync_fernet, client)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
@@ -1613,6 +1614,7 @@ async def run(
             await _sweep_hub_oauth_kv(sm)
             await _sweep_mcp_tokens(sm)
             await _sweep_lead_intake(sm)
+            await _sweep_recruitment(sm, settings, push_resync_fernet, client)
             await _sweep_github_connect_flows(sm)
             await _sweep_github_issued_tokens(sm)
             await _sweep_github_app_tokens(sm, fernet=push_resync_fernet)
@@ -1714,6 +1716,21 @@ async def _drain_github_installation_reconciliations(
 def run_sync() -> None:
     """Console-script entrypoint. ``daimon-scheduler`` resolves here."""
     sys.exit(asyncio.run(run()))
+
+
+async def _sweep_recruitment(
+    sm: async_sessionmaker[AsyncSession],
+    settings: Settings,
+    fernet: MultiFernet | None,
+    client: AsyncAnthropic,
+) -> None:
+    from daimon.core.recruitment_runtime import reconcile_recruitment
+
+    try:
+        await reconcile_recruitment(sm, settings, fernet, client)
+    except Exception:
+        # Never include candidate content or upstream response bodies in logs.
+        log.error("scheduler.recruitment_reconciliation_failed")
 
 
 if __name__ == "__main__":
