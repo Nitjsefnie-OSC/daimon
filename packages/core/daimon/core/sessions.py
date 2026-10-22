@@ -74,6 +74,7 @@ from daimon.core.github_app_session import (
     revoke_app_access,
 )
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_hold import hold_key
 from daimon.core.mcp_personal_servers import visible_mcp_servers, visible_tools
 from daimon.core.mcp_vault import (
     GITHUB_COPILOT_MCP_URL,
@@ -81,10 +82,12 @@ from daimon.core.mcp_vault import (
     hold_agent_vault_lock,
 )
 from daimon.core.memory_resource import (
+    ensure_channel_memory_store_and_mount,
     ensure_memory_store_and_mount,
     ensure_personal_memory_store_and_mount,
     memory_instructions,
     memory_mount,
+    memory_scope,
 )
 from daimon.core.mux_backend import managed_agents, resource_ref
 from daimon.core.mux_compat import (
@@ -122,6 +125,7 @@ from daimon.core.stores.channel_skills import list_skill_channel_rules
 from daimon.core.stores.domain import BackendAgent
 from daimon.core.stores.github_issued_tokens import register_app_session_vault
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY, ToolSafetyPolicy
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from mux.contracts.resources import ResourceBinding, WorkspaceSource
 from mux.drivers.anthropic.resources.agents import UNCLASSIFIED_SOURCE_NAMESPACE, agent_record
@@ -258,6 +262,7 @@ async def project_session_resources(
     requester_is_headless: bool = False,
     app_session_unmapped: bool = False,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
     private_dm_id: str | None = None,
     origin_seal_ids: Collection[str] = (),
     extra_resources: Sequence[Resource] = (),
@@ -267,6 +272,11 @@ async def project_session_resources(
     The result describes source intent, never preservation or execution authority.
     Every target mapping remains unproven until the existing preparation seam proves it.
     """
+    if hold is not None:
+        # A fleet worker captures exactly one memory resource: the agent-wide
+        # store this reads. A held turn's memory is its channel's, so it has
+        # no source to capture (and the held credential never reaches a worker).
+        raise ScopeViolation("source-preparation", "a held turn never captures a fleet source")
     _check_resource_source(
         source, agent, environment, tenant_id, agent_uuid, account_id, resource_scope
     )
@@ -356,6 +366,8 @@ async def project_session_resources(
         reference = f"caller-mcp:{tenant_id}:{account_id}:{agent_uuid}"
         if slack_turn_context_id is not None:
             reference += f":slack-turn:{slack_turn_context_id}"
+        if hold is not None:
+            reference += f":hold:{hold_key(hold)}"
         requirements.append(
             ResourceBinding(id=reference, kind="credential", credential_ref=reference)
         )
@@ -377,6 +389,7 @@ async def project_session_resources(
     if (
         extra_resources
         or slack_turn_context_id is not None
+        or (hold is not None and caller_vault)
         or private_dm_id is not None
         or app_session_unmapped
         or (requester_is_headless and app_mode)
@@ -513,6 +526,8 @@ async def create_session(
     confirmed_tools: frozenset[str] = frozenset(),
     daimon_rule_tools: frozenset[str] = frozenset(),
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
+    memory_hold: TurnHold | None = None,
     private_dm_id: str | None = None,
     budget_channel_id: str | None = None,
     origin_channel_id: str | None = None,
@@ -545,6 +560,18 @@ async def create_session(
 
     ``slack_turn_context_id`` selects an isolated execution credential for private
     Slack turns. It is absent for channel, headless and MCP-created sessions.
+
+    ``hold`` makes the session a held turn's: it mounts that hold's own Daimon
+    credential vault (`ensure_agent_mcp_vault`), and the GitHub-token vault, which
+    carries a Daimon credential too, gets the same hold. Without a caller
+    account (a shared thread) there is no Daimon credential and so no hold to carry.
+
+    ``memory_hold`` is the held place whose memory the session mounts: the
+    channel's own store (``ensure_channel_memory_store_and_mount``), read-write
+    unless ``memory_read_only``, and neither the agent-wide store nor a
+    personal one. It is the turn's hold whether or not a credential carries it,
+    so a shared thread (no caller account, hence no ``hold``) still mounts the
+    channel's memory. A fleet worker never has one.
 
     ``origin_channel_id``/``origin_thread_id``/``origin_seal_ids`` name the channel
     turn a session is opened for; they are stamped on it so the transcript tools
@@ -641,6 +668,8 @@ async def create_session(
     """
     if worker is not None and native_budget_usd is not None:
         raise ScopeViolation("session-budget", "root and worker controls cannot be combined")
+    if resource_source is not None and memory_hold is not None:
+        raise ScopeViolation("worker-resources", "a held turn has no fleet worker")
     budget_cents = native_session_budget_cents(
         worker.limits.native_budget_usd if worker is not None else native_budget_usd
     )
@@ -760,6 +789,7 @@ async def create_session(
                         if mcp_settings is not None and mcp_settings.jwt_secret is not None
                         else None
                     ),
+                    hold=hold,
                 )
             if caller_vault:
                 assert account_id is not None and session_factory is not None
@@ -777,6 +807,7 @@ async def create_session(
                     now=dt.datetime.now(dt.UTC),
                     session_factory=session_factory,
                     slack_turn_context_id=slack_turn_context_id,
+                    hold=hold,
                     scope=scope,
                 )
         elif caller_vault:
@@ -806,6 +837,7 @@ async def create_session(
                 now=dt.datetime.now(dt.UTC),
                 session_factory=session_factory,
                 slack_turn_context_id=slack_turn_context_id,
+                hold=hold,
                 scope=scope,
             )
 
@@ -871,52 +903,77 @@ async def create_session(
             # persistent memory this turn. The personal store is resolved
             # first because the shared store's instructions depend on it. A fleet
             # worker mounts only its source's captured warm store, never a person's.
-            personal_mount: BetaManagedAgentsMemoryStoreResourceParam | None = None
-            if personal_memory and account_id is not None and resource_source is None:
+            if memory_hold is not None:
+                # A held turn mounts only its channel's store, shared with
+                # everyone there, so nothing agent-wide or personal can leak in.
                 try:
-                    personal_mount = await ensure_personal_memory_store_and_mount(
+                    resources.append(
+                        await ensure_channel_memory_store_and_mount(
+                            anthropic,
+                            session_factory,
+                            tenant_id=tenant_id,
+                            agent_id=agent_uuid,
+                            platform=memory_hold.platform,
+                            channel_id=memory_hold.channel_id,
+                            agent_name=resource_agent.name,
+                            read_only=memory_read_only,
+                        )
+                    )
+                except (anthropic_pkg.APIError, StoreError) as exc:
+                    _log.warning(
+                        "memory_store.channel_mount_failed",
+                        tenant_id=str(tenant_id),
+                        agent_uuid=str(agent_uuid),
+                        agent_name=resource_agent.name,
+                        error=str(exc),
+                    )
+            else:
+                personal_mount: BetaManagedAgentsMemoryStoreResourceParam | None = None
+                if personal_memory and account_id is not None and resource_source is None:
+                    try:
+                        personal_mount = await ensure_personal_memory_store_and_mount(
+                            anthropic,
+                            session_factory,
+                            tenant_id=tenant_id,
+                            agent_id=agent_uuid,
+                            account_id=account_id,
+                            agent_name=agent.name,
+                            read_only=memory_read_only,
+                        )
+                    except (anthropic_pkg.APIError, StoreError) as exc:
+                        _log.warning(
+                            "memory_store.personal_mount_failed",
+                            tenant_id=str(tenant_id),
+                            agent_uuid=str(agent_uuid),
+                            agent_name=agent.name,
+                            error=str(exc),
+                        )
+                try:
+                    memory_resource = await ensure_memory_store_and_mount(
                         anthropic,
                         session_factory,
                         tenant_id=tenant_id,
                         agent_id=agent_uuid,
-                        account_id=account_id,
-                        agent_name=agent.name,
+                        agent_name=resource_agent.name,
                         read_only=memory_read_only,
+                        personal_mounted=personal_mount is not None,
+                        expected_memory_store_id=resource_source.memory_store_id
+                        if resource_source is not None
+                        else None,
                     )
+                    resources.append(memory_resource)
                 except (anthropic_pkg.APIError, StoreError) as exc:
+                    if resource_source is not None:
+                        raise
                     _log.warning(
-                        "memory_store.personal_mount_failed",
+                        "memory_store.mount_failed",
                         tenant_id=str(tenant_id),
                         agent_uuid=str(agent_uuid),
-                        agent_name=agent.name,
+                        agent_name=resource_agent.name,
                         error=str(exc),
                     )
-            try:
-                memory_resource = await ensure_memory_store_and_mount(
-                    anthropic,
-                    session_factory,
-                    tenant_id=tenant_id,
-                    agent_id=agent_uuid,
-                    agent_name=resource_agent.name,
-                    read_only=memory_read_only,
-                    personal_mounted=personal_mount is not None,
-                    expected_memory_store_id=resource_source.memory_store_id
-                    if resource_source is not None
-                    else None,
-                )
-                resources.append(memory_resource)
-            except (anthropic_pkg.APIError, StoreError) as exc:
-                if resource_source is not None:
-                    raise
-                _log.warning(
-                    "memory_store.mount_failed",
-                    tenant_id=str(tenant_id),
-                    agent_uuid=str(agent_uuid),
-                    agent_name=resource_agent.name,
-                    error=str(exc),
-                )
-            if personal_mount is not None:
-                resources.append(personal_mount)
+                if personal_mount is not None:
+                    resources.append(personal_mount)
 
         # A server somebody connected through OAuth authenticates from the
         # connecting person's vault alone, so mounting it on anyone else's session
@@ -1266,6 +1323,7 @@ async def create_session(
                     requester_is_headless=requester_is_headless,
                     app_session_unmapped=app_session_unmapped,
                     slack_turn_context_id=slack_turn_context_id,
+                    hold=hold,
                     private_dm_id=private_dm_id,
                     origin_seal_ids=origin_seal_ids,
                     extra_resources=extra_resources,
@@ -1296,6 +1354,8 @@ async def create_session(
                         vault_id=vault_id,
                         sent_skills=session_skills(agent, channel_skills),
                         github_mode="app",
+                        mcp_hold=hold_key(hold) if account_id is not None else None,
+                        memory_scope=memory_scope(memory_hold),
                     )
                     if app_session_unmapped
                     else None

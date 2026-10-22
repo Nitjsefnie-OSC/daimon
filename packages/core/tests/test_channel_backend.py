@@ -27,6 +27,7 @@ from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.notices import RefusalNouns, admission_refusal_text
 from daimon.core.turn.termination import TerminationReason, termination_reason
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.factories import make_ledger_entry, make_tenant, make_tenant_config
 from daimon.testing.ma import build_fake_anthropic, resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
@@ -131,6 +132,54 @@ async def test_set_and_clear_write_immutable_revisions(db_session: AsyncSession)
         )
 
 
+_ARGON = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-4-argon")
+
+
+def _pricing_clock(monkeypatch: pytest.MonkeyPatch, day: datetime) -> None:
+    from daimon.core import pricing
+
+    class Clock(datetime):
+        @classmethod
+        def now(cls, tz=None):  # pyright: ignore[reportIncompatibleMethodOverride, reportMissingParameterType]
+            return day
+
+    monkeypatch.setattr(pricing, "datetime", Clock)
+
+
+def test_argon_is_admitted_for_a_channel_only_inside_its_price_window(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    _pricing_clock(monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
+    check_backend(_revision(_ARGON))
+    with pytest.raises(BackendUnsupported, match="can't run fleet workers"):
+        check_backend(_revision(_ARGON), worker=True)
+    _pricing_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
+    with pytest.raises(
+        BackendUnsupported, match="gemini-4-argon's price window ended on 2026-11-30"
+    ):
+        check_backend(_revision(_ARGON))
+    # The Flash default and the cheap worker model are not tariff-gated.
+    flash = BackendConfig(backend="gemini", profile="gemini.inline_reuse", model="gemini-3.8-flash")
+    check_backend(_revision(flash))
+    check_backend(
+        _revision(flash.model_copy(update={"model": "gemini-3.5-flash-lite"})), worker=True
+    )
+
+
+async def test_argon_cannot_be_configured_after_its_price_window(
+    db_session: AsyncSession, monkeypatch: pytest.MonkeyPatch
+) -> None:
+    tenant = await make_tenant(db_session)
+    channel = channel_ref(tenant.id, "discord", "chan-argon")
+    _pricing_clock(monkeypatch, datetime(2026, 12, 1, tzinfo=UTC))
+    with pytest.raises(BackendUnsupported, match="price window ended on 2026-11-30"):
+        await set_channel_backend(db_session, channel, _ARGON)
+    assert await current_backend(db_session, channel) is None
+    _pricing_clock(monkeypatch, datetime(2026, 11, 30, tzinfo=UTC))
+    written = await set_channel_backend(db_session, channel, _ARGON)
+    assert (written.local, written.model) == (1, "gemini-4-argon")
+
+
 # Admission
 
 
@@ -183,6 +232,7 @@ async def _admit(deps: TurnDeps, tenant: TenantRow, channel_id: str = "chan-1") 
     return await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform="discord",
         external_user_id="user-1",
         channel_id=channel_id,

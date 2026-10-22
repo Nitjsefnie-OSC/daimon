@@ -273,3 +273,44 @@ def test_a_missing_skill_names_it_instead_of_the_generic_refusal() -> None:
 
     assert '"skill_01PBRj"' in text and "remove_skill" in text
     assert "couldn't accept the request" not in text
+
+
+@pytest.mark.parametrize(
+    ("error", "expected"),
+    [
+        (
+            ("rate_limited", True, None),
+            "Daimon's AI service is busy.\n\nTry again in a minute.",
+        ),
+        (("overloaded", True, "503"), "Daimon's AI service is busy.\n\nTry again in a minute."),
+        (
+            ("transient_network", True, None),
+            "Daimon couldn't reach its AI service.\n\nTry again in a minute.",
+        ),
+        (
+            ("upstream", True, None),
+            "Daimon couldn't reach its AI service.\n\nTry again in a minute.",
+        ),
+        (
+            ("permission", False, "gcs_token_echo"),
+            "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it.",
+        ),
+        (
+            ("upstream", False, "malformed_interaction"),
+            "Daimon's AI service couldn't accept the request.\n\nAsk an admin to check it.",
+        ),
+    ],
+)
+def test_neutral_provider_failures_map_to_their_cause(
+    error: tuple[str, bool, str | None], expected: str
+) -> None:
+    from mux.errors import ProviderError
+
+    category, retryable, code = error
+    failure = ProviderError(category, retryable=retryable, native_code=code)  # type: ignore[arg-type]
+    result = render_error(failure, request_id=TEST_RID)
+    assert result == f"{expected}\n\n{REF}"
+    # Never the internal code (e.g. the r12 gcs_token_echo) on the card.
+    assert code is None or code not in result
+    wrapped = TurnError(kind="upstream", cause=failure)
+    assert render_error(wrapped, request_id=TEST_RID) == f"{expected}\n\n{REF}"

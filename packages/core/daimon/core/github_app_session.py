@@ -82,6 +82,7 @@ from daimon.core.stores.thread_sessions import (
     live_effective_config_for_ma_session,
     record_app_token_refresh,
 )
+from daimon.core.turn_hold import TurnHold
 from daimon.core.turn_origin import current_origin_id
 from mux.contracts.ids import Scope
 from mux.contracts.resources import WorkspaceSource
@@ -400,7 +401,14 @@ async def create_session_vault(
     public_url: str | None,
     jwt_secret: bytes | None,
     sessionmaker: async_sessionmaker[AsyncSession],
+    hold: TurnHold | None = None,
 ) -> str:
+    """Create the session's own GitHub-token vault.
+
+    It carries a Daimon MCP credential too, so a held turn's ``hold`` goes on
+    that one as well: a session never mounts an unheld Daimon credential beside
+    a held one.
+    """
     scope = resource_scope(
         tenant_id=str(tenant_id),
         account_id=str(account_id) if account_id is not None else "service",
@@ -416,6 +424,7 @@ async def create_session_vault(
                     jwt_secret=jwt_secret,
                     public_url=public_url,
                     now=datetime.now(UTC),
+                    hold=hold,
                 )
                 await store_credential(anthropic, vault.id, payload, scope=scope)
     except BaseException:

@@ -138,6 +138,18 @@ async def conversation_root(
         actor = BackendActor(
             source.tenant_id, prepared.admission.account_id, Subject(is_admin=True)
         )
+        if getattr(request, "param", None) == "recorded_caps":
+            from daimon.core.channel_backend import AgentBackendRefused
+
+            # Financial admission would refuse every spawn; the grant never lands.
+            with pytest.raises(AgentBackendRefused, match="fleet provider limits exceed budget"):
+                await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
+            current_grant = await service.current(source)
+            assert current_grant is None or "provider_limits_usd" not in (
+                (current_grant.fleet_grant or {}).get("limits", {})
+            )
+            yield None
+            return
         preview = await service.preview_fleet_grant(source, value, now=datetime.now(UTC))
         await service.set_fleet_grant(
             source,
@@ -376,13 +388,8 @@ async def test_missing_dispatch_host_runtime_refuses_before_native_allocation(
 
 @pytest.mark.parametrize("conversation_root", ["recorded_caps"], indirect=True)
 async def test_recorded_provider_ceilings_refuse_before_native_allocation(conversation_root):
-    from daimon.core.fleet_orchestration import FleetRefused
-
-    _, parent, policy, resolved, wire, ports, _, _ = conversation_root
-    with pytest.raises(FleetRefused, match="admission_evidence_invalid") as refused:
-        await FleetOrchestrator(ports).spawn(parent, policy, **terms(parent, resolved))
-    assert str(refused.value.__context__) == "provider limits exceed the retained run budget"
-    assert not wire.posts
+    """The recorded lines total .585 over a .49 run: refused at the grant preview."""
+    assert conversation_root is None
 
 
 @pytest.mark.parametrize("fault", ["environment", "tools", "mcp", "skills", "mount", "drop"])
