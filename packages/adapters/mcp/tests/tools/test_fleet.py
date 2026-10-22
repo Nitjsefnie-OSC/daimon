@@ -1076,3 +1076,20 @@ async def test_plain_spawn_with_no_budget_left_refuses_before_admission() -> Non
                 "fleet_spawn", {"operation_key": "W1", "role": "W1", "task": "Compare X and Y."}
             )
     orchestrator.spawn.assert_not_awaited()
+
+
+async def test_planned_workers_hint_reaches_the_default_budget() -> None:
+    bridge, orchestrator = plain_bridge(plain_root())
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {"operation_key": "W1", "role": "W1", "task": "Compare X and Y.", "planned_workers": 2},
+        )
+        with pytest.raises(ToolError):
+            await client.call_tool(
+                "fleet_spawn",
+                {"operation_key": "W2", "role": "W2", "task": "Go.", "planned_workers": 0},
+            )
+    # Run budget $1 shared by the 2 planned workers instead of 3 slots.
+    assert orchestrator.spawn.await_args.kwargs["limits"].budget_usd == Decimal("0.50")
+    orchestrator.spawn.assert_awaited_once()

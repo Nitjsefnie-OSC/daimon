@@ -18,7 +18,7 @@ from daimon.core.channel_budget import (
     produce_fleet_budget,
     watch_fleet_budget,
 )
-from daimon.core.fleet import FleetConflict, worker_slot
+from daimon.core.fleet import FleetConflict, holds_slot, worker_slot
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions, resolve_worker_spec
 from daimon.core.pricing import ModelRates, ProviderPrice
 from daimon.core.stores import (
@@ -125,7 +125,7 @@ async def sm(db_preflight, db_engine, db_clean):
     return async_sessionmaker(db_engine, expire_on_commit=False)
 
 
-async def setup(sm, *, provider="gemini", funds="10", cap="3", parent=None):
+async def setup(sm, *, provider="gemini", funds="10", cap="3", parent=None, max_workers=8):
     parent = parent or root(provider)
     async with sm() as db, db.begin():
         tenant = await make_tenant(db, id=UUID(parent.fleet.scope.tenant_id))
@@ -164,7 +164,7 @@ async def setup(sm, *, provider="gemini", funds="10", cap="3", parent=None):
             operation_key="owned-spawn",
             total_budget_usd=Decimal(cap),
             deadline_at=parent.limits.deadline,
-            max_workers=8,
+            max_workers=max_workers,
             created_by="host",
         )
     parent = replace(parent, fleet=replace(parent.fleet, run_id=run.id))
@@ -2436,3 +2436,48 @@ async def test_run_watch_is_not_starved_by_back_to_back_short_lock_holds(sm, mon
         await asyncio.gather(*hammers)
         finished.set()
         assert await asyncio.wait_for(watch, 3) == "finished"
+
+
+async def _parallel_default_spawns(sm, parent, run, hints):
+    """Each spawn reads the same empty snapshot, as parallel fleet_spawn calls do."""
+    from daimon.core.neutral_resources import default_worker_limits
+
+    shares = [
+        default_worker_limits(
+            parent.limits, run, (), provider=parent.spec.model.provider, planned_workers=hint
+        ).budget_usd
+        for hint in hints
+    ]
+    workers = [
+        await add(sm, parent, ordinal=ordinal, budget=str(share.normalize()))
+        for ordinal, share in enumerate(shares)
+    ]
+    return await asyncio.gather(*(reserve(sm, parent, worker) for worker in workers))
+
+
+@pytest.mark.parametrize("hints", [(2, 2, 2, 2), (2, 4, 2, 4)])
+async def test_under_planned_parallel_spawns_never_burn_slots(sm, hints):
+    """More spawns at once than planned are refused at admission, and free their slot."""
+    parent, run = await setup(sm, cap="1", max_workers=4)
+    results = await _parallel_default_spawns(sm, parent, run, hints)
+    admitted = [result for result in results if result.admitted]
+    refused = [result for result in results if not result.admitted]
+    assert refused and all(result.worker.status == "cancelled" for result in refused)
+    assert sum(result.worker.budget_usd for result in admitted) <= run.total_budget_usd
+    # Every refused spawn left its slot: the run can still fill all 4 with live workers.
+    for ordinal in range(len(hints), len(hints) + len(refused)):
+        await add(sm, parent, ordinal=ordinal, budget="0.01")
+    with pytest.raises(FleetConflict, match="allows 4 workers"):
+        await add(sm, parent, ordinal=len(hints) + len(refused), budget="0.01")
+    async with sm() as db, db.begin():
+        _, workers = await fleet.run_status(db, tenant_id=run.tenant_id, run_id=run.id)
+    assert sum(1 for worker in workers if holds_slot(worker)) == run.max_workers
+
+
+async def test_admission_refusals_stay_bounded_by_twice_max_workers(sm):
+    parent, run = await setup(sm, cap="1", max_workers=2)
+    for ordinal in range(4):
+        worker = await add(sm, parent, ordinal=ordinal, budget="2")
+        assert not (await reserve(sm, parent, worker)).admitted
+    with pytest.raises(FleetConflict, match="allows 2 workers"):
+        await add(sm, parent, ordinal=4, budget="0.01")
