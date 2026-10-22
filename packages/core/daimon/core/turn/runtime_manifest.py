@@ -8,6 +8,7 @@ import os
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import replace
 from datetime import datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
@@ -2632,6 +2633,51 @@ def _matching_rows(
         and field_matches(row, "account_id", request.scope.account_id)
         and manifest_configuration_matches(row, revision)
     ]
+
+
+def manifest_hold_usd(
+    revision: ConfigRevision, *, tenant_id: str, account_id: str
+) -> Decimal | None:
+    """The smallest per-turn hold of any installed row that could serve this configuration.
+
+    Rows match as `select_runtime_manifest` matches them, exact or wildcard; taking
+    the smallest hold is the conservative bound when several could apply. None when no
+    manifest is installed, unreadable, or no row with a hold matches.
+    """
+    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    if not manifest_path:
+        return None
+    try:
+        with Path(manifest_path).open("rb") as manifest:
+            raw = manifest.read(_MAX_BYTES + 1)
+        if len(raw) > _MAX_BYTES:
+            return None
+        rows = _ROWS.validate_json(raw)
+    except (OSError, ValidationError):
+        return None
+
+    def matches(row: dict[str, JsonValue], field: str, actual: str) -> bool:
+        return row.get(field) in (actual, _WILDCARD)
+
+    holds: list[Decimal] = []
+    for row in rows:
+        if not (
+            row.get("profile") == revision.profile
+            and row.get("tenant_id") == tenant_id
+            and matches(row, "platform", revision.channel.platform)
+            and matches(row, "channel_id", revision.channel.channel_id)
+            and matches(row, "account_id", account_id)
+        ):
+            continue
+        try:
+            if not manifest_configuration_matches(row, revision):
+                continue
+            hold = Decimal(str(row["hold_usd"]))
+        except (KeyError, ArithmeticError, ValidationError, ValueError):
+            continue
+        if hold.is_finite() and hold > 0:
+            holds.append(hold)
+    return min(holds) if holds else None
 
 
 def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
