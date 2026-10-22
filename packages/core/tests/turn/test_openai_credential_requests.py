@@ -292,6 +292,8 @@ async def case(db_engine: AsyncEngine, db_clean: None, tmp_path: Path) -> AsyncI
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
             now=NOW,
             expires_at=NOW + timedelta(hours=2),
         )

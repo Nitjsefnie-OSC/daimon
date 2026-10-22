@@ -196,6 +196,7 @@ def _override_users_info_admin(mock: Any) -> None:
             "user": {
                 "id": _USER_ID,
                 "name": "admin",
+                "team_id": _TEAM_ID,
                 "is_admin": True,
                 "is_owner": False,
                 "is_primary_owner": False,

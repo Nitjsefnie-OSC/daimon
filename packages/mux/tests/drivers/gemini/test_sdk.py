@@ -455,3 +455,100 @@ async def test_sdk_counts_full_worker_prompt_including_system_and_cache(count):
     assert body["generateContentRequest"]["contents"] == [
         {"role": "user", "parts": [{"text": "Complete this task"}]}
     ]
+
+
+HIGH_DEMAND = {
+    "error": {
+        "code": "api_error",
+        "message": "The model is currently experiencing high demand. Please try again later.",
+    }
+}
+
+
+@pytest.mark.parametrize(
+    ("status", "body", "category", "native_code"),
+    [
+        (500, HIGH_DEMAND, "overloaded", "high_demand"),
+        (500, {"error": {"code": 500, "message": "internal"}}, "upstream", None),
+        (500, {"error": {"code": "api_error", "message": "internal"}}, "upstream", None),
+        (503, HIGH_DEMAND, "overloaded", "503"),
+        (400, HIGH_DEMAND, "invalid_request", None),
+    ],
+)
+async def test_sdk_interaction_read_classifies_high_demand_without_retrying(
+    status: int, body: dict[str, JsonValue], category: str, native_code: str | None
+) -> None:
+    calls: list[httpx.Request] = []
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        calls.append(request)
+        return httpx.Response(status, json=body)
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).get("i1")
+        assert (exc.value.category, exc.value.native_code) == (category, native_code)
+        assert exc.value.retryable == (status >= 500)
+        assert len(calls) == 1 and calls[0].method == "GET"
+        await client.aio.aclose()
+
+
+async def test_sdk_high_demand_create_never_falls_back_to_another_model() -> None:
+    from contextlib import AsyncExitStack
+
+    from mux.drivers.gemini.flash import FLASH_MODELS, FlashTransport
+    from mux.testing.isolated_sdk import build_gemini_client
+
+    from .test_flash import Accounting
+
+    captured: list[httpx.Request] = []
+
+    def handle(request: httpx.Request) -> httpx.Response:
+        captured.append(request)
+        return httpx.Response(500, json=HIGH_DEMAND)
+
+    async with AsyncExitStack() as stack:
+        client = build_gemini_client(transport=httpx.MockTransport(handle), api_key="offline")
+        stack.callback(client.close)
+        stack.push_async_callback(client.aio.aclose)
+        transport = FlashTransport(SDKTransport(client), Accounting())
+        with pytest.raises(ProviderError) as exc:
+            await transport.create(
+                {
+                    "model": FLASH_MODELS[0],
+                    "generation_config": {"max_output_tokens": 4096},
+                    "tools": [],
+                    "input": [{"type": "text", "text": "question"}],
+                }
+            )
+    assert (exc.value.category, exc.value.native_code) == ("overloaded", "high_demand")
+    assert len(captured) == 1
+
+
+@pytest.mark.parametrize(
+    ("status", "category"),
+    [(500, "upstream"), (408, "upstream"), (503, "overloaded"), (400, "invalid_request")],
+)
+async def test_sdk_errors_record_the_http_status_for_logs(status: int, category: str) -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        return httpx.Response(status, json={"error": {"message": "SECRET", "code": status}})
+
+    async with httpx.AsyncClient(transport=httpx.MockTransport(handler)) as http:
+        client = genai.Client(
+            api_key="offline-fixture",
+            http_options=HttpOptions(
+                httpx_async_client=http, retry_options=HttpRetryOptions(attempts=1)
+            ),
+        )
+        with pytest.raises(ProviderError) as exc:
+            await SDKTransport(client).get("i1")
+        assert exc.value.category == category
+        assert exc.value.native_error_code == f"http_{status}"
+        assert "SECRET" not in str(exc.value)
+        await client.aio.aclose()

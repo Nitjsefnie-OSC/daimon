@@ -115,6 +115,7 @@ from daimon.core.turn.run import (
 from daimon.core.turn.runtime_manifest import capture_preparation_source
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.actions import UserMessage
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import TextPart
@@ -193,6 +194,7 @@ async def run_turn(
     model_override: str | None = None,
     personal_memory: bool = False,
     platform: str | None = None,
+    hold: TurnHold | None = None,
 ) -> str:
     observation = current_outcome.get()
     owns_observation = observation is None
@@ -224,6 +226,7 @@ async def run_turn(
             model_override=model_override,
             personal_memory=personal_memory,
             platform=platform,
+            hold=hold,
         )
     observation.agent_id = agent_id
     observation.account_id = account_id
@@ -255,6 +258,7 @@ async def run_turn(
                 model_override=model_override,
                 personal_memory=personal_memory,
                 platform=platform,
+                hold=hold,
             )
     except BaseException as exc:
         # The enclosing scheduler owns its deadline and classifies wait_for cancellation.
@@ -290,6 +294,7 @@ async def run_turn_impl(
     model_override: str | None = None,
     personal_memory: bool = False,
     platform: str | None = None,
+    hold: TurnHold | None = None,
 ) -> str:
     """Run a single non-interactive turn end-to-end and return its complete final reply.
 
@@ -366,6 +371,10 @@ async def run_turn_impl(
     same (read-only, for a routine) access as the shared one. The scheduler
     sets it only for a routine whose result reaches nobody but its owner,
     decided again at every fire (`rule_views.routine_answers_only_owner`).
+
+    ``hold`` runs the turn held to a shared channel (`routine_hold.routine_hold`):
+    the channel's own store replaces the agent-wide and personal ones, and the
+    Daimon credential is the held one.
     """
     turn_scope: Scope | None = None
     if load_turn_settings().path == "mux":
@@ -448,6 +457,10 @@ async def run_turn_impl(
             # (`rule_views.routine_answers_only_owner`); read-only like the
             # shared mount, since a routine's memory is always read-only.
             personal_memory=personal_memory,
+            # A fire into a shared channel runs held to it: that channel's own
+            # (read-only) memory and the held credential, never agent-wide memory.
+            hold=hold,
+            memory_hold=hold,
             tool_safety=tool_safety,
             budget_channel_id=budget_channel_id,
             origin_channel_id=origin_place.channel_id if origin_place is not None else None,

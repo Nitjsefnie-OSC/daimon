@@ -168,6 +168,8 @@ async def test_publishing_from_inside_the_pin_or_as_admin_is_allowed(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )

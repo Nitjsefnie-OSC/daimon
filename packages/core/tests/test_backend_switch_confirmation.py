@@ -840,3 +840,72 @@ async def test_real_sdk_refresh_preserves_default_bytes_and_the_selected_gate(ow
     assert bodies[0] == bodies[1]
     assert bodies[1] != bodies[2]
     assert not trace.violations and not trace.replies
+
+
+def test_switch_prompt_carries_an_optional_model() -> None:
+    picked = prompt_for_tool_call(
+        _call(target_backend="gemini", model="gemini-4-argon"),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    assert picked.backend_switch is not None and picked.backend_switch.model == "gemini-4-argon"
+    legacy = prompt_for_tool_call(
+        _call(), requester_platform_user_id="requester", now=datetime.now(UTC)
+    )
+    assert legacy.backend_switch is not None and "model" not in legacy.backend_switch.model_dump()
+
+
+@pytest.mark.parametrize(
+    ("default_agent", "place"), [(False, "server"), (True, "server"), (True, "workspace")]
+)
+async def test_card_names_the_model_and_where_the_switch_applies(
+    owned_preview, default_agent, place
+):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, trace, payload, reply, _ = owned_preview
+    policy = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(
+        agent.tenant_id, ("anthropic", "openai", "gemini"), policy.revision, actor
+    )
+    preview = await service.preview(agent, "gemini", "gemini-4-argon")
+    prompt = prompt_for_tool_call(
+        _call(
+            target_backend="gemini",
+            model="gemini-4-argon",
+            expected_revision=preview.setting_revision,
+            preview_digest=preview.digest,
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    prepare, check = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+        default_agent_name="Researcher" if default_agent else "daimon",
+        place_word=place,
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    assert prepared.title == "Switch Researcher to gemini (gemini-4-argon)?"
+    assert prepared.consequence is not None
+    reach = (
+        f"Affects new conversations in every channel on this {place}"
+        if default_agent
+        else "Affects new conversations wherever Researcher answers"
+    )
+    assert prepared.consequence.startswith(reach + "; existing threads keep their model.")
+    assert prepared.detail_lines[-1] == preview.cost_line
+    # The same card for the default model refuses: the server preview differs.
+    other = prompt.model_copy(
+        update={"backend_switch": prompt.backend_switch.model_copy(update={"model": None})}
+    )
+    trace.queue(reply())
+    assert await check(other, "requester") is not None
+    assert await service.current(agent) is None

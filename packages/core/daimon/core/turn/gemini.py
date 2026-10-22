@@ -8,6 +8,8 @@ no Anthropic model-request span or meter is manufactured for Gemini.
 from __future__ import annotations
 
 import asyncio
+import json
+import random
 from collections import deque
 from collections.abc import AsyncIterator, Mapping, Sequence
 from contextlib import suppress
@@ -17,6 +19,7 @@ from decimal import Decimal
 from typing import cast
 from uuid import uuid4
 
+import httpx
 import structlog
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
@@ -41,6 +44,7 @@ from mux.contracts.events import (
     AgentMessagePayload,
     Event,
     HistoryGapPayload,
+    NativePart,
     RequiresActionPayload,
     TextPart,
     ToolResultPayload,
@@ -63,7 +67,7 @@ from mux.drivers.gemini.skill_deployment import SkillBundlePublisher
 from mux.drivers.gemini.storage import Storage
 from mux.drivers.gemini.transport import Transport
 from mux.errors import ContinuityLost, ProviderError, ScopeViolation, UnsupportedCapability
-from mux.profiles.gemini import WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
+from mux.profiles.gemini import ARGON_MODEL, WORKER_MAX_TOTAL_TOKENS, WORKER_MODEL
 from mux.state.store import StateStore
 from pydantic import JsonValue, TypeAdapter
 
@@ -71,6 +75,12 @@ PROFILE = "gemini.inline_reuse"
 _DISPLAY = TypeAdapter[BetaManagedAgentsSessionEvent](BetaManagedAgentsSessionEvent)
 _INPUTS = TypeAdapter(list[dict[str, JsonValue]])
 log = structlog.get_logger(__name__)
+
+#: Most a host terminal failure waits to stop the native interaction.
+ABANDON_TIMEOUT_S = 10.0
+#: First backoff after a failed stream open/read; doubles per consecutive
+#: failure (jittered, capped at 32x). Any delivered event resets it.
+STREAM_RETRY_BASE_S = 1.0
 
 
 @dataclass(frozen=True)
@@ -112,13 +122,13 @@ class GeminiTransportRuntime:
 def _runtime_model(runtime: TurnRuntime | None) -> str:
     journal = runtime.journal if runtime is not None else None
     deployment = journal.deployment if isinstance(journal, GeminiJournal) else None
-    return (
-        deployment.agent.model.id
-        if deployment is not None
-        and (deployment.max_total_tokens is not None or deployment.max_input_tokens is not None)
-        and deployment.agent.model.id in (FLASH_PRIMARY, WORKER_MODEL)
-        else FLASH_PRIMARY
-    )
+    if deployment is None:
+        return FLASH_PRIMARY
+    model = deployment.agent.model.id
+    capped = deployment.max_total_tokens is not None or deployment.max_input_tokens is not None
+    if (capped and model in (FLASH_PRIMARY, WORKER_MODEL)) or (not capped and model == ARGON_MODEL):
+        return model
+    return FLASH_PRIMARY
 
 
 def compose_gemini_backend(request: TurnBackendRequest) -> TurnBackend:
@@ -202,6 +212,7 @@ def gemini_backend(
         runtime.usage_store.accounting,
         native_agent=deployment.native_agent if deployment.max_input_tokens is None else None,
         bounded_worker=deployment.max_input_tokens is not None,
+        primary=ARGON_MODEL if required_model == ARGON_MODEL else FLASH_PRIMARY,
     )
     return GeminiManagedAgents(
         transport,
@@ -227,6 +238,26 @@ def compose_gemini_codec(request: TurnCodecRequest) -> GeminiTurnIO:
     return GeminiTurnIO(
         request.backend, request.scope, request.session, persistence=request.persistence
     )
+
+
+def _display_part(part: object) -> dict[str, object]:
+    """Host display text for a saved tool-result part; the journal keeps it native.
+
+    Gemini returns MCP results as an object (`result` text, `call_tool_result_json`,
+    `structured_content`), not text parts.
+    """
+    if isinstance(part, TextPart):
+        return part.model_dump()
+    if isinstance(part, NativePart):  # The driver's saved tool-result payload.
+        result = part.payload.get("result")
+        if isinstance(result, dict):
+            obj = cast(dict[str, object], result)
+            for key in ("result", "call_tool_result_json"):
+                text = obj.get(key)
+                if isinstance(text, str):
+                    return {"type": "text", "text": text}
+        return {"type": "text", "text": json.dumps(result, sort_keys=True, default=str)}
+    raise UnsupportedCapability(("gemini_native_tool_result_display",), PROFILE)
 
 
 class GeminiTurnIO:
@@ -257,6 +288,8 @@ class GeminiTurnIO:
         self._streams: list[_LazyStream] = []
         self._tool_ids: dict[tuple[str | None, str], str] = {}
         self._actions: dict[str, str] = {}
+        # Consecutive stream failures without a delivered event (backoff step).
+        self.stream_failures = 0
 
     async def send(self, events: Sequence[BetaManagedAgentsEventParams]) -> None:
         inputs: list[InputEvent] = []
@@ -412,12 +445,10 @@ class GeminiTurnIO:
             paired = self._tool_ids.get((event.turn_id, payload.call_id))
             if paired is None:
                 raise ProviderError("upstream", retryable=False, native_code="orphan_tool_result")
-            if any(not isinstance(part, TextPart) for part in payload.content):
-                raise UnsupportedCapability(("gemini_native_tool_result_display",), PROFILE)
             display.update(
                 type="agent.tool_result",
                 tool_use_id=paired,
-                content=[p.model_dump() for p in payload.content],
+                content=[_display_part(p) for p in payload.content],
                 is_error=payload.is_error,
             )
         elif isinstance(payload, TurnEndedPayload):
@@ -580,6 +611,37 @@ class GeminiTurnIO:
         if stream in self._streams:
             self._streams.remove(stream)
 
+    async def abandon_native(self, *, timeout_s: float = ABANDON_TIMEOUT_S) -> None:
+        """Stop a still-running interaction after the host gave up on the turn.
+
+        Best effort and bounded: a host failure must not leave Gemini working
+        (and spending) on a reply nobody will deliver.
+        """
+        root = self.root
+        if root is None:
+            return
+        try:
+            async with asyncio.timeout(timeout_s):
+                projection = await self.backend.events.reconcile(self.scope, self.session)
+                # Only this turn's own interaction, and only while it still runs.
+                if projection.state != "running" or projection.active_root_turn != root:
+                    return
+                stopped = await self._interrupt(timeout_s=timeout_s, root=root)
+            log.info(
+                "turn.gemini_native_abandoned",
+                session_id=self.session.id,
+                stopped=stopped.stopped,
+                outcome=stopped.outcome,
+            )
+        except Exception as error:
+            log.warning(
+                "turn.gemini_native_abandon_failed",
+                session_id=self.session.id,
+                error_class=type(error).__name__,
+                category=getattr(error, "category", None),
+                native_code=getattr(error, "native_code", None),
+            )
+
     async def interrupt(self, *, timeout_s: float) -> StopObservation:
         try:
             return await self._interrupt(timeout_s=timeout_s)
@@ -588,11 +650,12 @@ class GeminiTurnIO:
                 kind="interrupt_timeout", message="Gemini cancellation deadline expired"
             ) from error
 
-    async def _interrupt(self, *, timeout_s: float) -> StopObservation:
+    async def _interrupt(self, *, timeout_s: float, root: str | None = None) -> StopObservation:
         deadline = datetime.now(UTC) + timedelta(seconds=timeout_s)
         async with asyncio.timeout(timeout_s):
-            projection = await self.backend.events.reconcile(self.scope, self.session)
-            root = projection.active_root_turn or self.root
+            if root is None:
+                projection = await self.backend.events.reconcile(self.scope, self.session)
+                root = projection.active_root_turn or self.root
             if root is None:
                 records = await self._history()
                 root = next((event.turn_id for event in reversed(records) if event.turn_id), None)
@@ -659,6 +722,30 @@ class GeminiTurnIO:
         await self.backend.sessions.archive(self.scope, self.session, key=str(uuid4()))
 
 
+class _StreamFailure(Exception):
+    def __init__(self, phase: str, error: ProviderError) -> None:
+        super().__init__(phase)
+        self.phase, self.error = phase, error
+
+
+def _transient_stream_error(error: ProviderError) -> bool:
+    """A failed SSE open/read that says nothing about the interaction itself.
+
+    Only network failures, overload, 408 and 5xx qualify. Other statuses
+    (an unmapped 4xx), status-less SDK errors, definite refusals, rate limits
+    (finalized with their retry-after) and the driver's own check failures (a
+    native code) end the turn.
+    """
+    if error.category in ("overloaded", "transient_network"):
+        return True
+    status = error.native_error_code or ""
+    return (
+        error.category == "upstream"
+        and error.native_code is None
+        and (status == "http_408" or status.startswith("http_5"))
+    )
+
+
 class _LazyStream(AsyncIterator[TurnEvent]):
     def __init__(self, io: GeminiTurnIO, timeout_s: float) -> None:
         self.io, self.timeout_s = io, timeout_s
@@ -683,16 +770,20 @@ class _LazyStream(AsyncIterator[TurnEvent]):
         if self._reader is not None:
             raise RuntimeError("concurrent Gemini stream reads are unsupported")
         self._reader = asyncio.current_task()
+        idle = asyncio.timeout(self.timeout_s)
         try:
-            async with asyncio.timeout(self.timeout_s):
+            async with idle:
                 await self._gate.wait()
                 if self._closed:
                     raise StopAsyncIteration
                 if self._source is None:
                     self._root = self.io.root
-                    self._source = await self.io.backend.events.open_stream(
-                        self.io.scope, self.io.session
-                    )
+                    try:
+                        self._source = await self.io.backend.events.open_stream(
+                            self.io.scope, self.io.session
+                        )
+                    except ProviderError as error:
+                        raise _StreamFailure("open", error) from error
                     if self._closed:
                         source, self._source = self._source, None
                         close = getattr(source, "aclose", None)
@@ -714,6 +805,8 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                             raise StopAsyncIteration
                         try:
                             event = await self._source.__anext__()
+                        except ProviderError as error:
+                            raise _StreamFailure("read", error) from error
                         except StopAsyncIteration:
                             raise TurnConnectionLost(
                                 "Gemini stream ended without an authoritative root outcome"
@@ -733,7 +826,42 @@ class _LazyStream(AsyncIterator[TurnEvent]):
                         await self.io.persistence.record(self.io.session, normalized)
                     self.io.check_terminal(normalized)
                     self._ended |= normalized.type == "session.turn_ended"
+                    self.io.stream_failures = 0
                     return frame
+        except _StreamFailure as failure:
+            await self.close()
+            error = failure.error
+            transient = _transient_stream_error(error)
+            log.warning(
+                "turn.gemini_stream_error",
+                session_id=self.io.session.id,
+                phase=failure.phase,
+                category=error.category,
+                retryable=error.retryable,
+                native_code=error.native_code,
+                http_status=error.native_error_code,
+                action="eventless_cycle" if transient else "fail",
+            )
+            if not transient:
+                raise error from None
+            # The stream only notifies; the interaction's state is read by GET.
+            # Back off (bounded by the turn deadline), then let the driver check
+            # status and reconnect or finalize, as for an idle stream.
+            step = min(self.io.stream_failures, 5)
+            self.io.stream_failures += 1
+            await asyncio.sleep(random.uniform(0.5, 1.0) * STREAM_RETRY_BASE_S * 2**step)
+            raise httpx.ReadTimeout(
+                f"Gemini stream failed ({error.category}); checking interaction status"
+            ) from None
+        except TimeoutError:
+            await self.close()
+            if not idle.expired():
+                raise
+            # Gemini can stay silent past one read while the interaction
+            # still runs or has already completed. That is the driver's
+            # eventless cycle (status check, then reconnect or replay), never
+            # the turn ceiling, which the caller's own deadline enforces.
+            raise httpx.ReadTimeout(f"Gemini stream sent no event for {self.timeout_s}s") from None
         except BaseException:
             await self.close()
             raise

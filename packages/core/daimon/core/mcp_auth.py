@@ -39,9 +39,11 @@ from daimon.core.authz import (
     build_subject,
     build_turn_place,
 )
+from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
 from daimon.core.stores.domain import McpTokenRow
+from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
@@ -115,6 +117,7 @@ def mint_jwt(
     expires_at: dt.datetime | None = None,
     chat_agent_id: uuid.UUID | None = None,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
     anthropic_disabled: bool = False,
 ) -> str:
     """Sign `{sub: <account_uuid>, iat: <unix ts>}` HS256 with `secret`.
@@ -136,6 +139,8 @@ def mint_jwt(
       without selecting the restricted external agent-chat tool surface.
     - ``slack_turn_context_id`` is an execution grant used only by isolated Slack
       DM session credentials. Readers require the matching live tenant/account row.
+    - ``hold`` signs the channel a held turn is kept to (`daimon.core.mcp_hold`).
+      The MCP server honours it only when the registry row names the same channel.
     - When ``is_admin`` is ``True``, an ``"is_admin": True`` claim is added
       Omitted when ``False`` to keep non-admin tokens minimal. Note: the MCP
       admin gate only trusts ``is_admin`` when the token also carries ``internal=True``
@@ -143,7 +148,7 @@ def mint_jwt(
       Discord vault token's baked
       ``is_admin`` claim alone never elevates a non-admin caller.
     """
-    claims: dict[str, str | int | bool] = {
+    claims: dict[str, str | int | bool | dict[str, str | bool]] = {
         "sub": str(account_id),
         "iat": int(now.timestamp()),
     }
@@ -160,6 +165,8 @@ def mint_jwt(
         claims["chat_agent_id"] = str(chat_agent_id)
     if slack_turn_context_id is not None:
         claims["slack_turn_context_id"] = str(slack_turn_context_id)
+    if hold is not None:
+        claims[HOLD_CLAIM] = hold_claim(hold)
     if anthropic_disabled:
         claims["anthropic_disabled"] = True
     if is_admin:
@@ -175,9 +182,17 @@ PANEL_TOKEN_LABEL = "billing-panel"
 EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 
 
-def chat_token_label(jti: uuid.UUID) -> str:
+#: A held chat token's own label. The verifier before held credentials existed
+#: knows only `vault-chat:`; under any other label it re-checks the token as a
+#: remote credential, whose exact four-claim shape a vault token never has, so
+#: it refuses a held token instead of admitting it as an unheld chat credential.
+HELD_CHAT_TOKEN_LABEL_PREFIX = "vault-chat-held:"
+
+
+def chat_token_label(jti: uuid.UUID, *, held: bool = False) -> str:
     """Bind the registry discriminator to a generated id, leaving user labels free."""
-    return f"{CHAT_TOKEN_LABEL_PREFIX}{jti}"
+    prefix = HELD_CHAT_TOKEN_LABEL_PREFIX if held else CHAT_TOKEN_LABEL_PREFIX
+    return f"{prefix}{jti}"
 
 
 async def mint_chat_mcp_token(
@@ -188,6 +203,7 @@ async def mint_chat_mcp_token(
     secret: bytes,
     now: dt.datetime,
     slack_turn_context_id: uuid.UUID | None = None,
+    hold: TurnHold | None = None,
     ttl: dt.timedelta = CHAT_TOKEN_TTL,
     anthropic_disabled: bool = False,
 ) -> tuple[str, uuid.UUID, dt.datetime]:
@@ -199,6 +215,12 @@ async def mint_chat_mcp_token(
     a shared vault does not revoke credentials of an already-running turn.
     Self-hosted callers sign the Anthropic prohibition into the credential so it
     remains enforceable even if the underlying agent record is later removed.
+
+    A ``hold`` binds the credential to one channel twice: the row records its
+    ``platform`` and ``channel_id`` (the verifier reads them live), and the JWT
+    carries the signed claim. The client flag lives only in the claim. The
+    verifier admits the token only when the two agree, so neither a row edit nor
+    a forged claim alone widens or narrows it.
     """
     from daimon.core.stores.accounts import get_account_with_tenant
     from daimon.core.stores.mcp_tokens import create_mcp_token_row
@@ -216,9 +238,11 @@ async def mint_chat_mcp_token(
         account_id=account_id,
         tenant_id=identity.tenant_id,
         agent_id=str(agent_id),
-        label=chat_token_label(jti),
+        label=chat_token_label(jti, held=hold is not None),
         created_at=now,
         expires_at=expires_at,
+        platform=None if hold is None else hold.platform,
+        channel_id=None if hold is None else hold.channel_id,
     )
     token = mint_jwt(
         account_id=account_id,
@@ -227,6 +251,7 @@ async def mint_chat_mcp_token(
         secret=secret,
         now=now,
         slack_turn_context_id=slack_turn_context_id,
+        hold=hold,
         jti=jti,
         expires_at=expires_at,
     )

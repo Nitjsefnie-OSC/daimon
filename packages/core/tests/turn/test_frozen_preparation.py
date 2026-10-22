@@ -934,8 +934,12 @@ async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
         for backend, model in plan["grant"]["choices"]:
             if model["provider"] == "gemini":
                 backend["model"] = model["id"] = "gemini-3.8-flash"
-    # Refresh only the host-owned lease; retain every recorded financial limit.
+    # Refresh the host-owned lease. The recorded provider lines total .585, over
+    # the recorded .49 run budget, which the grant preview now refuses (financial
+    # admission always did); raise only the run budget to their sum and keep every
+    # recorded provider line and worker budget.
     plan["grant"]["limits"]["deadline"] = current.expires_at.isoformat()
+    plan["grant"]["limits"]["budget_usd"] = "0.585"
     value = AgentFleetGrant.model_validate_json(json.dumps(plan["grant"]))
     service = AgentBackendService(deps.sessionmaker, enabled=True)
     actor = BackendActor(source.tenant_id, prepared.admission.account_id, Subject(is_admin=True))
@@ -952,7 +956,7 @@ async def test_heterogeneous_root_reconstructs_before_planned_worker_dispatch(
     parent, policy = await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
     original_limits = parent.limits
     assert parent.spec.model.provider == "anthropic"
-    assert parent.limits.budget_usd == Decimal("0.49")
+    assert parent.limits.budget_usd == Decimal("0.585")
     assert parent.limits.provider_limits_usd["anthropic"] == Decimal("0.04")
     before = len(transport.requests)
     request = await read_frozen_preparation(

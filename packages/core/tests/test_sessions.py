@@ -33,8 +33,10 @@ from daimon.core.github_app_auth import BotIdentity
 from daimon.core.github_app_session import AppSessionAccess, AppToken
 from daimon.core.github_credentials import build_multifernet
 from daimon.core.memory_resource import (
+    CHANNEL_MEMORY_INSTRUCTIONS,
     MEMORY_INSTRUCTIONS,
     PERSONAL_MEMORY_INSTRUCTIONS,
+    READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS,
     READ_ONLY_MEMORY_INSTRUCTIONS,
     READ_ONLY_PERSONAL_MEMORY_INSTRUCTIONS,
     SHARED_ONLY_MEMORY_INSTRUCTIONS,
@@ -49,6 +51,7 @@ from daimon.core.stores import credential_requests as requests_store
 from daimon.core.stores import mcp_oauth_flows as flows_store
 from daimon.core.stores.agent_files import put_agent_file
 from daimon.core.turn.posture import ExemptReason
+from daimon.core.turn_hold import TurnHold
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma_models import ma_agent, ma_environment
 from mux.testing.drivers.anthropic.ma import (
@@ -2090,6 +2093,167 @@ async def test_a_personal_store_outage_degrades_to_shared_only(
     )
 
 
+_HELD_PLACE = TurnHold(platform="slack", channel_id="C-SYN-1", client=False)
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+@pytest.mark.parametrize("read_only", [False, True])
+async def test_a_held_session_mounts_its_channel_store_alone(
+    read_only: bool,
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """Held, a session mounts only its channel's store: no agent-wide store, no
+    personal one even though the caller asked for it, and a second channel gets
+    its own. The same caller unheld still gets agent-wide plus personal."""
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    agent_uuid = uuid.uuid4()
+    mem_state = FakeMemoryStoreState()
+    bodies: list[dict[str, Any]] = []
+    client = _capturing_memory_client(mem_state, bodies)
+
+    for hold in (
+        _HELD_PLACE,
+        TurnHold(platform="slack", channel_id="C-SYN-2", client=False),
+        None,
+    ):
+        await create_session(
+            client,
+            agent=_make_agent(anthropic_id="ag_held", name="daimon-held"),
+            environment=_make_env(anthropic_id="env_held"),
+            account_id=account.id,
+            tenant_id=tenant.id,
+            agent_uuid=agent_uuid,
+            session_factory=db_session_factory,
+            memory_read_only=read_only,
+            personal_memory=True,
+            memory_hold=hold,
+        )
+
+    (first,), (second,), unheld = (_memory_mounts(body) for body in bodies)
+    assert first["memory_store_id"] != second["memory_store_id"]
+    assert first["instructions"] == (
+        READ_ONLY_CHANNEL_MEMORY_INSTRUCTIONS if read_only else CHANNEL_MEMORY_INSTRUCTIONS
+    )
+    assert first["access"] == ("read_only" if read_only else "read_write")
+    assert first["memory_store_id"] not in {m["memory_store_id"] for m in unheld}
+    assert len(unheld) == 2, "an unheld session mounts the agent-wide and the personal store"
+    assert {mem_state.stores[m["memory_store_id"]]["name"] for m in (first, second)} == {
+        "channel slack C-SYN-1",
+        "channel slack C-SYN-2",
+    }
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+async def test_a_held_session_without_a_caller_still_mounts_the_channel_store(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A shared thread's session has no caller account, hence no credential hold,
+    but its memory is the place's."""
+    tenant = await make_tenant(db_session)
+    await db_session.commit()
+    bodies: list[dict[str, Any]] = []
+
+    await create_session(
+        _capturing_memory_client(FakeMemoryStoreState(), bodies),
+        agent=_make_agent(anthropic_id="ag_thread"),
+        environment=_make_env(anthropic_id="env_thread"),
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        session_factory=db_session_factory,
+        memory_hold=_HELD_PLACE,
+    )
+
+    (mounted,) = _memory_mounts(bodies[0])
+    assert mounted["instructions"] == CHANNEL_MEMORY_INSTRUCTIONS
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+async def test_a_channel_store_outage_leaves_a_held_session_without_memory_not_with_agent_wide(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    tenant = await make_tenant(db_session)
+    account = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    bodies: list[dict[str, Any]] = []
+    memory_handler = make_fake_memory_store_handler(FakeMemoryStoreState())
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.method == "POST" and request.url.path == "/v1/memory_stores":
+            return httpx.Response(
+                500, json={"type": "error", "error": {"type": "api_error", "message": "boom"}}
+            )
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
+        body = json_body(request)
+        bodies.append(body)
+        return httpx.Response(
+            200,
+            json=_session_body(
+                session_id="sess_1", agent_id=body["agent"], environment_id=body["environment_id"]
+            ),
+        )
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_outage"),
+        environment=_make_env(anthropic_id="env_outage"),
+        account_id=account.id,
+        tenant_id=tenant.id,
+        agent_uuid=uuid.uuid4(),
+        session_factory=db_session_factory,
+        personal_memory=True,
+        memory_hold=_HELD_PLACE,
+    )
+
+    assert _memory_mounts(bodies[0]) == [], "nothing agent-wide or personal fills in for it"
+
+
+async def test_a_held_turn_never_reaches_a_fleet_worker_capture(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    """A fleet worker captures exactly one memory resource, the agent-wide store.
+    A held admission is refused before that source is read, the session a worker
+    would create refuses a held place, and the source projection refuses a hold."""
+    from daimon.core.sessions import project_session_resources
+    from daimon.core.turn.runtime_manifest import capture_preparation_source
+    from mux.errors import ScopeViolation
+
+    held_request = SimpleNamespace(admission=SimpleNamespace(hold=_HELD_PLACE))
+    with pytest.raises(ScopeViolation, match="held turn never captures"):
+        await capture_preparation_source(held_request)  # type: ignore[arg-type]
+
+    with pytest.raises(ScopeViolation, match="held turn never captures"):
+        await project_session_resources(
+            None,  # type: ignore[arg-type]
+            agent=None,  # type: ignore[arg-type]
+            environment=None,  # type: ignore[arg-type]
+            session_factory=db_session_factory,
+            tenant_id=uuid.uuid4(),
+            agent_uuid=uuid.uuid4(),
+            account_id=None,
+            resource_scope=None,  # type: ignore[arg-type]
+            memory_read_only=False,
+            hold=_HELD_PLACE,
+        )
+
+    with pytest.raises(ScopeViolation, match="held turn has no fleet worker"):
+        await create_session(
+            None,  # type: ignore[arg-type]
+            agent=None,  # type: ignore[arg-type]
+            environment=None,  # type: ignore[arg-type]
+            resource_source=SimpleNamespace(),  # type: ignore[arg-type]
+            memory_hold=_HELD_PLACE,
+        )
+
+
 # --- Agent-scoped external MCP credentials mirror into the caller's vault ----
 
 
@@ -3225,3 +3389,101 @@ async def test_source_environment_projection_retains_unrepresented_native_policy
     assert projected.native == environment.model_dump(mode="json", exclude_unset=True)
     transport.assert_consumed()
     assert [request.method for request in transport.requests] == ["GET"]
+
+
+@pytest.mark.usefixtures("empty_app_vault")
+@pytest.mark.parametrize("held", [False, True])
+async def test_create_session_mounts_the_vault_of_the_turns_hold(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    held: bool,
+) -> None:
+    """A held turn's session mounts a vault named for its hold, whose credential
+    carries the signed hold; an unheld turn's session mounts the ordinary one."""
+    import jwt as pyjwt
+    from daimon.core.mcp_hold import HOLD_CLAIM, hold_vault_suffix
+    from daimon.core.turn_hold import TurnHold
+
+    tenant = await make_tenant(db_session, platform="slack")
+    account = await make_account(db_session, tenant=tenant)
+    agent_uuid = uuid.uuid4()
+    hold = TurnHold(platform="slack", channel_id="C-SYN-1", client=True) if held else None
+    created_vaults: list[str] = []
+    credential_bodies: list[dict[str, Any]] = []
+    session_bodies: list[dict[str, Any]] = []
+    memory_handler = make_fake_memory_store_handler()
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        try:
+            return memory_handler(request)
+        except NotHandled:
+            pass
+        if request.method == "GET" and request.url.path == "/v1/vaults":
+            return httpx.Response(200, json={"data": [], "has_more": False})
+        if request.method == "POST" and request.url.path == "/v1/vaults":
+            name = json.loads(request.content)["display_name"]
+            created_vaults.append(name)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vlt_new",
+                    "type": "vault",
+                    "display_name": name,
+                    "metadata": None,
+                    "archived_at": None,
+                    "created_at": "2026-04-01T00:00:00Z",
+                },
+            )
+        if request.method == "POST" and request.url.path == "/v1/vaults/vlt_new/credentials":
+            body = json.loads(request.content)
+            credential_bodies.append(body)
+            return httpx.Response(
+                200,
+                json={
+                    "id": "vcrd_new",
+                    "type": "credential",
+                    "vault_id": "vlt_new",
+                    "auth": {
+                        "type": "static_bearer",
+                        "mcp_server_url": body["auth"]["mcp_server_url"],
+                    },
+                },
+            )
+        if request.method == "POST" and request.url.path.endswith("/v1/sessions"):
+            body = json.loads(request.content)
+            session_bodies.append(body)
+            sent_agent = body["agent"]
+            return httpx.Response(
+                200,
+                json=_session_body(
+                    session_id="sess_held",
+                    agent_id=sent_agent if isinstance(sent_agent, str) else sent_agent["id"],
+                    environment_id=body["environment_id"],
+                ),
+            )
+        raise AssertionError(f"unexpected call: {request.method} {request.url.path}")
+
+    await create_session(
+        build_fake_anthropic_http(handler),
+        agent=_make_agent(anthropic_id="ag_held"),
+        environment=_make_env(anthropic_id="env_held"),
+        account_id=account.id,
+        mcp_settings=McpSettings(
+            jwt_secret=SecretStr("x" * 32), public_url=HttpUrl("https://mcp.example.com/mcp")
+        ),
+        tenant_id=tenant.id,
+        agent_uuid=agent_uuid,
+        session_factory=db_session_factory,
+        hold=hold,
+    )
+
+    ordinary = f"daimon-mcp:{account.id}:{agent_uuid}"
+    assert created_vaults == [ordinary + (hold_vault_suffix(hold) if hold else "")]
+    claims = pyjwt.decode(
+        credential_bodies[0]["auth"]["token"],
+        "x" * 32,
+        algorithms=["HS256"],
+        options={"verify_exp": False},
+    )
+    assert (HOLD_CLAIM in claims) is held
+    assert session_bodies[0]["vault_ids"] == ["vlt_new"]

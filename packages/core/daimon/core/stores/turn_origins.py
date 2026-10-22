@@ -27,14 +27,16 @@ async def create_origin(
     role: Role,
     expires_at: datetime,
     now: datetime,
+    sender_foreign: bool,
+    shared_channel: bool,
     is_setup: bool = False,
-    sender_foreign: bool = False,
 ) -> TurnOriginRow:
     await session.execute(delete(TurnOrigin).where(TurnOrigin.expires_at <= now))
     origin = TurnOrigin(
         id=uuid.uuid4(),
         is_setup=is_setup,
         sender_foreign=sender_foreign,
+        shared_channel=shared_channel,
         created_at=now,
         tenant_id=tenant_id,
         account_id=account_id,

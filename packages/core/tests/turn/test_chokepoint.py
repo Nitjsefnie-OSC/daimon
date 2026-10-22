@@ -33,6 +33,7 @@ from daimon.core.turn.admission import Admission, admit
 from daimon.core.turn.deps import TurnDeps
 from daimon.core.turn.prepare import PreparedTurn, bind_session
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.ma import resolved_agent_env_router
 from daimon.testing.ma_models import ma_agent, ma_environment
 from daimon.testing.turn_fakes import RecordingLifecycle
@@ -181,6 +182,7 @@ async def test_chokepoint_admit_bind_session_run_prepared_turn_end_to_end(
     admission = await admit(
         deps,
         tenant_id=tenant.id,
+        requester_org=RequesterOrg.HOST,
         platform=platform,
         external_user_id="user-1",
         channel_id="chan-1",

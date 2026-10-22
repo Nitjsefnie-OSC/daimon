@@ -101,6 +101,7 @@ class BackendSwitchReference(BaseModel):
 
     agent: str = Field(min_length=1)
     target_backend: Provider
+    model: str | None = Field(default=None, min_length=1, exclude_if=lambda value: value is None)
     expected_revision: int = Field(ge=0, strict=True)
     preview_digest: str = Field(pattern=r"^[a-f0-9]{64}$")
     accepted_drops: tuple[str, ...] | None = Field(
@@ -356,6 +357,7 @@ def prompt_for_tool_call(
             {
                 "agent": data.get("agent_name"),
                 "target_backend": data.get("target_backend"),
+                "model": data.get("model"),
                 "expected_revision": data.get("expected_revision"),
                 "preview_digest": data.get("preview_digest"),
                 "accepted_drops": data.get("accepted_drops"),
@@ -506,6 +508,8 @@ def backend_switch_callbacks(
     account_id: uuid.UUID,
     current_admin: Callable[[str], Awaitable[bool]],
     resource_host: NeutralResourceHost | None = None,
+    default_agent_name: str | None = None,
+    place_word: str = "server",
 ) -> tuple[
     Callable[[ConfirmationPrompt], Awaitable[ConfirmationPrompt]],
     Callable[[ConfirmationPrompt, str], Awaitable[str | None]],
@@ -542,7 +546,7 @@ def backend_switch_callbacks(
             agent_name=reference.agent,
             resource_host=resource_host,
         )
-        preview = await service.preview(agent, reference.target_backend)
+        preview = await service.preview(agent, reference.target_backend, reference.model)
         if (
             preview.tenant_id != tenant_id
             or preview.agent_id != agent.agent_id
@@ -573,11 +577,19 @@ def backend_switch_callbacks(
             "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
             preview.cost_line,
         )
-        action = f"Switch {agent.name} to {preview.target_backend}"
+        target = preview.target_backend + (
+            f" ({preview.target_model})" if preview.target_model else ""
+        )
+        action = f"Switch {agent.name} to {target}"
         unavailable = (
             f"Won't be available on {preview.target_backend}: " + ", ".join(preview.declared_drops)
             if preview.declared_drops
             else ""
+        )
+        reach = (
+            f"Affects new conversations in every channel on this {place_word}"
+            if default_agent_name is not None and agent.name == default_agent_name
+            else f"Affects new conversations wherever {agent.name} answers"
         )
         return prompt.model_copy(
             update={
@@ -586,8 +598,8 @@ def backend_switch_callbacks(
                 "denied_action": "Model provider unchanged",
                 "detail_lines": details,
                 "consequence": (
-                    "Existing threads keep their provider; "
-                    "channel settings still apply to new threads."
+                    reach
+                    + "; existing threads keep their model."
                     + (
                         "\n" + unavailable + ". Revert any time; nothing is deleted."
                         if unavailable

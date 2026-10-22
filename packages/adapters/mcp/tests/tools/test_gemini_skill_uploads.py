@@ -222,6 +222,8 @@ class Case:
             responder_ma_agent_id=self.native_id,
             responder_name="helper",
             role=self.auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             message_text=message,
         ) as origin:
             yield str(origin.id)
@@ -364,6 +366,8 @@ async def case(db_session_factory: async_sessionmaker[AsyncSession]) -> AsyncIte
                 configuration_target_ma_agent_id=None,
                 configuration_target_name=None,
                 role=auth.role,
+                sender_foreign=False,
+                shared_channel=False,
                 now=datetime.now(UTC),
                 expires_at=datetime.now(UTC) + timedelta(minutes=10),
             )

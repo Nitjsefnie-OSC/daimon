@@ -93,6 +93,8 @@ async def test_switch_target_updates_shared_binding_and_only_requesting_snapshot
             configuration_target_ma_agent_id="agent_original",
             configuration_target_name="original",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             is_setup=True,
         ) as origin,
         turn_origin(
@@ -107,6 +109,8 @@ async def test_switch_target_updates_shared_binding_and_only_requesting_snapshot
             configuration_target_ma_agent_id="agent_original",
             configuration_target_name="original",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             is_setup=True,
         ) as concurrent,
     ):
@@ -162,6 +166,8 @@ async def test_tool_rejects_wrong_or_expired_origin_before_ma_access(
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         now=now,
         expires_at=now + timedelta(minutes=-1 if mismatch == "expired" else 10),
         is_setup=True,
@@ -243,6 +249,8 @@ async def test_origin_refuses_agent_scoped_token_for_another_responder(
         responder_ma_agent_id="agent_daimon",
         responder_name="Daimon",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         auth = AuthIdentity(
             account_id=account.id,
@@ -408,6 +416,8 @@ async def test_setup_target_refuses_in_a_handoff_thread_and_names_who_answers(
         responder_ma_agent_id="agent_research",
         responder_name="research-bot",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError, match="handoff conversation: research-bot answers here"):
             await _set_setup_target_impl(
@@ -465,6 +475,8 @@ async def test_setup_target_refusal_in_ordinary_chat_keeps_configuration_open(
         responder_ma_agent_id="agent_daimon",
         responder_name="daimon",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as origin:
         with pytest.raises(ToolError) as refused:
             await _set_setup_target_impl(
@@ -512,6 +524,8 @@ async def test_missing_origin_uses_the_callers_only_running_turn(
         responder_ma_agent_id="agent_daimon",
         responder_name="Daimon",
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
     ) as first:
         assert (await require_turn_origin(runtime, auth, "")).id == first.id
         # A second running turn with the same agent makes it ambiguous: refuse.
@@ -525,6 +539,8 @@ async def test_missing_origin_uses_the_callers_only_running_turn(
             responder_ma_agent_id="agent_daimon",
             responder_name="Daimon",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
         ):
             with pytest.raises(ToolError, match="origin_context_id"):
                 await require_turn_origin(runtime, auth, "")

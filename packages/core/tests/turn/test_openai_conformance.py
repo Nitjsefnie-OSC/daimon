@@ -28,6 +28,7 @@ from daimon.core.turn.persistence import TurnPersistence
 from daimon.core.turn.posture import BillingExempt
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session_impl
 from daimon.core.turn.termination import TerminationReason
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing import pytest_plugin as database_plugin
 from daimon.testing.accounting_conformance import HostAccountingHook
 from daimon.testing.db import DatabasePreflight, require_owned_sessionmaker
@@ -497,6 +498,7 @@ async def test_c14_normal_current_config_retains_native_binding(
             admitted = await admit_impl(
                 deps,
                 tenant_id=TENANT,
+                requester_org=RequesterOrg.HOST,
                 platform="slack",
                 external_user_id="caller",
                 channel_id="channel",

@@ -46,6 +46,8 @@ from daimon.core.confirmation import confirmed_tools_for_turn
 from daimon.core.credential_env import assemble_env_bytes
 from daimon.core.github_app_session import AppSessionAccess, token_scopes_for_tokens
 from daimon.core.ma_identity import derive_agent_uuid
+from daimon.core.mcp_hold import hold_key
+from daimon.core.memory_resource import memory_scope
 from daimon.core.mux_backend import TurnRuntime, managed_agents, resource_ref, resource_scope
 from daimon.core.mux_compat import legacy_call, retrieve_agent, sdk_agent
 from daimon.core.native_footer_cost import NativeFooterCostContext
@@ -673,6 +675,11 @@ async def create_ma_session(
             confirmed_tools=confirmed_tools_for_turn(deps),
             daimon_rule_tools=admission.daimon_rule_tools,
             slack_turn_context_id=admission.slack_turn_context_id,
+            # A held turn mounts its own channel-bound Daimon credential; a shared
+            # thread has no caller account and so no credential to hold.
+            hold=None if admission.shared_owner is not None else admission.hold,
+            # Held memory is the place's, shared thread or not.
+            memory_hold=admission.hold,
             private_dm_id=admission.private_dm_id,
             budget_channel_id=admission.budget_channel_id,
             origin_channel_id=admission.origin_channel_id,
@@ -765,6 +772,8 @@ async def create_ma_session(
             personal_memory_store_ids=(
                 () if personal_memory_store_id is None else (personal_memory_store_id,)
             ),
+            mcp_hold=None if admission.shared_owner is not None else hold_key(admission.hold),
+            memory_scope=memory_scope(admission.hold),
         ).model_copy(
             update={
                 "token_repo_urls": token_repo_urls,

@@ -210,6 +210,7 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     "runs_elsewhere": _COPY[TerminationReason.ADMISSION_AGENT_PINNED_ELSEWHERE],
     "own_agents_only": _COPY[TerminationReason.ADMISSION_CHANNEL_ISOLATED],
     "writers_none": _COPY[TerminationReason.ADMISSION_CHANNEL_PROTECTED],
+    "client_requester": _Copy("I only answer in the channel we share.", "Mention me there."),
     "backend_unsupported": _Copy(
         "This channel uses a model provider that isn't available.",
         "Ask an admin to change or clear it.",

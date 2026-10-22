@@ -98,6 +98,8 @@ async def active_chat(db_preflight, db_nullpool_engine):  # noqa: F811
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
             now=datetime.now(UTC),
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
         )
@@ -371,7 +373,7 @@ async def test_registration_uses_only_the_existing_backend_flags(path, channel_b
 
 
 @pytest.mark.parametrize("target", ["openai", "gemini"])
-@pytest.mark.parametrize("recorded_gate", [False, True])
+@pytest.mark.parametrize("recorded_gate", [None, "current", "with_retired_channel_switch"])
 async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
     active_chat, recorded_gate, target
 ):
@@ -399,9 +401,14 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
         memory_store_id=None,
         vault_id=None,
         public_url=str(runtime.settings.mcp.public_url),
-        confirmed_tools=frozenset({"request_agent_backend_switch"})
-        if recorded_gate
-        else frozenset(),
+        confirmed_tools={
+            None: frozenset[str](),
+            "current": frozenset({"request_agent_backend_switch"}),
+            # A session bound while the retired chat channel switch was gated too.
+            "with_retired_channel_switch": frozenset(
+                {"request_agent_backend_switch", "request_channel_backend_switch"}
+            ),
+        }[recorded_gate],
     )
     async with runtime.session_factory.begin() as session:
         await record_snapshot(
@@ -421,7 +428,7 @@ async def test_live_sdk_omitted_overrides_require_the_scoped_recorded_gate(
     ]
     trace.queue(gated[0])
     _without_own_tools(payload)
-    if recorded_gate:
+    if recorded_gate is not None:
         agent()
         trace.queue(gated[1])
         preview = await _request_agent_backend_switch_impl(
@@ -506,3 +513,56 @@ async def test_native_no_drop_chat_confirmation_binds_empty_consent(active_chat)
     revision = await service.current(source)
     assert revision.drop_consent is not None and revision.declared_drops == ()
     assert not trace.replies and not trace.violations
+
+
+async def test_chat_switch_to_a_named_model_previews_and_applies_that_model(active_chat):
+    from daimon.core.channel_backend import load_backend_agent
+
+    runtime, auth, origin, service, trace, payload, frozen, gate, agent, mapping = active_chat
+    _without_own_tools(payload)
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
+        model="gemini-4-argon",
+        origin_context_id=str(origin.id),
+    )
+    assert preview.status == "preview" and preview.model == "gemini-4-argon"
+    assert preview.models == ("gemini-3.8-flash", "gemini-4-argon")
+    assert "gemini-4-argon" in preview.cost_line
+    gate()
+    agent()
+    agent()
+    changed = await _request_agent_backend_switch_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        target_backend="gemini",
+        model="gemini-4-argon",
+        origin_context_id=str(origin.id),
+        expected_revision=0,
+        preview_digest=preview.preview_digest,
+        accepted_drops=preview.declared_drops,
+    )
+    assert changed.status == "changed" and changed.model == "gemini-4-argon"
+    agent()
+    actual = await load_backend_agent(
+        runtime.client, runtime.session_factory, tenant_id=auth.tenant_id, agent_name="Researcher"
+    )
+    current = await service.current(actual)
+    assert (current.backend, current.model) == ("gemini", "gemini-4-argon")
+    assert not trace.violations
+
+
+@pytest.mark.parametrize(("backend", "model"), [("gemini", "gemini-3.8-pro"), ("openai", "x")])
+async def test_an_unknown_model_names_the_choices_before_any_lookup(backend, model) -> None:
+    from daimon.adapters.mcp.tools.agents import _require_selectable_model
+
+    with pytest.raises(ToolError, match="isn't available") as refused:
+        _require_selectable_model(backend, model)
+    assert "Pick one of:" in str(refused.value)
+    _require_selectable_model("gemini", None)
+    _require_selectable_model("gemini", "gemini-4-argon")

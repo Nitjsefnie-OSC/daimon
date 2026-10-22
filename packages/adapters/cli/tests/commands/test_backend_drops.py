@@ -16,6 +16,7 @@ from daimon.core.config import Settings
 from daimon.core.scope import DeploymentDefault
 from daimon.core.stores import security_audit
 from daimon.core.stores.identity import get_or_create_cli_principal
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.db import db_nullpool_engine as db_nullpool_engine
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import make_tenant
@@ -800,6 +801,7 @@ async def test_default_denial_observation_keeps_the_real_external_user_id(operat
         await admit(
             deps,
             tenant_id=tenant.id,
+            requester_org=RequesterOrg.HOST,
             platform="discord",
             external_user_id="denied-human",
             channel_id="900",
@@ -896,3 +898,52 @@ async def test_native_no_drop_switch_binds_empty_consent_without_loss_flags(oper
     assert revision.backend == "anthropic" and revision.drop_consent is not None
     assert revision.declared_drops == ()
     assert all(request.method == "GET" for request in requests)
+
+
+async def test_revert_restores_the_previous_model_through_its_own_preview_digest(operator):
+    rt, *_ = operator
+
+    async def change(**options):
+        output = StringIO()
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=output, width=240),
+            name="Research",
+            yes=True,
+            as_json=True,
+            **options,
+        )
+        return json.loads(output.getvalue())
+
+    argon = await change(backend="gemini", model="gemini-4-argon", accept_drops="memory,sandbox")
+    assert argon["model"] == "gemini-4-argon"
+    assert argon["preview"]["target_model"] == "gemini-4-argon"
+    await change(backend="openai", accept_drops="memory,sandbox")
+    reverted = await change(backend=None, revert=True)
+    # The revert's preview is the previous model's, so its digest matches the write.
+    assert reverted["preview"]["target_model"] == "gemini-4-argon"
+    restored = await revisions(operator)
+    assert (restored.backend, restored.model) == ("gemini", "gemini-4-argon")
+
+
+@pytest.mark.parametrize(
+    "options",
+    [
+        {"backend": None, "model": "gemini-4-argon"},
+        {"backend": None, "model": "gemini-4-argon", "revert": True},
+        {"backend": "gemini", "model": "gemini-3.5-flash-lite"},
+        {"backend": "openai", "model": "gemini-4-argon"},
+    ],
+)
+async def test_model_is_refused_where_it_does_not_apply(operator, options):
+    rt, *_ = operator
+    with pytest.raises(typer.BadParameter, match="--model"):
+        await agents_backend_change(
+            rt=rt,
+            console=Console(file=StringIO()),
+            name="Research",
+            yes=True,
+            as_json=False,
+            **options,
+        )
+    assert await revisions(operator) is None

@@ -419,6 +419,8 @@ async def test_request_agent_key_creates_row_and_posts_button(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -491,6 +493,8 @@ async def test_request_mcp_token_creates_row_and_posts_button(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -546,6 +550,8 @@ async def test_request_mcp_oauth_creates_an_oauth_row_and_posts_the_connect_card
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -714,6 +720,8 @@ async def test_request_agent_key_succeeds_for_non_admin_caller(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -858,6 +866,8 @@ async def test_request_agent_key_member_allowlist_but_admin_may_add_any_name(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=admin.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -922,6 +932,8 @@ async def test_request_agent_key_rejects_unknown_agent(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -996,6 +1008,8 @@ async def test_request_agent_key_raises_when_button_post_fails(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -1133,6 +1147,8 @@ async def test_request_agent_key_posts_slack_button_carrying_the_token(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -1220,6 +1236,8 @@ async def _seed_origin(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -1863,6 +1881,8 @@ async def test_second_slack_request_in_same_thread_supersedes_the_live_one_and_e
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -1974,6 +1994,8 @@ async def _teams_setup(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -2363,6 +2385,8 @@ async def test_requests_for_a_pinned_agent_need_its_channel_or_an_admin(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=auth.role,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )
@@ -2454,6 +2478,8 @@ async def test_an_admins_dm_turn_posts_a_credential_card_for_a_pinned_agent_into
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.ADMIN,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=datetime.now(UTC) + timedelta(minutes=10),
             now=datetime.now(UTC),
         )

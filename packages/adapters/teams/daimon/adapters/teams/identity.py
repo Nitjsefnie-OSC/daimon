@@ -107,7 +107,7 @@ class TeamsInbound:
     marks a channel message only the bot sees (a slash command, say): it is
     answered privately and never enters the thread's session. `is_foreign`
     marks a sender from another organisation (`foreign_tenant`): Teams opens no
-    1:1 chat with them.
+    1:1 chat with them, and `home_tenant_id` is the tenant the activity names for them.
     """
 
     kind: Literal["dm", "channel", "group"]
@@ -135,6 +135,7 @@ class TeamsInbound:
     sender_id: str | None = None
     is_targeted: bool = False
     is_foreign: bool = False
+    home_tenant_id: str | None = None
 
     @property
     def thread_id(self) -> str:
@@ -419,6 +420,7 @@ def parse_inbound(
         sender_id=activity.from_.id or None,
         is_targeted=targeted,
         is_foreign=home is not None,
+        home_tenant_id=home,
     )
     return _admitted(inbound, addressed=addressed)
 
@@ -592,6 +594,7 @@ def parse_graph_message(
         channel_type=source.channel_type,
         team_name=source.team_name,
         is_foreign=bool(home) and canonical_uuid(home) != tenant,
+        home_tenant_id=home or None,
     )
     return _admitted(inbound, addressed=addressed)
 

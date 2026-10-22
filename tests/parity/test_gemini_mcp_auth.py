@@ -125,7 +125,7 @@ class Wire:
                                 "type": "mcp_server_tool_call",
                                 "id": identity + ":call",
                                 "name": "describe_agent",
-                                "server_name": "daimon-mcp",
+                                "server_name": "daimon_mcp",
                                 "arguments": {},
                             },
                             {
@@ -244,7 +244,7 @@ async def test_authenticated_follow_up_refreshes_each_sdk_dispatch_without_persi
         assert isinstance(tools[-1], dict)
         assert tools[-1] == {
             "type": "mcp_server",
-            "name": "daimon-mcp",
+            "name": "daimon_mcp",
             "url": URL,
             "allowed_tools": [{"mode": "auto", "tools": ["describe_agent", "list_my_sessions"]}],
             "headers": {"Authorization": f"Bearer {SECRET}-{(n + 1) * 2}"},
@@ -880,7 +880,7 @@ async def test_real_loopback_read_pair_uses_only_the_owned_bound_bearer_and_clea
                                 "type": "mcp_server_tool_call",
                                 "id": name,
                                 "name": name,
-                                "server_name": "daimon-mcp",
+                                "server_name": "daimon_mcp",
                                 "arguments": {},
                             },
                             {

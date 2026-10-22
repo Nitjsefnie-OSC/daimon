@@ -1351,6 +1351,8 @@ async def test_create_routine_without_a_destination_budgets_the_turns_channel(
         configuration_target_ma_agent_id=None,
         configuration_target_name=None,
         role=Role.USER,
+        sender_foreign=False,
+        shared_channel=False,
         expires_at=now + timedelta(minutes=10),
         now=now,
     )

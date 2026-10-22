@@ -183,7 +183,7 @@ def test_authenticated_mcp_gap_is_driver_specific_not_native_mcp_unavailable() -
     spec = AgentSpec(name="daimon", model=ModelRef(provider="gemini", id="gemini-3.5-flash-lite"))
     request = compile_agent(spec.model_copy(update={"mcp_servers": (public,)}))
     assert request["tools"] == [
-        {"type": "mcp_server", "name": "daimon-mcp", "url": "https://daimon.invalid/mcp"}
+        {"type": "mcp_server", "name": "daimon_mcp", "url": "https://daimon.invalid/mcp"}
     ]
     private = public.model_copy(update={"credential_ref": "f1-account-mcp"})
     with pytest.raises(UnsupportedCapability):
@@ -317,7 +317,7 @@ async def test_native_builtin_turn_replays_all_six_routes_and_rejects_missing_ca
                     "type": "mcp_server_tool_call",
                     "id": name,
                     "name": name,
-                    "server_name": "daimon-mcp",
+                    "server_name": "daimon_mcp",
                     "arguments": {},
                 },
                 {"type": "mcp_server_tool_result", "call_id": name, "result": "read-only-ok"},
@@ -343,7 +343,7 @@ async def test_native_builtin_turn_replays_all_six_routes_and_rejects_missing_ca
     )
     assert transport.requests[0]["tools"] == [
         {"type": "code_execution"},
-        {"type": "mcp_server", "name": "daimon-mcp", "url": "https://daimon.invalid/mcp"},
+        {"type": "mcp_server", "name": "daimon_mcp", "url": "https://daimon.invalid/mcp"},
     ]
     assert len(transport.requests) == 1 and transport.read_requests == ["builtin-turn"]
     recorder = Recorder()

@@ -398,6 +398,8 @@ async def test_member_can_request_new_key_on_managed_agent(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + timedelta(minutes=10),
         )
@@ -517,6 +519,8 @@ async def test_member_cannot_attach_mcp_through_token_request_on_managed_default
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             now=now,
             expires_at=now + timedelta(minutes=10),
         )

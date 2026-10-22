@@ -1,6 +1,7 @@
 """Real state-DB transactions behind the existing Gemini record/hold owners."""
 
 import asyncio
+import json
 from datetime import UTC, datetime
 from decimal import Decimal
 from uuid import uuid4
@@ -115,6 +116,38 @@ async def test_postgres_serializes_first_insert_and_releases_cancelled_writer(
             raise asyncio.CancelledError
     async with second.transaction() as records:
         assert len(records.creations) == 2
+
+
+@pytest.mark.parametrize(
+    ("outcome", "status", "released"),
+    [
+        ("refused", 400, True),  # Google rejected the request: nothing to bill
+        ("refused", 404, True),
+        ("refused", 503, False),  # chain fallback refusal keeps its hold, as before
+        ("refused", None, False),
+        ("unknown", None, False),  # maybe accepted: the full hold stays
+    ],
+)
+async def test_postgres_definite_4xx_refusal_releases_its_hold(
+    postgres_state, outcome, status, released
+):
+    sessions, scope, _, _ = postgres_state
+    model = ModelRef(provider="gemini", id=FLASH_PRIMARY)
+    owner = holds(sessions, scope)
+    await owner.before_attempt(model=model, attempt=1)
+    await owner.after_attempt(receipt=FlashAttempt(model, 1, outcome, http_status=status))
+    async with sessions() as db:
+        (body,) = (await db.scalars(select(GeminiRuntimeState.body))).all()
+    (row,) = json.loads(body).values()
+    assert row["outcome"] == outcome and row["http_status"] == status
+    if released:
+        assert (row["held_usd"], row["actual_usd"], row["released_usd"]) == ("0", "0", "0.49")
+        # The budget is free again for the next attempt (cap == one hold).
+        await holds(sessions, scope).before_attempt(model=model, attempt=1)
+    else:
+        assert row["held_usd"] == "0.49" and "released_usd" not in row
+        with pytest.raises(AdmissionDenied, match="channel_budget_exceeded"):
+            await holds(sessions, scope).before_attempt(model=model, attempt=1)
 
 
 @pytest.mark.parametrize("outcome", ["accepted", "refused", "unknown"])

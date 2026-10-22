@@ -107,7 +107,7 @@ def _build_router(tenant_id_str: str, *, sent_event_bodies: list[dict[str, Any]]
 
 
 def _register_slack_defaults(
-    mock: AioResponsesMock, *, thread_messages: list[dict[str, Any]]
+    mock: AioResponsesMock, *, thread_messages: list[dict[str, Any]], team_id: str
 ) -> None:
     import re
 
@@ -119,7 +119,12 @@ def _register_slack_defaults(
         users_info_pattern,
         payload={
             "ok": True,
-            "user": {"is_admin": False, "is_owner": False, "is_primary_owner": False},
+            "user": {
+                "is_admin": False,
+                "is_owner": False,
+                "is_primary_owner": False,
+                "team_id": team_id,
+            },
         },
         repeat=True,
     )
@@ -274,7 +279,7 @@ async def test_slack_long_thread_replacement_stays_within_thread_page_limit_and_
     }
 
     with AioResponsesMock() as mock:
-        _register_slack_defaults(mock, thread_messages=thread_messages)
+        _register_slack_defaults(mock, thread_messages=thread_messages, team_id=workspace_id)
         await app._handle_app_mention(event, team_id=workspace_id)  # pyright: ignore[reportPrivateUsage]
 
         replies_requests = [
