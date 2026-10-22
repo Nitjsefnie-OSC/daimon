@@ -425,14 +425,33 @@ async def cancel_wake_row(
     return cancelled is not None
 
 
-async def retire_worker_finished_rows(session: AsyncSession, *, run: FleetRun) -> int:
-    """Withdraw this ended run's scheduling, retaining native/audit evidence.
+def _run_wakes(run: FleetRun) -> list[ColumnElement[bool]]:
+    """This run's worker_finished rows that may still schedule a turn.
 
     Frozen waits use canonical JSON with run_id first. Match that closed prefix
     without casting untrusted text, so a corrupt wait cannot roll back run end.
+    """
+    return [
+        TaskContinuation.tenant_id == run.tenant_id,
+        TaskContinuation.reason == "worker_finished",
+        TaskContinuation.platform == run.platform,
+        TaskContinuation.parent_channel_id == run.channel_id,
+        TaskContinuation.thread_id == run.thread_id,
+        TaskContinuation.requester_account_id == run.orchestrator_account_id,
+        TaskContinuation.requested_work.startswith(f'{{"run_id":"{run.id}",'),
+        TaskContinuation.status.in_(("pending", "claimed")),
+    ]
+
+
+async def retire_worker_finished_rows(
+    session: AsyncSession, *, run: FleetRun, keep_id: _uuid.UUID | None = None
+) -> int:
+    """Withdraw this ended run's scheduling, retaining native/audit evidence.
+
+    `keep_id` is the wake whose turn ended the run: its own claim settles as
+    delivered through the wake owner, not as cancelled here.
     The caller holds the run lock; publication takes that same lock first.
     """
-    active = TaskContinuation.status.in_(("pending", "claimed"))
     retired = await session.scalars(
         update(TaskContinuation)
         .where(
@@ -443,14 +462,8 @@ async def retire_worker_finished_rows(session: AsyncSession, *, run: FleetRun) -
                     FleetRunModel.status.not_in(tuple(RUN_TRANSITIONS)),
                 )
             ),
-            TaskContinuation.tenant_id == run.tenant_id,
-            TaskContinuation.reason == "worker_finished",
-            TaskContinuation.platform == run.platform,
-            TaskContinuation.parent_channel_id == run.channel_id,
-            TaskContinuation.thread_id == run.thread_id,
-            TaskContinuation.requester_account_id == run.orchestrator_account_id,
-            TaskContinuation.requested_work.startswith(f'{{"run_id":"{run.id}",'),
-            active,
+            *_run_wakes(run),
+            *((TaskContinuation.id != keep_id,) if keep_id is not None else ()),
         )
         .values(
             status="cancelled",
@@ -462,6 +475,22 @@ async def retire_worker_finished_rows(session: AsyncSession, *, run: FleetRun) -
     )
     await session.flush()
     return len(tuple(retired))
+
+
+async def count_run_wakes(
+    session: AsyncSession, *, run: FleetRun, exclude_id: _uuid.UUID | None = None
+) -> int:
+    """This run's pending or claimed worker_finished wakes, other than `exclude_id`."""
+    return (
+        await session.scalar(
+            select(func.count())
+            .select_from(TaskContinuation)
+            .where(
+                *_run_wakes(run),
+                *((TaskContinuation.id != exclude_id,) if exclude_id is not None else ()),
+            )
+        )
+    ) or 0
 
 
 async def list_dispatchable_continuations(

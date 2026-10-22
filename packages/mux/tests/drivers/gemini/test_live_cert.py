@@ -787,7 +787,10 @@ async def test_sdk_accepted_then_get503_cancellation_reaches_transport_and_tape(
 
         return original(respond)
 
+    from mux.drivers.gemini import core
+
     monkeypatch.setattr(httpx, "MockTransport", factory)
+    monkeypatch.setattr(core, "INTERACTION_READ_RETRY_DELAYS_S", (0.0,) * 5)
     with pytest.raises(ProbeRunError):
         await run_sdk_smoke(
             budget(tmp_path),
@@ -796,12 +799,14 @@ async def test_sdk_accepted_then_get503_cancellation_reaches_transport_and_tape(
             key="offline-cancel-key",
             mock=True,
         )
-    assert [request.method for request in requests] == ["POST", "GET", "POST"]
+    # The accepted interaction's poll is retried (bounded), never re-created.
+    reads = ["GET"] * (len(core.INTERACTION_READ_RETRY_DELAYS_S) + 1)
+    assert [request.method for request in requests] == ["POST", *reads, "POST"]
     assert "cancel" in requests[-1].url.path
     tape = Tape.model_validate_json((tmp_path / "cancel.json").read_text())
-    assert [batch.request.method for batch in tape.batches] == ["POST", "GET", "POST"]
+    assert [batch.request.method for batch in tape.batches] == ["POST", *reads, "POST"]
     assert "cancel" in tape.batches[-1].request.path
-    assert len(list(tmp_path.glob("cancel-usage-*.json"))) == 3
+    assert len(list(tmp_path.glob("cancel-usage-*.json"))) == len(requests)
     for path in tmp_path.glob("cancel-usage-*.json"):
         assert json.loads(path.read_text())["model"] == LIVE_MODEL
     assert len(list(tmp_path.glob("cancel-receipt-*.json"))) == 1

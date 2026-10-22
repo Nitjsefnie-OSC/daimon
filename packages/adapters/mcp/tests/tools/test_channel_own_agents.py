@@ -534,6 +534,8 @@ async def _setup_thread_origin(
             configuration_target_ma_agent_id="agent_local",
             configuration_target_name="local",
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
             is_setup=responder == "shared",
@@ -816,6 +818,8 @@ async def _chat_turn_in_room(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
         )
@@ -1097,6 +1101,8 @@ async def test_turns_running_in_two_own_agents_channels_refuse_an_unnamed_call(
             configuration_target_ma_agent_id=None,
             configuration_target_name=None,
             role=Role.USER,
+            sender_foreign=False,
+            shared_channel=False,
             expires_at=now + dt.timedelta(minutes=10),
             now=now,
         )

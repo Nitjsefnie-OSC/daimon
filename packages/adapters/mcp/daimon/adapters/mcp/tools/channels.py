@@ -121,6 +121,8 @@ async def _read_policy(
         return read
     if read.origin is not None:
         in_group_chat = is_group_chat(read.origin.parent_channel_id)
+    elif read.hold is not None:
+        in_group_chat = is_group_chat(read.hold.channel_id)
     else:
         # A chat token names no turn: any of its turns running in a group chat refuses
         # a call that names no origin, as `_held_origin` holds one.
@@ -537,7 +539,9 @@ def register_channel_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
                 attachments=attachments,
                 file_handles=file_handles,
                 read_policy=(
-                    await _read_policy(runtime, auth, None) if attachments else OPEN_READ_POLICY
+                    await _read_policy(runtime, auth, None)
+                    if attachments or auth.hold is not None
+                    else OPEN_READ_POLICY
                 ),
             )
         return await _send_message_impl(

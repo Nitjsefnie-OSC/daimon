@@ -8,6 +8,7 @@ import os
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
 from dataclasses import replace
 from datetime import datetime
+from decimal import Decimal
 from functools import partial
 from pathlib import Path
 from typing import TYPE_CHECKING, Annotated, Literal, Protocol, Self, cast, get_type_hints, overload
@@ -357,6 +358,7 @@ async def prepare_controlled_root(
         (request.deps.turn_path or load_turn_settings().path) != "mux"
         or grant is None
         or request.admission.shared_owner is not None
+        or request.admission.hold is not None
         or request.session_account_id != request.admission.account_id
         or get_profile(profile).support.get("session_spend_control") != "native"
         or not any(
@@ -617,6 +619,7 @@ async def freeze_prepared_root(
     if (
         not deps.fleet_enabled
         or prepared.admission.shared_owner is not None
+        or prepared.admission.hold is not None
         or binding.native_refs.get("session") != prepared.ma_session_id
         or prepared.admission.account_id != UUID(scope.account_id)
         or source.resource_scope != scope
@@ -663,6 +666,7 @@ async def freeze_prepared_root(
             admission.memory_read_only != prepared.admission.memory_read_only
             or admission.asks_before_publishing != prepared.admission.asks_before_publishing
             or admission.origin_seal_ids != prepared.admission.origin_seal_ids
+            or admission.hold != prepared.admission.hold
         ):
             raise WorkerSpecRefused("origin", "stale")
     default_revision = None
@@ -816,6 +820,7 @@ async def resume_prepared_root(
     )
     for failed, reason in (
         (prepared.admission.shared_owner is not None, "shared_owner"),
+        (prepared.admission.hold is not None, "held_turn"),
         (expected_scope != persistence.scope, "prepared_scope"),
         (source.resource_scope != persistence.scope, "source_scope"),
         (row.tenant_id != UUID(persistence.scope.tenant_id), "tenant"),
@@ -1345,7 +1350,12 @@ async def capture_preparation_source(
     from daimon.core.channel_backend import load_backend_agent
     from daimon.core.defaults.metadata import MA_METADATA_KEY_NAME
     from daimon.core.sessions import project_session_resources
+    from mux.errors import ScopeViolation
 
+    if request.admission.hold is not None:
+        # The source records the agent-wide memory store; a held turn mounts its
+        # channel's store only, so it never has a source to capture.
+        raise ScopeViolation("source-preparation", "a held turn never captures a fleet source")
     if fresh:
         from daimon.core.mux_compat import retrieve_agent, retrieve_environment
 
@@ -1392,6 +1402,7 @@ async def capture_preparation_source(
         agent_github_app=request.deps.agent_github_app,
         hide_personal_for=request.admission.shared_owner,
         slack_turn_context_id=request.admission.slack_turn_context_id,
+        hold=None if request.admission.shared_owner is not None else request.admission.hold,
         private_dm_id=request.admission.private_dm_id,
         origin_seal_ids=request.admission.origin_seal_ids,
     )
@@ -1925,11 +1936,13 @@ def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
     if not controls:
         return target
     extension = controls[0]
-    if target.model.provider == ceiling.model.provider:
+    if (target.model.provider, target.model.id) == (ceiling.model.provider, ceiling.model.id):
         retained = target.model_copy(update={"extensions": controls})
         if _source_extension_obligation(extension, native_target=retained) is not None:
             raise ValueError("native worker model does not represent the granted controls")
         return retained
+    # Another model, even of the same provider, may not accept the root's controls
+    # (e.g. its effort level); the worker runs at its model's defaults, declared.
     if "model_controls" not in target.declared_drops:
         raise ValueError("native model controls require an explicit declared loss")
     return target.model_copy(update={"extensions": None})
@@ -2007,6 +2020,11 @@ def classify_source_obligations(
                         missing.add("tools")
         else:
             foreign_target = target is not None and target.model.provider != spec.model.provider
+            # A fleet worker on another model may declare the loss of the root's
+            # controls exactly as a foreign-provider worker does.
+            foreign_target = foreign_target or (
+                worker_ceiling and target is not None and target.model.id != spec.model.id
+            )
             obligation = _source_extension_obligation(
                 extension,
                 native_target=target if not foreign_target else None,
@@ -2502,6 +2520,10 @@ async def read_preparation_counterpart(
                 runtime.materialize_worker(selected), timeout=timeout
             )
             selected = replace(selected, counterpart=allocated)
+        elif worker is None and runtime.materialize_root is not None:
+            timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
+            allocated = await asyncio.wait_for(runtime.materialize_root(selected), timeout=timeout)
+            selected = replace(selected, counterpart=allocated)
         timeout = remaining_s(request.deadline, now=request.now(), refuse_expired=True)
         counterpart = await asyncio.wait_for(
             runtime.read_agent_counterpart(selected), timeout=timeout
@@ -2556,6 +2578,8 @@ class CounterpartPlan(Protocol):
     def counterpart_catalog_id(self) -> str | None: ...
     @property
     def counterpart_catalog_revision(self) -> int | None: ...
+    @property
+    def root_materialization(self) -> bool: ...
     @classmethod
     def model_validate(cls, obj: object) -> Self: ...
 
@@ -2564,6 +2588,19 @@ def validate_counterpart_pins(
     plan: CounterpartPlan, *, worker_materialization: bool = False
 ) -> None:
     """Legacy rows have no counterpart; partial source/catalog pins never authorize one."""
+    if plan.root_materialization:
+        # A tenant-wide agent template: identity comes from the admitted agent,
+        # never from the row, so the row may pin none of it.
+        if (
+            worker_materialization
+            or plan.source_agent_id is not None
+            or plan.source_agent_version is not None
+            or plan.counterpart_catalog_id is not None
+            or plan.counterpart_catalog_revision is not None
+            or plan.agent_id is not None
+        ):
+            raise ValueError("root materialization takes its identity from the admitted agent")
+        return
     if worker_materialization:
         if (
             plan.source_agent_id is None
@@ -2598,6 +2635,25 @@ def _matching_rows(
     """`profile` and `tenant_id` are always exact. The other scope fields are
     exact-matched first; `allow_wildcard` additionally accepts `_WILDCARD` rows
     on those fields only — the caller tries exact-only before falling back."""
+    return _rows_for(
+        rows,
+        revision,
+        tenant_id=request.scope.tenant_id,
+        account_id=request.scope.account_id,
+        allow_wildcard=allow_wildcard,
+        agent_origin=request.admission.backend_revision_origin == "agent",
+    )
+
+
+def _rows_for(
+    rows: list[dict[str, JsonValue]],
+    revision: ConfigRevision,
+    *,
+    tenant_id: str,
+    account_id: str,
+    allow_wildcard: bool,
+    agent_origin: bool,
+) -> list[dict[str, JsonValue]]:
 
     def field_matches(row: dict[str, JsonValue], field: str, actual: object) -> bool:
         value = row.get(field)
@@ -2605,16 +2661,88 @@ def _matching_rows(
             return True
         return allow_wildcard and value == _WILDCARD
 
+    def origin_eligible(row: dict[str, JsonValue]) -> bool:
+        # An agent's turn runs its own source (pinned, or a template that publishes
+        # the admitted version); a channel's turn runs a fixed plan with no source.
+        sourced = row.get("root_materialization") is True or row.get("source_agent_id") is not None
+        return sourced == agent_origin
+
     return [
         row
         for row in rows
-        if row.get("profile") == revision.profile
-        and row.get("tenant_id") == request.scope.tenant_id
+        if origin_eligible(row)
+        and row.get("profile") == revision.profile
+        and row.get("tenant_id") == tenant_id
         and field_matches(row, "platform", revision.channel.platform)
         and field_matches(row, "channel_id", revision.channel.channel_id)
-        and field_matches(row, "account_id", request.scope.account_id)
+        and field_matches(row, "account_id", account_id)
         and manifest_configuration_matches(row, revision)
     ]
+
+
+def manifest_hold_usd(
+    revision: ConfigRevision, *, tenant_id: str, account_id: str
+) -> Decimal | None:
+    """The per-turn hold of the row `select_runtime_manifest` would select, if any.
+
+    Exact rows first, then the most specific wildcard row, as selection does: a
+    channel's own row wins over a tenant-wide "*" row. None when no manifest is
+    installed or readable, no single row is selected, or it names no valid hold.
+    """
+    manifest_path = os.environ.get("DAIMON_TURN__PROVIDER_RUNTIME_FILE")
+    if not manifest_path:
+        return None
+    try:
+        with Path(manifest_path).open("rb") as manifest:
+            raw = manifest.read(_MAX_BYTES + 1)
+        if len(raw) > _MAX_BYTES:
+            return None
+        rows = _ROWS.validate_json(raw)
+        # Fleet workers' turns are agent-origin: the rows a worker's selection would see.
+        selected = _rows_for(
+            rows,
+            revision,
+            tenant_id=tenant_id,
+            account_id=account_id,
+            allow_wildcard=False,
+            agent_origin=True,
+        )
+        if not selected:
+            selected = _most_specific(
+                _rows_for(
+                    rows,
+                    revision,
+                    tenant_id=tenant_id,
+                    account_id=account_id,
+                    allow_wildcard=True,
+                    agent_origin=True,
+                )
+            )
+        if len(selected) != 1:
+            return None
+        hold = Decimal(str(selected[0]["hold_usd"]))
+    except (OSError, ValidationError, KeyError, ArithmeticError, ValueError):
+        return None
+    return hold if hold.is_finite() and hold > 0 else None
+
+
+def _most_specific(rows: list[dict[str, JsonValue]]) -> list[dict[str, JsonValue]]:
+    """The one matching row strictly narrower than every other, else all of them.
+
+    A row is narrower when the scope fields it names exactly are a strict
+    superset of another's: a channel's own row with `"*"` accounts beats a
+    deployment-wide default. Rows naming different fields (a channel's row
+    and an account's row) are incomparable and all remain, so they refuse
+    as ambiguous instead of one silently shadowing the other's credentials.
+    """
+
+    def exact(row: dict[str, JsonValue]) -> frozenset[str]:
+        return frozenset(field for field in _WILDCARDABLE_FIELDS if row.get(field) != _WILDCARD)
+
+    for candidate in rows:
+        if all(exact(other) < exact(candidate) for other in rows if other is not candidate):
+            return [candidate]
+    return rows
 
 
 def select_runtime_manifest[Plan: CounterpartPlan](
@@ -2625,8 +2753,11 @@ def select_runtime_manifest[Plan: CounterpartPlan](
     A deployment-wide default is one row with `_WILDCARD` ("*") on `platform`,
     `channel_id` and/or `account_id` — never on `tenant_id` or `profile`. An
     exact match always wins over a wildcard row (computed first, tried first);
-    wildcard rows are only consulted when no exact row matches, and the
-    existing "exactly one candidate or refuse" rule is unchanged for each pass.
+    wildcard rows are only consulted when no exact row matches. Among those,
+    a row whose exactly named scope fields strictly include every other
+    candidate's wins (a channel's own row, even with `"*"` accounts, beats a
+    deployment-wide default); otherwise the existing "exactly one candidate
+    or refuse" rule refuses them as ambiguous.
     The resolved plan always carries the request's real platform/channel_id/
     account_id — a wildcard row is a template, never a literal "*" identity.
     """
@@ -2645,7 +2776,7 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         rows = _ROWS.validate_json(raw)
         selected = _matching_rows(rows, revision, request, allow_wildcard=False)
         if not selected:
-            selected = _matching_rows(rows, revision, request, allow_wildcard=True)
+            selected = _most_specific(_matching_rows(rows, revision, request, allow_wildcard=True))
         if len(selected) != 1:
             raise AdmissionDenied(reason="backend_unsupported")
         resolved = dict(selected[0])
@@ -2659,6 +2790,30 @@ def select_runtime_manifest[Plan: CounterpartPlan](
         return plan_type.model_validate(resolved)
     except (OSError, ValidationError):
         raise AdmissionDenied(reason="backend_unsupported") from None
+
+
+def root_counterpart_catalog_id(request: ProviderPreparationRequest) -> str:
+    """The one catalog entry a template row's counterpart lives at for this agent version.
+
+    Keyed by the admitted agent's scoped identity, its MA version, the admitted
+    profile and model and the consented target spec, so an agent edit, a model
+    change or a different derivation gets a new entry, and an entry can never
+    serve another agent, version, model or spec.
+    """
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    revision, target = request.admission.backend_revision, request.target_spec
+    if revision is None or revision.model is None or target is None:
+        raise AdmissionDenied(reason="backend_unsupported")
+    agent_id = derive_agent_uuid(
+        tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+    )
+    # The consented target's digest: a different derived target never reuses an entry.
+    spec = request_digest(target.model_dump(mode="json"))[:16]
+    return (
+        f"root:{agent_id}:{request.admission.agent.version}:{revision.profile}"
+        f":{revision.model}:{spec}"
+    )
 
 
 def validate_counterpart_request(
@@ -2675,6 +2830,28 @@ def validate_counterpart_request(
     except ValueError:
         raise AdmissionDenied(reason="backend_unsupported") from None
     revision, scope = request.admission.backend_revision, request.scope
+    if plan.root_materialization:
+        if (
+            worker_materialization
+            or request.worker is not None
+            or request.admission.backend_revision_origin != "agent"
+            or revision is None
+            or not request.deps.channel_backends
+            or not request.deps.agent_backends
+            or request.deps.turn_path != "mux"
+            or scope.tenant_id != str(request.tenant_id)
+            or scope.account_id != str(request.admission.account_id)
+            or scope.account_id != str(request.session_account_id)
+            or (plan.tenant_id, plan.account_id) != (scope.tenant_id, scope.account_id)
+            or (revision.channel.tenant_id, revision.channel.platform, revision.channel.channel_id)
+            != (plan.tenant_id, plan.platform, plan.channel_id)
+            or request.platform != plan.platform
+            or revision.profile != plan.profile
+        ):
+            raise AdmissionDenied(reason="backend_unsupported")
+        if select_runtime_manifest(request, type(plan)) != plan:
+            raise AdmissionDenied(reason="backend_unsupported")
+        return revision
     if (
         request.admission.backend_revision_origin != "agent"
         or revision is None
@@ -2705,6 +2882,56 @@ def validate_counterpart_request(
     if select_runtime_manifest(request, type(plan)) != plan:
         raise AdmissionDenied(reason="backend_unsupported")
     return revision
+
+
+async def materialize_root_counterpart(
+    plan: CounterpartPlan,
+    request: ProviderPreparationRequest,
+    *,
+    resources: NeutralResourceHost,
+) -> AgentRevision:
+    """Publish this agent version's counterpart from its consented target, once.
+
+    Runs after source preparation proved the drop consent, so the target is the
+    exact spec the admin confirmed. A concurrent first turn loses the catalog
+    compare-and-set and reads the winner's entry; the native key is the catalog
+    id, so native creation is idempotent too. `read_counterpart` then verifies
+    the entry like any operator-installed counterpart.
+    """
+    from daimon.core.skills.ingest import SkillIngestError
+    from daimon.core.stores.neutral_catalog import CatalogConflict
+
+    validate_counterpart_request(plan, request)
+    source, target = request.source, request.target_spec
+    if (
+        not plan.root_materialization
+        or request.worker is not None
+        or target is None
+        or source is None
+        or source.source is None
+        or source.resource_scope != request.scope
+        or resources.scope != request.scope
+    ):
+        raise AdmissionDenied(reason="backend_unsupported")
+    catalog_id = root_counterpart_catalog_id(request)
+    try:
+        return await resources.entry(catalog_id)
+    except SkillIngestError:
+        pass
+    existing = await resources.catalog.get_agent(resources.scope, catalog_id)
+    if existing is not None:
+        # An archived entry is never republished over; this agent version stays refused.
+        log.warning(
+            "turn.root_counterpart_archived",
+            catalog_id=catalog_id,
+            lifecycle=existing.agent.lifecycle,
+            tenant_id=request.scope.tenant_id,
+        )
+        raise AdmissionDenied(reason="backend_unsupported")
+    try:
+        return await resources.publish(catalog_id, target, expected_revision=0, key=catalog_id)
+    except CatalogConflict:
+        return await resources.entry(catalog_id)
 
 
 async def materialize_counterpart(
@@ -2793,10 +3020,24 @@ async def read_counterpart(
         raise AdmissionDenied(reason="backend_unsupported")
     if persistence is not None:
         persistence.check_session(scope, None)
-    catalog_id = acknowledged.catalog_id if acknowledged else cast(str, plan.counterpart_catalog_id)
+    root = plan.root_materialization
+    catalog_id = (
+        acknowledged.catalog_id
+        if acknowledged
+        else root_counterpart_catalog_id(request)
+        if root
+        else cast(str, plan.counterpart_catalog_id)
+    )
+    from daimon.core.ma_identity import derive_agent_uuid
+
+    expected_source = (
+        derive_agent_uuid(tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id)
+        if root
+        else plan.source_agent_id
+    )
     if (
         source.tenant_id != request.tenant_id
-        or source.agent_id != plan.source_agent_id
+        or source.agent_id != expected_source
         or resources.scope != scope
         or resources.workspace != plan.project
         or resources.backend.capabilities().profile_id != plan.profile
@@ -2808,6 +3049,7 @@ async def read_counterpart(
             (acknowledged is not None and row != acknowledged)
             or (
                 not worker_materialization
+                and not root
                 and (
                     row.local_revision != plan.counterpart_catalog_revision
                     or row.agent.ref.id != plan.agent_id

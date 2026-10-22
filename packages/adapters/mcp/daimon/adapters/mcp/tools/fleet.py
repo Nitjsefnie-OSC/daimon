@@ -9,7 +9,7 @@ entry points retain their independent outside-chat restriction.
 from __future__ import annotations
 
 import uuid
-from collections.abc import Mapping
+from collections.abc import Mapping, Sequence
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
@@ -23,7 +23,7 @@ from daimon.core.fleet_orchestration import FleetOrchestrator
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import BackendConfig
-from mux.contracts.ids import ResourceRef, Revision
+from mux.contracts.ids import Provider, ResourceRef, Revision
 from mux.contracts.resources import AgentPatch, AgentSpec, SessionSpec
 from pydantic import Field, JsonValue
 
@@ -52,27 +52,31 @@ class FleetToolService(Protocol):
         run_id: uuid.UUID | None,
         operation_key: str,
         role: str,
-        backend: BackendConfig,
+        backend: BackendConfig | None,
         agent: AgentSpec | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
         session: SessionSpec | None,
-        budget_usd: Decimal,
-        deadline: datetime,
-        max_turns: int,
+        budget_usd: Decimal | None,
+        deadline: datetime | None,
+        max_turns: int | None,
         max_input_tokens: int | None = None,
         max_output_tokens: int | None = None,
         result_contract: Mapping[str, JsonValue] | None,
         reviewer_of: uuid.UUID | None,
         origin_context_id: uuid.UUID | None = None,
+        task: str | None = None,
+        model: str | None = None,
+        planned_workers: int | None = None,
+        planned_models: Sequence[str] | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
     async def status(
         self,
         caller: AuthIdentity,
         *,
-        run_id: uuid.UUID,
+        run_id: uuid.UUID | None,
         origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
@@ -102,7 +106,7 @@ class FleetToolService(Protocol):
         self,
         caller: AuthIdentity,
         *,
-        run_id: uuid.UUID,
+        run_id: uuid.UUID | None,
         origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]: ...
 
@@ -225,41 +229,84 @@ class HostFleetToolService:
         run_id: uuid.UUID | None,
         operation_key: str,
         role: str,
-        backend: BackendConfig,
+        backend: BackendConfig | None,
         agent: AgentSpec | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
         session: SessionSpec | None,
-        budget_usd: Decimal,
-        deadline: datetime,
-        max_turns: int,
+        budget_usd: Decimal | None,
+        deadline: datetime | None,
+        max_turns: int | None,
         max_input_tokens: int | None = None,
         max_output_tokens: int | None = None,
         result_contract: Mapping[str, JsonValue] | None,
         reviewer_of: uuid.UUID | None,
         origin_context_id: uuid.UUID | None = None,
+        task: str | None = None,
+        model: str | None = None,
+        planned_workers: int | None = None,
+        planned_models: Sequence[str] | None = None,
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id
         )
-        from daimon.core.neutral_resources import WorkerLimits
+        from daimon.core.neutral_resources import (
+            planned_providers,
+            task_worker_spec,
+            worker_runtime_ceiling,
+        )
 
+        if agent is None and clone is None and task is not None:
+            agent = task_worker_spec(parent, role=role, task=task, model=model)
+        providers: list[Provider] | None = None
+        if planned_models is not None:
+            granted = {model.id for model in (*parent.models, parent.spec.model)}
+            unknown = sorted(set(planned_models) - granted)
+            if unknown:
+                raise ToolError(
+                    f"planned_models names a model the fleet grant does not allow: {unknown[0]}."
+                )
+            if planned_workers is not None and planned_workers < len(planned_models):
+                raise ToolError("planned_workers is smaller than the number of planned_models.")
+            providers = planned_providers(parent, planned_models)
+            planned_workers = len(providers) if planned_workers is None else planned_workers
+        provider = (
+            backend.backend
+            if backend is not None and backend.backend is not None
+            else agent.model.provider
+            if agent is not None
+            else overrides.model.provider
+            if overrides is not None and overrides.model is not None
+            else parent.spec.model.provider
+        )
+        planned_on_provider = providers.count(provider) if providers is not None else None
+        now = datetime.now(UTC)
+        limits = await self._orchestrator.spawn_limits(
+            parent,
+            policy,
+            operation_key=operation_key,
+            provider=provider,
+            now=now,
+            budget_usd=budget_usd,
+            deadline=deadline,
+            max_turns=max_turns,
+            max_input_tokens=max_input_tokens,
+            max_output_tokens=max_output_tokens,
+            planned_workers=planned_workers,
+            planned_on_provider=planned_on_provider,
+            max_runtime_s=worker_runtime_ceiling(parent, provider, backend),
+        )
         return await self._orchestrator.spawn(
             parent,
             policy,
-            now=datetime.now(UTC),
+            now=now,
             run_id=run_id,
             operation_key=operation_key,
             role=role,
             backend=backend,
-            limits=WorkerLimits(
-                budget_usd=budget_usd,
-                deadline=deadline,
-                max_turns=max_turns,
-                max_input_tokens=max_input_tokens,
-                max_output_tokens=max_output_tokens,
-            ),
+            limits=limits,
+            fill_token_limits=max_input_tokens is None and max_output_tokens is None,
             agent=agent,
             clone=clone,
             clone_revision=clone_revision,
@@ -270,12 +317,18 @@ class HostFleetToolService:
         )
 
     async def status(
-        self, caller: AuthIdentity, *, run_id: uuid.UUID, origin_context_id: uuid.UUID | None = None
+        self,
+        caller: AuthIdentity,
+        *,
+        run_id: uuid.UUID | None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id, drain=True
         )
-        return await self._orchestrator.status(parent, policy, run_id=run_id)
+        return await self._orchestrator.status(
+            parent, policy, run_id=parent.fleet.run_id if run_id is None else run_id
+        )
 
     async def kill(
         self,
@@ -326,12 +379,18 @@ class HostFleetToolService:
         )
 
     async def collect(
-        self, caller: AuthIdentity, *, run_id: uuid.UUID, origin_context_id: uuid.UUID | None = None
+        self,
+        caller: AuthIdentity,
+        *,
+        run_id: uuid.UUID | None,
+        origin_context_id: uuid.UUID | None = None,
     ) -> Mapping[str, JsonValue]:
         parent, policy = await self._parent(
             caller, origin_context_id=origin_context_id, run_id=run_id, drain=True
         )
-        return await self._orchestrator.collect(parent, policy, run_id=run_id)
+        return await self._orchestrator.collect(
+            parent, policy, run_id=parent.fleet.run_id if run_id is None else run_id
+        )
 
 
 def register_fleet_tools(
@@ -364,28 +423,34 @@ def register_fleet_tools(
         run_id: uuid.UUID | None,
         operation_key: str,
         role: str,
-        backend: BackendConfig,
+        backend: BackendConfig | None,
         agent: AgentSpec | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
         session: SessionSpec | None,
-        budget_usd: Decimal,
-        deadline: datetime,
-        max_turns: int,
+        budget_usd: Decimal | None,
+        deadline: datetime | None,
+        max_turns: int | None,
         max_input_tokens: int | None = None,
         max_output_tokens: int | None = None,
         result_contract: Mapping[str, JsonValue] | None,
         reviewer_of: uuid.UUID | None,
         origin_context_id: uuid.UUID | None = None,
+        task: str | None = None,
+        model: str | None = None,
+        planned_workers: int | None = None,
+        planned_models: list[str] | None = None,
     ) -> dict[str, JsonValue]:
-        if (agent is None) == (clone is None):
-            raise ToolError("Choose an agent spec or a pinned clone, exactly one.")
+        if sum(item is not None for item in (task, agent, clone)) != 1:
+            raise ToolError("Give the worker a task, an agent spec or a pinned clone, exactly one.")
+        if model is not None and task is None:
+            raise ToolError("A model choice goes with a task.")
         if clone is None and (clone_revision is not None or overrides is not None):
             raise ToolError("Clone revisions and overrides require a clone.")
         if clone is not None and (clone.kind != "agent" or clone_revision is None):
             raise ToolError("A clone requires an agent resource and its current revision.")
-        if deadline.tzinfo is None or deadline.utcoffset() is None:
+        if deadline is not None and (deadline.tzinfo is None or deadline.utcoffset() is None):
             raise ToolError("A worker deadline requires a timezone.")
         caller = await _auth(ctx)
         return dict(
@@ -408,6 +473,10 @@ def register_fleet_tools(
                 max_output_tokens=max_output_tokens,
                 result_contract=result_contract,
                 reviewer_of=reviewer_of,
+                task=task,
+                model=model,
+                planned_workers=planned_workers,
+                planned_models=planned_models,
             )
         )
 
@@ -416,10 +485,15 @@ def register_fleet_tools(
         ctx: Context,
         operation_key: OperationKey,
         role: str,
-        backend: BackendConfig,
-        budget_usd: PositiveMoney,
-        deadline: datetime,
-        max_turns: PositiveCount = 1,
+        task: str | None = None,
+        model: str | None = None,
+        planned_workers: PositiveCount | None = None,
+        planned_models: Annotated[list[str], Field(min_length=1)] | None = None,
+        origin_context_id: uuid.UUID | None = None,
+        backend: BackendConfig | None = None,
+        budget_usd: PositiveMoney | None = None,
+        deadline: datetime | None = None,
+        max_turns: PositiveCount | None = None,
         max_input_tokens: PositiveCount | None = None,
         max_output_tokens: PositiveCount | None = None,
         run_id: uuid.UUID | None = None,
@@ -429,16 +503,33 @@ def register_fleet_tools(
         overrides: AgentPatch | None = None,
         session: SessionSpec | None = None,
         result_contract: dict[str, JsonValue] | None = None,
-        origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
-        """Spawn a bounded worker through the root's current derived authority.
+        """Start one worker in this turn's fleet run. Call once per worker, in parallel.
 
-        Name the live turn's origin_context_id from its turn controls.
-        Supply a fresh agent spec or an authorized clone and sparse overrides.
-        A handle or role never grants permission. Retries retain operation_key.
+        Usually pass only operation_key (unique per worker, e.g. "W1"), role,
+        task (the worker's full instructions), model (a model id from the
+        fleet grant, e.g. "gpt-6-luna"; omit it for your own model) and
+        planned_models (the model id of every worker you are starting, e.g.
+        ["gpt-6-luna", "gemini-3.8-flash", "claude-sonnet-5-5"], the same list
+        on every call), plus origin_context_id from your turn controls.
+        Leave everything else out: the host binds this turn's run (never
+        invent a run_id), picks the granted backend, splits the budget left
+        evenly across your planned workers (and each provider's cap across
+        the planned workers on that provider) and uses the run's deadline (a
+        later deadline is shortened to it; a Gemini worker gets at most 120 s).
+        planned_workers (a plain count) is the older form of the same hint. A
+        worker on another model than yours runs at that model's default
+        effort. Budgets above the grant are refused. After spawning, end your
+        turn; you are woken to fleet_collect.
+        Advanced: an agent spec or an authorized clone with sparse overrides
+        instead of task. Retries reuse operation_key.
         """
         return await spawn(
             ctx,
+            task=task,
+            model=model,
+            planned_workers=planned_workers,
+            planned_models=planned_models,
             run_id=run_id,
             origin_context_id=origin_context_id,
             operation_key=operation_key,
@@ -461,10 +552,13 @@ def register_fleet_tools(
     @mcp.tool(tags={"fleet"})
     async def fleet_status(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        run_id: uuid.UUID,
+        run_id: uuid.UUID | None = None,
         origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
-        """Read the authorized run's durable worker status; do not start work."""
+        """Read the run's durable worker status; do not start work.
+
+        Omit run_id for this turn's run.
+        """
         return dict(
             await owner().status(
                 await _auth(ctx), run_id=run_id, origin_context_id=origin_context_id
@@ -563,13 +657,17 @@ def register_fleet_tools(
     @mcp.tool(tags={"fleet"})
     async def fleet_collect(  # pyright: ignore[reportUnusedFunction]
         ctx: Context,
-        run_id: uuid.UUID,
+        run_id: uuid.UUID | None = None,
         origin_context_id: uuid.UUID | None = None,
     ) -> dict[str, JsonValue]:
         """Collect verified outputs only after contracts and required reviews pass.
 
         The host returns waiting or blocked when evidence is incomplete. Status
         excerpts, a reached quorum, or a wake are not result certificates.
+        A blocked run with partial=true still carries the verified results of
+        the workers that succeeded and lists the failed ones: present it as a
+        partial result and name which worker failed, never as a complete one.
+        Omit run_id for this turn's run.
         """
         return dict(
             await owner().collect(

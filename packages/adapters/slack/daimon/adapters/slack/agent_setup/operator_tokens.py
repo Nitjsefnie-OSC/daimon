@@ -111,7 +111,7 @@ async def run_operator_token_submission(
     reply = functools.partial(
         post_ephemeral, client, channel_id=meta.channel_id or user_id, user_id=user_id
     )
-    if not await resolve_is_admin(client, user_id=user_id):
+    if not await resolve_is_admin(client, user_id=user_id, host_team_id=team_id):
         await audit(outcome="denied", reason="needs_admin")
         await reply(text=OPERATOR_TOKENS_NEED_ADMIN_MESSAGE)
         return

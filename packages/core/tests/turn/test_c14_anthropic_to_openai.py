@@ -26,6 +26,7 @@ from daimon.core.turn.openai_state import OpenAIRecoveryJournal, OpenAIUsageRevi
 from daimon.core.turn.outcomes import drain_outcomes
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest, bind_session
 from daimon.core.turn.run import run_prepared_turn
+from daimon.core.turn_hold import RequesterOrg
 from daimon.testing.db import require_owned_sessionmaker
 from daimon.testing.factories import (
     make_account,
@@ -181,6 +182,7 @@ async def test_c14_anthropic_thread_retains_a_new_thread_runs_b_and_missing_a_re
             current = await admit(
                 deps,
                 tenant_id=TENANT,
+                requester_org=RequesterOrg.HOST,
                 platform="slack",
                 external_user_id="caller",
                 channel_id="channel",

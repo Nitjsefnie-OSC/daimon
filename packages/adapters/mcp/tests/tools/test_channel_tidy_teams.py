@@ -104,6 +104,8 @@ class _World:
                 configuration_target_ma_agent_id=None,
                 configuration_target_name=None,
                 role=Role.USER,
+                sender_foreign=False,
+                shared_channel=False,
                 expires_at=now + timedelta(hours=1),
                 now=now,
             )

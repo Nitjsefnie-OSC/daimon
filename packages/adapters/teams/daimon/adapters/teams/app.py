@@ -174,6 +174,7 @@ from daimon.core.turn.thread_queue import (
     group_by_author,
     release_thread,
 )
+from daimon.core.turn_hold import RequesterOrg
 from daimon.core.turn_keys import list_mounted_key_names, render_keys_element
 from daimon.core.turn_origin import (
     HandoffNotice,
@@ -252,8 +253,22 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "channel_budget_exceeded": "turn.skipped.channel_budget_exceeded",
     "writers_none": "turn.skipped.writers_none",
     "own_agents_only": "turn.skipped.own_agents_only",
+    "client_requester": "turn.skipped.client_requester",
     "backend_unsupported": "turn.skipped.backend_unsupported",
 }
+
+
+def _requester_org(inbound: TeamsInbound) -> tuple[RequesterOrg, str | None]:
+    """Which organisation admission is told the sender belongs to.
+
+    Teams keeps its existing behaviour for now: every sender it admits is
+    passed as a member, so no Teams turn is held. Fail-closed detection of a
+    Teams sender's organisation is separate work. `is_foreign` still reaches
+    the turn origin for the wording and the 1:1-only tools that read it.
+    """
+    del inbound
+    return RequesterOrg.HOST, None
+
 
 _NO_CONTEXT = (
     "I couldn't read this conversation, so there's nothing for me to go on. "
@@ -1398,6 +1413,7 @@ class TeamsApp:
         settle or re-queue the work.
         """
         deps, role = self.runtime.turn_deps, await self._role(inbound)
+        org, home_id = _requester_org(inbound)
         try:
             admission = await admit(
                 deps,
@@ -1409,6 +1425,8 @@ class TeamsApp:
                 role=role,
                 now=datetime.now(UTC),
                 is_dm=inbound.kind == "dm",
+                requester_org=org,
+                requester_home_id=home_id,
             )
         except (MissingTurnConfigError, MAResolverMissError, AdmissionDenied) as err:
             refusal = _admission_refusal(
@@ -1716,6 +1734,7 @@ class TeamsApp:
             configuration_target_name=config.configuration_target_name,
             is_setup=config.thread_binding_kind == "setup",
             sender_foreign=inbound.is_foreign,
+            shared_channel=admission.shared_channel,
         ) as origin:
             notice = handoff(prepared.continuity) if handoff is not None else None
             quiet = notice is not None or prepared.continuity.state == "continued"

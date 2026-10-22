@@ -172,6 +172,7 @@ class SlackTurnLifecycle:
         cancel: asyncio.Event,
         author_id: str,
         requester_is_admin: bool = False,
+        requester_foreign: bool = False,
         agent_name: str,
         model_id: str,
         markup: Decimal = Decimal(1),
@@ -220,6 +221,9 @@ class SlackTurnLifecycle:
         self._author_id = author_id
         # Only an admin sees the request ref on a stop or failure notice.
         self._requester_is_admin = requester_is_admin
+        # A member of another workspace: their notices never name `/billing`, `/agent-setup`
+        # or an admin, and they are not offered Ask a human.
+        self._requester_foreign = requester_foreign
         self._model_id = model_id
         self._provider_draft: ProviderDraft | None = None
         self._markup = markup
@@ -571,8 +575,8 @@ class SlackTurnLifecycle:
 
     def _feedback_block(self) -> dict[str, Any]:
         """👍/👎, plus Ask a human when this deployment offers it."""
-        block = build_feedback_actions_block()
-        if self._ask_human:
+        block = build_feedback_actions_block(requested_by=self._author_id)
+        if self._ask_human and not self._requester_foreign:
             block["elements"].append(build_ask_human_button())
         return block
 
@@ -892,15 +896,19 @@ class SlackTurnLifecycle:
                 reason = state.termination or termination_reason(err)
                 request_id = self._request_id()
                 in_dm = self._channel.startswith("D")
-                nouns = RefusalNouns.for_platform("slack", place="dm" if in_dm else "channel")
+                foreign = self._requester_foreign
+                nouns = RefusalNouns.for_platform(
+                    "slack", place="dm" if in_dm else "channel", foreign=foreign
+                )
                 notice = render_termination_notice(
                     reason,
                     state=state,
                     request_id=request_id if self._requester_is_admin else None,
                     error=err,
                     in_dm=in_dm,
-                    setup_command=nouns.setup,
-                    billing_command=nouns.billing,
+                    setup_command="the setup panel" if foreign else nouns.setup,
+                    billing_command="the billing command" if foreign else nouns.billing,
+                    admin=nouns.who if foreign else "an admin",
                     agent_name=self._agent_name,
                 )
                 if notice is not None:
