@@ -223,6 +223,18 @@ def test_init_seeds_every_default_skill_onto_a_persistent_workspace_agent(
     # agent that attaches them exists.
     last_skill_call = max(i for i, p in enumerate(paths) if p.startswith("/v1/skills"))
     assert paths.index("/v1/agents") > last_skill_call
+    uploads = [call for call in calls if call.url.path == "/v1/skills"]
+    for upload, skill_dir in zip(uploads, [alpha, beta], strict=True):
+        with zipfile.ZipFile(io.BytesIO(packed(upload))) as archive:
+            uploaded = {
+                name.removeprefix("bundle/"): archive.read(name) for name in archive.namelist()
+            }
+        expected = {
+            file.relative_to(skill_dir).as_posix(): file.read_bytes()
+            for file in skill_dir.rglob("*")
+            if file.is_file()
+        }
+        assert uploaded == expected, f"uploaded archive must match {skill_dir.name}"
 
 
 def test_init_leaves_out_a_skill_a_default_agent_limits_to_platforms(
@@ -438,6 +450,49 @@ def test_default_skill_upload_names_are_valid_without_changing_source(skill_dir:
         }
     else:
         assert uploaded == source, "already-valid skills must upload byte-identical files"
+
+
+@pytest.mark.parametrize("name", ["a_b_c", "a1_b2", "a1-b2"])
+@pytest.mark.parametrize(
+    "frontmatter",
+    [
+        "name: {name}\ndescription: preserve_me\nmetadata: {{name: keep_me}}\n",
+        'name: "{name}"\ndescription: preserve_me\nmetadata: {{name: keep_me}}\n',
+        '{{name: "{name}", description: preserve_me, metadata: {{name: keep_me}}}}\n',
+    ],
+    ids=["plain", "quoted", "flow"],
+)
+def test_skill_bundle_transforms_names_and_preserves_other_content(
+    tmp_path: Path, name: str, frontmatter: str
+) -> None:
+    skill_dir = write_skill(
+        tmp_path,
+        "local-skill",
+        extra_files={"assets/data.bin": b"keep_me\x00\xff", "notes.txt": b"keep_me\n"},
+    )
+    (skill_dir / "SKILL.md").write_text(
+        f"---\n{frontmatter.format(name=name)}---\n# Keep body_underscores.\n"
+    )
+    source = {
+        file.relative_to(skill_dir).as_posix(): file.read_bytes()
+        for file in skill_dir.rglob("*")
+        if file.is_file()
+    }
+    original, original_body = parse_skill_markdown(source["SKILL.md"].decode(), source=name)
+
+    bundle = _skill_bundle(skill_dir)
+
+    uploaded = {file.path: file.content for file in bundle.files}
+    spec, body = parse_skill_markdown(uploaded["SKILL.md"].decode(), source=name)
+    assert spec.name == name.replace("_", "-")
+    assert spec.model_dump(exclude={"name"}) == original.model_dump(exclude={"name"})
+    assert body == original_body
+    assert uploaded.keys() == source.keys()
+    assert {p: b for p, b in uploaded.items() if p != "SKILL.md"} == {
+        p: b for p, b in source.items() if p != "SKILL.md"
+    }
+    if "_" not in name:
+        assert uploaded == source
 
 
 @pytest.mark.parametrize(
