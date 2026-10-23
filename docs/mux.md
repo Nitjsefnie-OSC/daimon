@@ -2380,6 +2380,24 @@ confirmed drops (tools, skills and connections are declared drops for now).
 An OpenAI template refuses a target with custom tools or MCP connections
 before any native write: nothing would run them.
 
+A template row may add `"template_capabilities": "mcp"` to keep the agent's
+Daimon tools. Capture then represents the source's daimon-mcp toolset from
+its live catalogue (tools that need a confirmation stay listed as
+unavailable, as for any Gemini representation), and the agent's own tools and
+custom skills become declared drops the switch card names. Each turn mints one
+registered caller credential in memory when the request is first sent: it acts
+as the requesting person's account with the agent's chat-execution grant
+(never an admin or the bot; the server re-reads roles), lives at most
+min(turn deadline + 60 s, 900 s), is checked against the consented catalogue,
+and is revoked and read back when the turn ends, whether it answered, failed,
+was cancelled or hit its deadline. A turn that outlives the credential gets
+tool errors rather than a refreshed token; a credential left by a crashed host
+expires on its own. If Gemini echoes the request's MCP header in an
+interaction, the transport removes only that exact header and refuses any
+other trace of the token (`mcp_header_echo`, `mcp_token_echo`). The MCP
+service's runtime manifest needs the same row, since the switch preview there
+captures the representation the consent pins.
+
 Selection only offers a row to the turn origin it serves: an agent's turn
 considers template and source-pinned rows; a channel's turn considers fixed
 plans with neither. A tenant-wide channel row and a template row therefore

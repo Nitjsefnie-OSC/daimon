@@ -170,6 +170,11 @@ CONFIRMED_DAIMON_TOOLS: Final[Mapping[str, str]] = {
 }
 
 
+def confirmation_gated_tools() -> frozenset[str]:
+    """Daimon tools that only run after a person confirms on a card (or publish)."""
+    return frozenset(CONFIRMED_DAIMON_TOOLS) | frozenset(PUBLISH_TOOLS)
+
+
 def backend_switch_tools(*, enabled: bool) -> frozenset[str]:
     """Project authoritative backend-selection eligibility into session controls."""
     return (

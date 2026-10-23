@@ -27,6 +27,7 @@ import structlog
 from daimon.core.config import McpSettings
 from daimon.core.mcp_auth import (
     CHAT_TOKEN_TTL,
+    NO_CONFIRMATION_LABEL,
     chat_token_label,
     registered_agent_claims_match,
 )
@@ -305,6 +306,10 @@ class DaimonJWTVerifier(JWTVerifier):
                 return _reject_token(refusal, access.claims)
         access.claims["tenant_id"] = str(identity_row.tenant_id)
         access.claims["role"] = identity_row.role.value
+        # Server-set from the registry row, never trusted from the token.
+        access.claims["no_confirmation_surface"] = (
+            row is not None and row.label == NO_CONFIRMATION_LABEL
+        )
         access.claims["platform"] = identity_row.platform
         access.claims["external_id"] = identity_row.external_id
         if identity_row.platform_user_id is not None:

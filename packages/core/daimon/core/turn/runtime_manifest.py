@@ -8,7 +8,7 @@ import json
 import os
 from collections import OrderedDict
 from collections.abc import Awaitable, Callable, Coroutine, Mapping
-from dataclasses import replace
+from dataclasses import dataclass, replace
 from datetime import datetime
 from decimal import Decimal
 from functools import partial
@@ -1357,6 +1357,24 @@ class SourceCapabilities(BaseModel):
         return self
 
 
+@dataclass(frozen=True)
+class _TemplateInputs:
+    """Capture inputs a template row implies: only Daimon MCP, from the live catalogue."""
+
+    source_pin: str
+    model: ModelRef
+    mcp_tools: tuple[str, ...] = ()
+    skills: tuple[SourceSkillMapping, ...] = ()
+    environment: EnvironmentSpec | None = None
+
+
+def _grant_models(row: Mapping[str, JsonValue]) -> tuple[str, ...]:
+    """The models a template row's configuration grant names; none for a malformed grant."""
+    grant = row.get("configuration_grant")
+    models = grant.get("models") if isinstance(grant, dict) else None
+    return tuple(m for m in models if isinstance(m, str)) if isinstance(models, list) else ()
+
+
 def configuration_matches(
     revision: ConfigRevision, *, digest: str | None, grant: ConfigurationGrant | None
 ) -> bool:
@@ -1526,15 +1544,47 @@ async def _capture_source_capabilities(
             and source.source is not None
             and row.get("source_agent_version") == source.source.revision.local
         ]
-        if not selected:
+        templates = [
+            (row, model)
+            for row in rows
+            if row.get("root_materialization") is True
+            and row.get("template_capabilities") == "mcp"
+            and row.get("tenant_id") == str(source.tenant_id)
+            and row.get("platform") in (request.platform, _WILDCARD)
+            and row.get("channel_id") in (request.admission.origin_channel_id, _WILDCARD)
+            and row.get("account_id") in (request.scope.account_id, _WILDCARD)
+            and (
+                capability_preview
+                or revision is not None
+                and row.get("profile") == revision.profile
+            )
+            for model in _grant_models(row)
+            if capability_preview or revision is not None and model == revision.model
+        ]
+        if not selected and not templates:
             return source
         spec, scope = source.effective_spec, source.resource_scope
         if spec is None or scope is None or scope != request.scope:
             raise ValueError("missing captured source")
         pin = source_preservation_pin(source)
         represented: list[SourceRepresentation] = []
+        candidates: list[tuple[dict[str, JsonValue], SourceCapabilities | _TemplateInputs]] = []
         for row in selected:
-            inputs = SourceCapabilities.model_validate(row["source_capabilities"])
+            candidates.append((row, SourceCapabilities.model_validate(row["source_capabilities"])))
+        for row, model in templates:
+            candidates.append(
+                (
+                    row,
+                    _TemplateInputs(
+                        source_pin=pin,
+                        model=ModelRef(
+                            provider=get_profile(str(row.get("profile"))).provider, id=model
+                        ),
+                    ),
+                )
+            )
+        for row, inputs in candidates:
+            template = isinstance(inputs, _TemplateInputs)
             profile_id = row.get("profile")
             if not isinstance(profile_id, str):
                 raise ValueError("missing representation profile")
@@ -1543,8 +1593,10 @@ async def _capture_source_capabilities(
                 inputs.source_pin != pin
                 or profile.provider != inputs.model.provider
                 or profile.skill_digest not in ("version", "content")
-                or row.get("platform") != request.platform
-                or row.get("channel_id") != request.admission.origin_channel_id
+                or not template
+                and row.get("platform") != request.platform
+                or not template
+                and row.get("channel_id") != request.admission.origin_channel_id
                 and row.get("channel_id")
                 != (
                     request.admission.backend_revision.channel.channel_id
@@ -1613,6 +1665,13 @@ async def _capture_source_capabilities(
                 if frozenset(allowed) != catalogue:
                     raise ValueError("source MCP allowlist differs from complete server catalogue")
                 catalogue = frozenset(cast(list[str], allowed))
+            if template:
+                # A template carries no operator list: the live catalogue is the source's.
+                inputs = _TemplateInputs(
+                    source_pin=inputs.source_pin,
+                    model=inputs.model,
+                    mcp_tools=tuple(sorted(catalogue)),
+                )
             if frozenset(inputs.mcp_tools) != catalogue:
                 raise ValueError("MCP representation must preserve the exact source catalogue")
             tools = tuple(spec.tools or ())
@@ -1639,6 +1698,16 @@ async def _capture_source_capabilities(
                 for tool in tools
             ):
                 raise ValueError("source has no enabled daimon-mcp toolset")
+            if template:
+                # No confirmation card on these turns: every confirmation-gated or
+                # publishing tool stays unavailable (and the server refuses it too).
+                from daimon.core.tool_safety import confirmation_gated_tools
+
+                gated = confirmation_gated_tools()
+                permissions = {
+                    name: "ask" if name in gated else permission
+                    for name, permission in permissions.items()
+                }
             if not any(permission == "auto" for permission in permissions.values()):
                 raise ValueError("source has no automatically executable MCP tools")
             # URL fetching has no native hosted-Agents tool. Keep the exact
@@ -1650,18 +1719,36 @@ async def _capture_source_capabilities(
                 and any(tool.kind == "builtin" and tool.name == "web_fetch" for tool in tools)
                 else ()
             )
-            mapped_tools = represented_execution_tools(
-                profile,
-                tuple(
-                    tool
-                    for tool in tools
-                    if tool.kind != "mcp_toolset"
-                    and not (
-                        unavailable_builtin_tools
-                        and tool.kind == "builtin"
-                        and tool.name == "web_fetch"
-                    )
-                ),
+            # A template represents only Daimon MCP: the source's own tools and
+            # custom skills are whole losses its consent must name.
+            template_losses = (
+                (
+                    *(
+                        ("skills",)
+                        if any(s.source in (None, "custom") for s in spec.skills or ())
+                        else ()
+                    ),
+                    *(("tools",) if any(t.kind != "mcp_toolset" for t in tools) else ()),
+                )
+                if template
+                else ()
+            )
+            mapped_tools = (
+                ()
+                if template
+                else represented_execution_tools(
+                    profile,
+                    tuple(
+                        tool
+                        for tool in tools
+                        if tool.kind != "mcp_toolset"
+                        and not (
+                            unavailable_builtin_tools
+                            and tool.kind == "builtin"
+                            and tool.name == "web_fetch"
+                        )
+                    ),
+                )
             )
             if any(
                 tool.kind == "mcp_toolset"
@@ -1720,7 +1807,9 @@ async def _capture_source_capabilities(
             )
             # The provider's built-in skills (docx, pptx, ...) have no bytes to
             # carry and run only there: another backend goes without them.
-            portable = tuple(s for s in spec.skills or () if s.source in (None, "custom"))
+            portable = tuple(
+                s for s in spec.skills or () if s.source in (None, "custom") and not template
+            )
             if {item.source.id for item in inputs.skills} != {s.id for s in portable}:
                 raise ValueError("skill representation is incomplete")
             unresolved = tuple(s for s in portable if s.version in (None, "latest"))
@@ -1806,6 +1895,7 @@ async def _capture_source_capabilities(
                     unavailable_mcp_tools=unavailable_mcp_tools,
                     unavailable_builtin_tools=unavailable_builtin_tools,
                     environment=inputs.environment,
+                    unavailable_capabilities=template_losses,
                 )
             )
         if len({item.target.model.model_dump_json() for item in represented}) != len(represented):
@@ -2039,6 +2129,7 @@ def classify_source_obligations(
     if represented is not None:
         missing.update(set(represented.unavailable_mcp_tools) - set(drops))
         missing.update(set(represented.unavailable_builtin_tools) - set(drops))
+        missing.update(set(represented.unavailable_capabilities) - set(drops))
     if not source_instructions_preserved(spec.system, target.system if target else None):
         missing.add("instructions")
     source_tools = tuple(spec.tools or ())

@@ -156,6 +156,11 @@ class GeminiPlan(BaseModel):
     root_materialization: bool = Field(
         default=False, strict=True, exclude_if=lambda value: not value
     )
+    # A template's capability: "mcp" represents the source's Daimon MCP toolset
+    # (its live catalogue) with a per-turn caller credential; skills stay dropped.
+    template_capabilities: Literal["mcp"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     max_output_tokens: Annotated[int, Field(gt=0, le=65_536, strict=True)] | None = Field(
         default=None, exclude_if=lambda value: value is None
     )
@@ -194,6 +199,10 @@ class GeminiPlan(BaseModel):
         validate_counterpart_pins(self, worker_materialization=self.worker_materialization)
         if self.root_materialization and self.source_capabilities is not None:
             raise ValueError("an agent template carries no operator capability inputs")
+        if self.template_capabilities is not None and (
+            not self.root_materialization or self.tools or self.skill_ids
+        ):
+            raise ValueError("template capabilities belong to a tool-free agent template")
         if self.source_capabilities is not None:
             if (
                 self.worker_materialization
@@ -348,12 +357,11 @@ class GeminiPlan(BaseModel):
         target, source = request.target_spec, request.source
         from daimon.core.turn.runtime_manifest import source_instructions_preserved
 
-        represented = (
-            represented_source(source, target)
-            if source is not None and self.source_capabilities is not None
-            else None
-        )
         full = self.source_capabilities is not None
+        mcp = self.template_capabilities == "mcp"
+        represented = (
+            represented_source(source, target) if source is not None and (full or mcp) else None
+        )
         if (
             request.admission.backend_revision_origin != "agent"
             or target is None
@@ -373,9 +381,15 @@ class GeminiPlan(BaseModel):
             or not source_instructions_preserved(source.effective_spec.system, target.system)
             or (full and represented is None)
             or (full and {"tools", "skills", "mcp"}.intersection(target.declared_drops))
+            or (mcp and (represented is None or "mcp" in target.declared_drops))
+            or (
+                mcp
+                and represented is not None
+                and target.mcp_servers != represented.target.mcp_servers
+            )
             or (not full and target.tools != ())
             or (not full and target.skills != ())
-            or (not full and target.mcp_servers != ())
+            or (not full and not mcp and target.mcp_servers != ())
             or target.extensions
             or (not full and self.tools)
             or (not full and self.skill_ids)
@@ -385,7 +399,7 @@ class GeminiPlan(BaseModel):
         ):
             raise AdmissionDenied(reason="backend_unsupported")
         try:
-            compile_agent(target, authenticated_mcp=full)
+            compile_agent(target, authenticated_mcp=full or mcp)
             if compile_environment(self.environment) != {"type": "remote", "sources": []}:
                 raise AdmissionDenied(reason="backend_unsupported")
         except UnsupportedCapability as error:
@@ -605,6 +619,100 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         except (OSError, ValueError):
             raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
 
+    mcp_template = plan.template_capabilities == "mcp"
+    template_catalogue: frozenset[str] | None = None
+    minted: tuple[str, UUID] | None = None
+
+    async def resolve_template_mcp(authorized: Scope, reference: str, destination: str) -> str:
+        """One registered caller credential per turn, minted in memory, never written out.
+
+        It acts as the requesting person's account with the agent's chat-execution
+        authority (no admin elevation; roles are re-read live by the server), lives
+        at most min(turn deadline + 60 s, 900 s), and `finalize` revokes it.
+        """
+        nonlocal minted
+        from daimon.core.ma_identity import derive_agent_uuid
+        from daimon.core.mcp_auth import (
+            NO_CONFIRMATION_LABEL,
+            mint_agent_mcp_token,
+            token_jti,
+            validate_agent_mcp_token,
+        )
+        from daimon.core.mcp_oauth.discovery import list_mcp_tools
+        from daimon.core.stores.accounts import get_account_with_tenant
+
+        agent_id = derive_agent_uuid(
+            tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
+        )
+        public_url = request.deps.mcp.public_url
+        if (
+            not counterpart_verified
+            or template_catalogue is None
+            or authorized != scope
+            or scope.is_platform
+            or scope.is_legacy_host_authorized
+            or reference != f"caller-mcp:{scope.tenant_id}:{scope.account_id}:{agent_id}"
+            or public_url is None
+            or destination.rstrip("/") != str(public_url).rstrip("/")
+            or request.deps.mcp.jwt_secret is None
+        ):
+            raise ScopeViolation("mcp-credential", "MCP credential has no verified source binding")
+        if minted is not None:
+            return minted[0]
+        now = request.now()
+        ttl_s = min(int(max((request.deadline - now).total_seconds(), 0.0)) + 60, 900)
+        secret = request.deps.mcp.jwt_secret.get_secret_value().encode()
+        tenant, account = UUID(scope.tenant_id), UUID(scope.account_id)
+        async with request.deps.sessionmaker.begin() as db:
+            identity = await get_account_with_tenant(db, account_id=account)
+            if identity is None or identity.tenant_id != tenant:
+                raise ScopeViolation("mcp-credential", "MCP caller is outside the admitted tenant")
+            token = await mint_agent_mcp_token(
+                db,
+                account_id=account,
+                tenant_id=tenant,
+                agent_id=agent_id,
+                label=NO_CONFIRMATION_LABEL,
+                secret=secret,
+                now=now,
+                ttl_days=ttl_s / 86400,  # pyright: ignore[reportArgumentType]
+                chat_execution=True,
+            )
+        minted = token, token_jti(token)
+        try:
+            await validate_agent_mcp_token(
+                request.deps.sessionmaker,
+                token=token,
+                secret=secret,
+                scope=scope,
+                agent_id=agent_id,
+                now=now,
+                max_ttl_s=ttl_s,
+                chat_execution=True,
+            )
+            if await list_mcp_tools(destination, token) != template_catalogue:
+                raise ValueError("target MCP catalogue differs from captured source")
+        except (OSError, ValueError):
+            await finalize()
+            raise ScopeViolation("mcp-credential", "invalid scoped MCP credential") from None
+        return token
+
+    async def finalize() -> None:
+        """Revoke this turn's MCP credential, then read the revocation back."""
+        nonlocal minted
+        if minted is None:
+            return
+        from daimon.core.stores.mcp_tokens import get_mcp_token, revoke_mcp_token
+
+        _, jti = minted
+        async with request.deps.sessionmaker.begin() as db:
+            await revoke_mcp_token(db, jti=jti, now=request.now())
+        async with request.deps.sessionmaker() as db:
+            row = await get_mcp_token(db, jti=jti)
+        if row is not None and row.revoked_at is None:
+            raise ScopeViolation("mcp-credential", "MCP credential revocation readback failed")
+        minted = None
+
     def transport(config: ConfigRevision, authorized: Scope) -> GeminiTransportRuntime:
         if config != revision or authorized != scope:
             raise ScopeViolation(request.thread_id, "Gemini deployment differs from admitted turn")
@@ -620,7 +728,11 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             configured_catalog_transport(api_key=secret)
             if request.admission.backend_revision_origin == "agent"
             else None,
-            mcp_secrets=resolve_mcp if plan.source_capabilities is not None else None,
+            mcp_secrets=resolve_mcp
+            if plan.source_capabilities is not None
+            else resolve_template_mcp
+            if mcp_template
+            else None,
             gcs_secrets=resolve_storage if plan.source_capabilities is not None else None,
             skill_bundle_publisher=RetainedSkillDeployments(plan.skill_deployments)
             if plan.source_capabilities is not None
@@ -628,7 +740,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         )
 
     async def read(preparation: ProviderPreparationRequest) -> AgentRevision:
-        nonlocal counterpart_verified
+        nonlocal counterpart_verified, template_catalogue
         counterpart_verified = False
         validate_counterpart_request(
             plan, preparation, worker_materialization=plan.worker_materialization
@@ -654,6 +766,24 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
             preparation, source=source, resources=resources(preparation)
         )
         await verify_storage()
+        if mcp_template:
+            from daimon.core.turn.runtime_manifest import represented_source
+
+            represented = represented_source(source, preparation.target_spec)
+            if represented is None:
+                raise AdmissionDenied(reason="backend_unsupported")
+            servers = represented.target.mcp_servers or ()
+            if len(servers) != 1:
+                raise AdmissionDenied(reason="backend_unsupported")
+            connection = servers[0]
+            allowed = connection.tool_policy.get("allowed_tools")
+            if not isinstance(allowed, list):
+                raise AdmissionDenied(reason="backend_unsupported")
+            prefix = f"mcp_tool:{connection.name}:"
+            template_catalogue = frozenset(
+                [str(name) for name in cast(list[JsonValue], allowed)]
+                + [item.removeprefix(prefix) for item in represented.unavailable_mcp_tools]
+            )
         counterpart_verified = True
         return checked
 
@@ -713,6 +843,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
         read_agent_counterpart=read,
         materialize_worker=materialize if plan.worker_materialization else None,
         materialize_root=materialize_root if plan.root_materialization else None,
+        end_of_turn=finalize if mcp_template else None,
         journal=GeminiJournal(
             records,
             request.deps.state_store,
