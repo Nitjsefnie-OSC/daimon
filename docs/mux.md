@@ -1797,25 +1797,44 @@ during provider I/O; its account lineage locks are released beforehand. Records 
 independently, and commits finish before cancellation propagates. Unchanged record
 payloads are not rewritten. Account privacy purge previews and removes conversation
 records; conservative financial holds are deliberately retained as financial
-evidence, contain no conversation/artifact payload, and never replenish a cap.
+evidence and contain no conversation/artifact payload. A purge never releases a
+hold: only settlement, a definite 4xx refusal or expiry do (below).
 
 Known storage limitation: each namespace still stores one complete Records blob,
 including artifact bytes, and the conservative hold map grows with attempts. There
-is currently no payload-size bound or automatic hold compaction/reconciliation.
+is currently no payload-size bound or automatic hold compaction (holds settle or
+expire, below, but released rows stay).
 Operators must monitor payload bytes and database storage before increasing
 workload or admitting large artifacts; this change does not authorize unlimited
 storage, deleting unknown holds, or truncating records. Reconciliation and any
 historical SQLite transfer remain explicit existing-owner operations. Do not switch
 an active namespace to an empty PostgreSQL row and call it a migration.
 
-Each Flash attempt first persists an explicit operator hold, then retains its
-accepted/refused/unknown receipt. Holds are estimates, not actual spend. They
-remain reserved until an accounting reconciler supplies verified provider and
-infrastructure actuals; this slice never treats a refusal as a free call or
-releases an unknown outcome. Exhausting the configured hold cap refuses further
-attempts. The provider usage outbox preserves native usage with unknown prices
-and infrastructure costs pending. Automatic actual settlement/hold release is a
-follow-up; this runtime is not a live certificate or QA parity claim.
+Each Flash or Argon attempt first persists an explicit operator hold (stamped
+`held_at`), then records its accepted/refused/unknown receipt. Holds are
+estimates against the row's `cap_usd`, not actual spend, and leave the cap three
+ways. A definite 4xx refusal releases at once (nothing to bill). An accepted
+attempt settles when its interaction's terminal usage is recorded: only a
+`final` observation (status completed, failed, cancelled, incomplete or
+budget_exceeded, or requires_action, since a tool-result round continues as a new
+interaction with its own hold) settles, never a running snapshot. Then `held_usd` becomes 0,
+`settled_usd` keeps the hold and `actual_usd` the token cost at the model's
+tariff (a later cumulative revision replaces `actual_usd` only, so nothing counts
+twice). Anything else (a lost response, a 503 fallback, a crash before usage, an
+unpriced alias) expires after `HOLD_TTL` (24 hours), logged as
+`provider_hold_expired`. Expiry and stamps commit even when the attempt that
+finds them is refused, so a full ledger ages out; a hold from before stamping
+starts its clock when first seen. Released rows stay as evidence.
+
+`cap_usd` therefore bounds the unsettled exposure in flight per (tenant, account,
+project) ledger, not total spend: a settled or expired attempt no longer counts.
+Total Gemini spend is bounded by the turn gates every backend passes (the
+prepaid balance gate, the per-person monthly cap and channel budgets, plus a
+fleet worker's run budget; see
+[billing](billing.md#the-gates-in-order)) and, outside Daimon, by the Google Cloud project's own
+billing budget or quota. Billing follows the usage outbox, never holds.
+`scripts/gemini_hold_report.py` reports each ledger's outstanding holds from one
+READ ONLY transaction; this runtime is not a live certificate or QA parity claim.
 
 Credential discovery happens only in the selected authorized transport factory.
 Private request-owned SDK clients use the explicit key, pinned Google origin,

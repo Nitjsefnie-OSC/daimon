@@ -8,10 +8,13 @@ clients are never discovered implicitly.
 from __future__ import annotations
 
 from dataclasses import replace
+from decimal import Decimal
 from uuid import NAMESPACE_URL, uuid5
 
+import structlog
 from daimon.core.native_footer_cost import NativeFooterCostContext
 from daimon.core.platform_system import system_for_platform
+from daimon.core.pricing import ProviderPrice, provider_cost_of
 from daimon.core.turn.admission import reauthorize
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini import (
@@ -20,6 +23,7 @@ from daimon.core.turn.gemini import (
     GeminiUsageRuntime,
     gemini_backend,
 )
+from daimon.core.turn.gemini_state import HoldSettlement, interaction_of
 from daimon.core.turn.prepare import PreparedTurn, ProviderPreparationRequest
 from daimon.core.usage_recording import record_provider_usage
 from mux.contracts.extensions import ExtensionConfig
@@ -28,6 +32,8 @@ from mux.contracts.resources import SessionSpec
 from mux.contracts.usage import UsageObservation
 from mux.errors import BindingConflict, ContinuityLost, ScopeViolation, UnsupportedCapability
 from mux.state.lease import Slot
+
+log = structlog.get_logger(__name__)
 
 
 async def prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedTurn:
@@ -257,6 +263,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
                 infrastructure_usd=usage.infrastructure_usd,
                 settled=settled,
             )
+        await _settle_hold(usage.accounting, observation, price)
         return settled
 
     return PreparedTurn(
@@ -274,3 +281,32 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         if request.worker is not None or admission.backend_revision_origin == "agent"
         else None,
     )
+
+
+async def _settle_hold(
+    accounting: object, observation: UsageObservation, price: ProviderPrice | None
+) -> None:
+    """Release the attempt's cap hold once its interaction has ended with a measured cost.
+
+    Billing above already recorded the usage; this only frees cap headroom. A running
+    snapshot, a partial meter or an unpriced alias leaves the hold for HOLD_TTL.
+    """
+    interaction = interaction_of(observation)
+    if (
+        not isinstance(accounting, HoldSettlement)
+        or interaction is None
+        or price is None
+        # A running snapshot may still grow: only the terminal reading frees the hold.
+        or not observation.final
+    ):
+        return
+    assert observation.model is not None
+    actual = provider_cost_of(observation, price, infrastructure_usd=Decimal(0))
+    if actual is None:
+        return
+    try:
+        await accounting.settle(
+            interaction_id=interaction, model=observation.model.id, actual_usd=actual
+        )
+    except Exception:  # expiry is the fallback; never fail a billed turn
+        log.warning("provider_hold_settle_failed", interaction_id=interaction, exc_info=True)

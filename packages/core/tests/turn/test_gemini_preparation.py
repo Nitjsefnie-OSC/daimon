@@ -415,6 +415,102 @@ async def test_fallback_alias_usage_is_preserved_as_pending_after_restart(host: 
     assert len(host.transport.requests) == 2 and not host.ancillary.requests
 
 
+async def test_each_tool_round_has_its_own_hold_and_settles_at_requires_action(
+    host: Host, tmp_path: Path
+) -> None:
+    import json
+    import sqlite3
+
+    from daimon.core.turn.gemini import GeminiTurnIO
+    from daimon.core.turn.gemini_state import SQLiteFlashAccounting
+
+    path = tmp_path / "holds.sqlite3"
+    accounting = SQLiteFlashAccounting(
+        path, namespace="n", hold_usd=Decimal("0.05"), cap_usd=Decimal("0.15")
+    )
+    runtime = host.deps.turn_runtimes[PROFILE]
+    assert isinstance(runtime.usage_store, GeminiUsageRuntime)
+    usage = replace(runtime.usage_store, accounting=accounting)
+    host.deps = replace(host.deps, turn_runtimes={PROFILE: replace(runtime, usage_store=usage)})
+    prepared = await prepare(host)
+    assert prepared.backend is not None and prepared.session_ref is not None
+    scope = Scope(
+        tenant_id=str(TENANT),
+        account_id=str(ACCOUNT),
+        principal_id="daimon",
+        authorization_id="admitted-turn",
+    )
+    persistence = await prepared_persistence(
+        host.deps,
+        prepared.admission,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        session_id=prepared.ma_session_id,
+        mapping_id=None,
+        session_ref=prepared.session_ref,
+        operation_key="tool-rounds",
+    )
+    rounds = []
+    for name in ("round-1", "round-2"):
+        reply = interaction(name, status="requires_action")
+        reply["steps"] = [
+            {"type": "function_call", "id": f"{name}-call", "name": "weather", "arguments": {}}
+        ]
+        rounds.append(reply)
+    host.transport.responses.extend([*rounds, interaction("answer")])
+    io = GeminiTurnIO(prepared.backend, scope, prepared.session_ref, persistence=persistence)
+
+    async def drive() -> None:
+        await io.send([{"type": "user.message", "content": [{"type": "text", "text": "weather"}]}])
+        for _ in range(2):
+            frames = await io.replay_turn_events()
+            tool = [
+                f.native
+                for f in frames
+                if f.native is not None and f.native.type == "agent.custom_tool_use"
+            ][-1]
+            await io.send(
+                [
+                    {
+                        "type": "user.custom_tool_result",
+                        "custom_tool_use_id": tool.id,
+                        "content": [{"type": "text", "text": "cold"}],
+                    }
+                ]
+            )
+        await io.replay_turn_events()
+
+    await persistence.run(drive)
+
+    def ledger() -> list[dict]:
+        with sqlite3.connect(path) as connection:
+            (body,) = connection.execute("SELECT body FROM payloads").fetchone()
+        return sorted(json.loads(body).values(), key=lambda row: row["interaction_id"])
+
+    # Every round, continuation included, reserved its own hold on its own interaction.
+    assert [(row["interaction_id"], row["held_usd"]) for row in ledger()] == [
+        ("answer", "0.05"),
+        ("round-1", "0.05"),
+        ("round-2", "0.05"),
+    ]
+    observations = await prepared.backend.usage.reconcile(scope, prepared.session_ref)
+    # A requires_action interaction is final: its tool result continued as a new one.
+    assert sorted((o.id, o.final) for o in observations) == [
+        ("gemini:answer:usage", True),
+        ("gemini:round-1:usage", True),
+        ("gemini:round-2:usage", True),
+    ]
+    record = cast(ObservationRecorder, prepared._record)  # pyright: ignore[reportPrivateUsage]
+    for observation in observations:
+        await record(observation=observation)
+    assert [(row["interaction_id"], row["held_usd"], row["settled_usd"]) for row in ledger()] == [
+        ("answer", "0", "0.05"),
+        ("round-1", "0", "0.05"),
+        ("round-2", "0", "0.05"),
+    ]
+
+
 async def test_fenced_function_result_has_its_own_claim_and_preserves_root(host: Host) -> None:
     from daimon.core.turn.gemini import GeminiTurnIO
 
@@ -598,12 +694,77 @@ async def test_final_host_outcome_preserves_failed_or_cancelled_root(
         )
 
 
+async def test_a_completed_turns_recorded_usage_settles_its_real_hold(
+    host: Host, tmp_path: Path
+) -> None:
+    import json
+    import sqlite3
+
+    from daimon.core.turn.gemini_state import SQLiteFlashAccounting
+
+    path = tmp_path / "holds.sqlite3"
+    accounting = SQLiteFlashAccounting(
+        path, namespace="n", hold_usd=Decimal("0.05"), cap_usd=Decimal("0.05")
+    )
+    runtime = host.deps.turn_runtimes[PROFILE]
+    assert isinstance(runtime.usage_store, GeminiUsageRuntime)
+    usage = replace(runtime.usage_store, accounting=accounting)
+    host.deps = replace(host.deps, turn_runtimes={PROFILE: replace(runtime, usage_store=usage)})
+
+    async def reseed() -> str:
+        raise AssertionError("Gemini host turn must never use Anthropic recovery")
+
+    # The cap equals one hold: the second turn runs only if the first one's settled.
+    for index, name in enumerate(("one", "two")):
+        host.transport.responses.append(interaction(name))
+        prepared = await prepare(host)
+        outcome = await run_prepared_turn_impl(
+            host.deps,
+            prepared,
+            tenant_id=TENANT,
+            platform="slack",
+            thread_id="thread",
+            external_user_id="user",
+            user_message="question",
+            lifecycle=RecordingLifecycle(),
+            cancel=asyncio.Event(),
+            reseed_user_message=reseed,
+            recovery_lifecycle=lambda cancel: RecordingLifecycle(),
+            operation_key=f"settle:{index}",
+        )
+        assert outcome.state.error is None
+    with sqlite3.connect(path) as connection:
+        (body,) = connection.execute("SELECT body FROM payloads").fetchone()
+    rows = sorted(json.loads(body).values(), key=lambda row: row["interaction_id"])
+    # 48 uncached at $0.75 + 16 cached at $0.075 + 11 output at $3.75, per million.
+    assert [
+        (row["interaction_id"], row["held_usd"], row["settled_usd"], row["actual_usd"])
+        for row in rows
+    ] == [("one", "0", "0.05", "0.00007845"), ("two", "0", "0.05", "0.00007845")]
+
+
 async def test_host_requested_cancel_remains_interrupted_and_journals_observed_stop(
     host: Host,
     monkeypatch: pytest.MonkeyPatch,
+    tmp_path: Path,
 ) -> None:
+    from daimon.core.turn.gemini_state import SQLiteFlashAccounting
     from daimon.core.turn.termination import TerminationReason
 
+    settled: list[str] = []
+
+    class Spy(SQLiteFlashAccounting):
+        async def settle(self, *, interaction_id: str, model: str, actual_usd: Decimal) -> bool:
+            settled.append(interaction_id)
+            return await super().settle(
+                interaction_id=interaction_id, model=model, actual_usd=actual_usd
+            )
+
+    runtime = host.deps.turn_runtimes[PROFILE]
+    assert isinstance(runtime.usage_store, GeminiUsageRuntime)
+    spy = Spy(tmp_path / "holds.sqlite3", namespace="n", hold_usd=Decimal(1), cap_usd=Decimal(1))
+    usage = replace(runtime.usage_store, accounting=spy)
+    host.deps = replace(host.deps, turn_runtimes={PROFILE: replace(runtime, usage_store=usage)})
     prepared = await prepare(host)
     host.transport.responses.append(interaction("cancel-root", status="in_progress"))
     host.transport.block = True
@@ -651,9 +812,17 @@ async def test_host_requested_cancel_remains_interrupted_and_journals_observed_s
         e.type == "session.turn_ended" and e.payload["outcome"] == "interrupted" for e in journal
     )
     async with host.deps.sessionmaker() as session:
-        assert (
-            await session.scalar(
-                text("SELECT count(*) FROM accounting_outbox WHERE applied_at IS NOT NULL")
+        applied = (
+            await session.execute(
+                text(
+                    "SELECT observation_id, revision, prior_applied_revision FROM accounting_outbox "
+                    "WHERE applied_at IS NOT NULL ORDER BY revision"
+                )
             )
-            == 1
-        )
+        ).all()
+    # The running snapshot, then the cancelled (final) reading of the same meter: a
+    # correction of revision 1, never a second charge.
+    assert [(row.revision, row.prior_applied_revision) for row in applied] == [(1, None), (2, 1)]
+    assert len({row.observation_id for row in applied}) == 1
+    # Both readings were recorded; only the final (cancelled) one settled the hold.
+    assert settled == ["cancel-root"]

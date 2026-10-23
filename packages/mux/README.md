@@ -601,6 +601,7 @@ Unsupported runtime/model/policy selections return the host's typed
 the interaction, so reused-session turns and function continuations remain
 distinct without changing neutral event IDs or ordering domains.
 Gemini interactions always serialize configured tools explicitly, using `[]` when none are configured. This includes reused sessions and fallback creates; provider default search and URL tools are never enabled by omission.
+A Gemini interaction's `UsageObservation` is `final` only once the interaction's status is terminal (completed, failed, cancelled, incomplete or budget_exceeded) or requires_action (its tool results continue as a new interaction); the interaction ending with an unchanged meter is a new revision, so a host sees the final reading. A running snapshot is never final.
 The host's optional typed provider-action callback keeps browser origin access
 and browser authentication separate. Provider codecs supply validated native
 response objects and send the chosen body through claimed mutations; the mux
