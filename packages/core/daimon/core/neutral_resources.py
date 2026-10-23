@@ -12,7 +12,7 @@ import io
 import json
 import uuid
 import zipfile
-from collections.abc import Awaitable, Callable, Mapping, Sequence
+from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
 from dataclasses import asdict, dataclass, replace
 from dataclasses import field as dataclass_field
 from datetime import datetime, timedelta
@@ -1721,8 +1721,18 @@ def agent_worker_backend(
     return selection, ModelRef(provider=backend, id=chosen)
 
 
+#: Losses an agent worker on another provider may declare for itself when that
+#: provider's worker profile can't carry them: each only takes capability away.
+AGENT_WORKER_AUTO_DROPS: frozenset[str] = frozenset(
+    {"tools", "skills", "mcp", "memory", "sandbox", "model_controls"}
+)
+
+
 def agent_worker_patch(
-    spec: AgentSpec, task: str | None, model: ModelRef | None = None
+    spec: AgentSpec,
+    task: str | None,
+    model: ModelRef | None = None,
+    drops: Iterable[DeclaredDrop] = (),
 ) -> AgentPatch | None:
     """The sparse change a worker running AS an agent makes to that agent's own spec.
 
@@ -1730,20 +1740,22 @@ def agent_worker_patch(
     `model` is the agent's configured model when it differs from its native one;
     a model on another provider declares the same losses a task worker does. The
     agent's tools are its own: one that asks before running cannot be asked by a
-    worker, so the resolver refuses that agent rather than drop the tool.
+    worker, so the resolver refuses that agent rather than drop the tool. `drops`
+    adds declared losses: the ones the agent's owner accepted for its backend, and
+    any the root declares; a loss only ever takes capability away.
     """
     update: dict[str, object] = {}
     if task is not None and task.strip():
         update["system"] = (spec.system or "") + "\n\nYour task: " + task.strip()
+    declared: set[DeclaredDrop] = {*spec.declared_drops, *drops}
     if model is not None and model != spec.model:
         update["model"] = model
-        drops: set[DeclaredDrop] = set(spec.declared_drops)
         if model.provider != spec.model.provider:
-            drops |= {"mcp", "memory", "sandbox"}
+            declared |= {"mcp", "memory", "sandbox"}
         if spec.extensions:
-            drops.add("model_controls")
-        if drops != set(spec.declared_drops):
-            update["declared_drops"] = tuple(sorted(drops))
+            declared.add("model_controls")
+    if declared != set(spec.declared_drops):
+        update["declared_drops"] = tuple(sorted(declared))
     return AgentPatch.model_validate(update) if update else None
 
 

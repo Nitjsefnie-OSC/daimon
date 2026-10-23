@@ -15,7 +15,7 @@ from contextlib import asynccontextmanager, nullcontext, suppress
 from dataclasses import replace
 from datetime import UTC, datetime
 from decimal import Decimal
-from typing import TYPE_CHECKING, Literal, Protocol
+from typing import TYPE_CHECKING, Literal, Protocol, cast, get_args
 
 import structlog
 from daimon.core.access_policy import TenantAccessPolicy
@@ -23,7 +23,14 @@ from daimon.core.security_audit import record_authz_denial
 from mux.contracts.config import BackendConfig
 from mux.contracts.events import AgentMessagePayload, Event, TextPart
 from mux.contracts.ids import Provider, ResourceRef, Revision, Scope
-from mux.contracts.resources import Agent, AgentPatch, AgentSpec, SessionSpec
+from mux.contracts.resources import (
+    Agent,
+    AgentPatch,
+    AgentSpec,
+    CapabilityDrop,
+    DeclaredDrop,
+    SessionSpec,
+)
 from pydantic import JsonValue, TypeAdapter
 
 if TYPE_CHECKING:
@@ -62,6 +69,20 @@ class FleetRefused(ValueError):
     def __init__(self, reason: str) -> None:
         self.reason = reason
         super().__init__(f"fleet: {reason}")
+
+
+def _validation_categories(error: BaseException) -> list[str] | None:
+    """A validation error's field paths and error types, never its input values."""
+    from pydantic import ValidationError
+
+    if not isinstance(error, ValidationError):
+        return None
+    return sorted(
+        {
+            ".".join(str(part) for part in item["loc"]) + ":" + item["type"]
+            for item in error.errors(include_url=False, include_input=False)
+        }
+    )[:10]
 
 
 def _review_required(contract: Mapping[str, JsonValue] | None) -> bool:
@@ -125,6 +146,10 @@ class FleetPorts(Protocol):
     async def worker_agents(
         self, parent: WorkerPermissions, policy: TenantAccessPolicy
     ) -> list[dict[str, JsonValue]]: ...
+
+    async def agent_consented_drops(
+        self, parent: WorkerPermissions
+    ) -> tuple[DeclaredDrop, ...]: ...
 
     async def admit(
         self,
@@ -552,6 +577,7 @@ class FleetOrchestrator:
         fill_token_limits: bool = False,
         as_agent: str | None = None,
         task: str | None = None,
+        as_agent_drops: tuple[DeclaredDrop, ...] = (),
     ) -> Mapping[str, JsonValue]:
         """Resolve once, then hand admission to the atomic owner operation.
 
@@ -559,11 +585,20 @@ class FleetOrchestrator:
         attached as input by the host. The model cannot supply review evidence.
         With `as_agent`, the worker runs AS that on-server agent: its own pinned
         revision is the clone, its captured source the ceiling, and the task is
-        appended to its own instructions rather than replacing them.
+        appended to its own instructions rather than replacing them. It declares the
+        losses its owner accepted for its backend and any the root passes
+        (`as_agent_drops`). On another provider, what that provider's worker can't
+        carry becomes a declared loss too (AGENT_WORKER_AUTO_DROPS), as the agent's
+        own chat turn there declares it; a loss only takes capability away.
         """
         _authorize(parent, policy)
         owner = self._owner()
-        from daimon.core.neutral_resources import agent_worker_patch, resolve_worker_spec
+        from daimon.core.neutral_resources import (
+            AGENT_WORKER_AUTO_DROPS,
+            WorkerSpecRefused,
+            agent_worker_patch,
+            resolve_worker_spec,
+        )
 
         if as_agent is not None:
             if agent is not None or clone is not None or overrides is not None:
@@ -578,8 +613,15 @@ class FleetOrchestrator:
                 raise FleetRefused("clone_evidence_unavailable")
             clone = captured_source.source.ref
             clone_revision = captured_source.source.revision
+            if as_agent_drops and not set(as_agent_drops) <= set(get_args(CapabilityDrop)):
+                raise FleetRefused("worker_agent_drops_unsupported")
             # The agent's own configured model comes first (agent_worker_permissions).
-            overrides = agent_worker_patch(captured_source.effective_spec, task, parent.models[0])
+            overrides = agent_worker_patch(
+                captured_source.effective_spec,
+                task,
+                parent.models[0],
+                (*await owner.agent_consented_drops(parent), *as_agent_drops),
+            )
 
         selected_run = parent.fleet.run_id if run_id is None else run_id
         if selected_run != parent.fleet.run_id:
@@ -637,7 +679,32 @@ class FleetOrchestrator:
                 captured_source=captured_source,
             )
 
-        resolved = resolve(limits)
+        foreign = (
+            as_agent is not None
+            and captured_source is not None
+            and captured_source.effective_spec is not None
+            and parent.models[0].provider != captured_source.effective_spec.model.provider
+        )
+        while True:
+            try:
+                resolved = resolve(limits)
+                break
+            except WorkerSpecRefused as error:
+                declared: set[DeclaredDrop] = (
+                    set(overrides.declared_drops or ()) if overrides is not None else set()
+                )
+                if (
+                    not foreign
+                    or error.field not in AGENT_WORKER_AUTO_DROPS
+                    or error.field in declared
+                    or overrides is None
+                ):
+                    raise
+                # That provider's worker can't carry it: declare the loss, try again.
+                lost = cast("DeclaredDrop", error.field)
+                overrides = overrides.model_copy(
+                    update={"declared_drops": tuple(sorted({*declared, lost}))}
+                )
         if as_agent is not None and resolved.spec.model != parent.models[0]:
             # A worker that runs as an agent runs on that agent's model, nothing else.
             raise FleetRefused("worker_agent_model_mismatch")
@@ -681,7 +748,15 @@ class FleetOrchestrator:
             or worker.id == reviewer_of
         ):
             raise FleetRefused("admitted_worker_mismatch")
-        return {"run_id": str(run.id), "worker_id": str(worker.id), "status": worker.status}
+        reply: dict[str, JsonValue] = {
+            "run_id": str(run.id),
+            "worker_id": str(worker.id),
+            "status": worker.status,
+        }
+        if as_agent is not None:
+            # What this agent can't do as this worker, so the root can say so.
+            reply["declared_drops"] = list(resolved.spec.declared_drops)
+        return reply
 
     async def status(
         self, parent: WorkerPermissions, policy: TenantAccessPolicy, *, run_id: uuid.UUID
@@ -1118,6 +1193,8 @@ class HostFleetPorts:
             self._dispatch = self._dispatch_worker
         self._clone_reader, self._wait = clone_reader, wait
         self._tasks: dict[uuid.UUID, asyncio.Task[None]] = {}
+        # The declared losses each such agent's owner accepted for its backend.
+        self._agent_drops: dict[tuple[uuid.UUID, uuid.UUID], tuple[DeclaredDrop, ...]] = {}
         # Preparation requests of workers that run as another agent, per (run, agent).
         # In-process only: after a restart, or on another replica, an agent worker's
         # preparation falls back to the root's request, which no longer matches that
@@ -1203,6 +1280,7 @@ class HostFleetPorts:
                         self._watches.pop(worker.run_id)
                         for key in [k for k in self._agent_requests if k[0] == worker.run_id]:
                             self._agent_requests.pop(key, None)
+                            self._agent_drops.pop(key, None)
                     if not done.cancelled():
                         done.exception()
 
@@ -1279,6 +1357,11 @@ class HostFleetPorts:
                         worker_id=str(worker.id),
                         error_class=type(error).__name__,
                         causes=causes,
+                        **(
+                            {"validation": validation}
+                            if (validation := _validation_categories(error))
+                            else {}
+                        ),
                     )
 
             task.add_done_callback(completed)
@@ -1520,7 +1603,18 @@ class HostFleetPorts:
                     else f"worker_agent_{error.field}_{error.reason}"
                 ) from None
             self._agent_requests[(parent.fleet.run_id, source.agent_id)] = request
+            # Its chat turns on that backend declare these losses; so does its worker.
+            self._agent_drops[(parent.fleet.run_id, source.agent_id)] = (
+                cast("tuple[DeclaredDrop, ...]", tuple(setting.declared_drops))
+                if setting is not None and setting.backend not in (None, "anthropic")
+                else ()
+            )
             return worker_parent
+
+    async def agent_consented_drops(self, parent: WorkerPermissions) -> tuple[DeclaredDrop, ...]:
+        if parent.agent_id is None:
+            return ()
+        return self._agent_drops.get((parent.fleet.run_id, parent.agent_id), ())
 
     async def _provision_agent_memory(self, source: BackendAgent) -> None:
         """Create an agent's shared memory store the way its first session does."""

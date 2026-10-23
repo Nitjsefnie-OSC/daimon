@@ -827,9 +827,12 @@ class DiscordFleetCard:
                 return False, notice + "No reviewed result to share."
             if ready:
                 return True, None
+            # No per-worker states here: this message is never edited again, so
+            # they would read as stuck after the run ends (r14). The card above is
+            # the live progress, and it ends in the run's final state.
             return False, (
-                f"Fleet is still working: {details}. "
-                "I'll post the result here when the workers finish."
+                "Fleet is still working. The fleet card shows each worker as it "
+                "finishes, and I'll post the result here when they're done."
             )
 
     async def end_after_error(self) -> None:

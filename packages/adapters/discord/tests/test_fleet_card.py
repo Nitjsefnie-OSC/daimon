@@ -644,7 +644,10 @@ async def test_waiting_collect_ends_the_turn_card_without_the_premature_answer()
     owner.settle_run.assert_not_awaited()
     messages = _texts(send, edit)
     assert not any("premature" in text for text in messages)
-    assert any("Fleet is still working" in text and "pending" in text for text in messages)
+    (notice,) = [text for text in messages if "Fleet is still working" in text]
+    # The answer message is never edited again: it names no worker state that
+    # would read as stuck after the run ends (r14); the card carries progress.
+    assert "pending" not in notice and "fleet card" in notice
     assert lifecycle.was_answered and lifecycle._terminal
 
 

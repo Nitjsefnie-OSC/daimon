@@ -1337,6 +1337,37 @@ async def test_a_fleet_plan_may_name_agent_workers_models_the_grant_does_not_lis
     orchestrator.spawn.assert_awaited_once()
 
 
+async def test_an_agent_worker_can_declare_its_own_losses() -> None:
+    root = plain_root()
+    researcher = replace(root, agent_id=uuid.UUID(int=4242))
+    bridge, orchestrator = plain_bridge(root)
+    orchestrator.agent_worker.return_value = researcher
+    async with Client(registered(bridge)) as client:
+        await client.call_tool(
+            "fleet_spawn",
+            {
+                "operation_key": "R1",
+                "role": "research",
+                "agent": {"name": "researcher", "declared_drops": ["tools", "skills"]},
+                "task": "Dig in.",
+            },
+        )
+        # Only whole-capability losses, and nothing but a name and losses.
+        for bad in (
+            {"name": "researcher", "declared_drops": ["mcp_tool:a:b"]},
+            {"name": "researcher", "tools": []},
+        ):
+            with pytest.raises(ToolError):
+                await client.call_tool(
+                    "fleet_spawn",
+                    {"operation_key": "R2", "role": "r", "agent": bad, "task": "x"},
+                )
+    kwargs = orchestrator.spawn.await_args.kwargs
+    assert kwargs["as_agent"] == "researcher" and kwargs["agent"] is None
+    assert kwargs["as_agent_drops"] == ("tools", "skills")
+    orchestrator.spawn.assert_awaited_once()
+
+
 async def test_a_worker_running_as_another_agent_cannot_start_a_fleet() -> None:
     """Its token names that agent, never the root's, so fleet tools refuse it."""
     root = replace(host_parent(), agent_id=uuid.UUID(int=4242))
