@@ -42,6 +42,7 @@ from daimon.core.teams_graph import (
     GraphToken,
     GraphUnavailable,
     TeamGroups,
+    message_text,
 )
 from daimon.core.thread_participation import ClassifierMessage
 
@@ -77,6 +78,47 @@ class ThreadReader:
 
     async def _group_id(self, inbound: TeamsInbound) -> str:
         return await self._teams.group_id(inbound.team_id, known=inbound.team_group_id)
+
+    async def latest_user_message(
+        self,
+        *,
+        conversation_id: str,
+        channel_id: str,
+        user_id: str,
+        team_id: str | None,
+        team_group_id: str | None,
+        before: str | None,
+        kind: str,
+    ) -> str | None:
+        """Read the clicker's newest words before the hand-over notice, if available."""
+        try:
+            root = root_id(conversation_id)
+            if kind == "channel" and root is not None:
+                group = await self._teams.group_id(team_id, known=team_group_id)
+                page = await self._graph.list_replies(group, channel_id, root)
+                messages = list(page.value)
+                if page.next_link is None:
+                    messages.append(await self._graph.get_message(group, channel_id, root))
+            elif kind == "groupChat":
+                messages = (await self._graph.list_chat_messages(conversation_id)).value
+            else:
+                return None  # Bot Framework cannot list a personal chat's history.
+        except GraphUnavailable:
+            log.warning("teams.handoff.seed_unreadable")
+            return None
+        candidates = [
+            message
+            for message in messages
+            if message.sender is not None
+            and message.sender.user is not None
+            and message.sender.user.id == user_id
+            and message.deleted_date_time is None
+            and message.message_type == "message"
+            and message.id.isdigit()
+            and (not before or not before.isdigit() or int(message.id) < int(before))
+        ]
+        latest = max(candidates, key=lambda message: int(message.id), default=None)
+        return message_text(latest) if latest is not None else None
 
     async def read(
         self,

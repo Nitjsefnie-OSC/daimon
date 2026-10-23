@@ -1590,7 +1590,10 @@ A thread can move to another agent without a new thread. Two triggers:
 - When a channel's agent changes, a thread whose session belongs to the old
   agent can't run a turn, and its next mention gets a notice instead. On
   Discord, Slack and Teams the notice has a Switch to agent button that moves the
-  thread to the channel's agent for whoever clicks it.
+  thread to the channel's agent for whoever clicks it and starts an attended
+  turn immediately. The continuation uses the clicker's latest readable message
+  before the notice, or a fixed prompt to pick up the conversation. Double
+  clicks share a deterministic continuation key; an unchanged binding starts nothing.
 
 Asking the agent is the default because it is how every other thread change
 works (keys, repo, fresh start). The button exists because no agent can answer
@@ -1606,7 +1609,10 @@ gives the order against every other lock holder. A Hand over click by an admin,
 or one `authorize` refuses, records a `panel:handoff` audit row, as
 `hand_off_task`'s refusals are audited.
 
-The switch writes only the binding. On the caller's next message the bind
+The button queues a `task_handoff` continuation in the binding transaction,
+subject to the same work-carry policy as the transcript. After commit the adapter
+starts the existing continuation dispatcher. A newer human message supersedes
+queued work. On that first turn (or the caller's next message), the bind
 replaces the old session with one for the new agent: the old session's
 transcript and files are carried across by the workspace transfer, the
 successor is stamped with the old session's recorded ids, memory is read-only

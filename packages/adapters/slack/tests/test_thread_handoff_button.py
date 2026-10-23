@@ -2,11 +2,18 @@
 
 from __future__ import annotations
 
+import asyncio
+import re
+from datetime import UTC, datetime, timedelta
 from types import SimpleNamespace
 from typing import Any, cast
+from unittest.mock import AsyncMock
 
 import pytest
+from aioresponses import CallbackResult
 from daimon.adapters.slack import thread_handoff
+from daimon.adapters.slack.app import SlackApp
+from daimon.adapters.slack.continuation_dispatch import dispatch_pending_continuations
 from daimon.adapters.slack.runtime import SlackRuntime
 from daimon.adapters.slack.thread_handoff import HAND_OVER_ACTION_ID, handle_hand_over_click
 from daimon.core.access_policy import TenantAccessPolicy
@@ -14,6 +21,7 @@ from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
 from daimon.testing import ma_agent
 from daimon.testing.factories import make_tenant
 from daimon.testing.ma import MARouter, build_fake_anthropic
@@ -45,6 +53,10 @@ async def _click(
     monkeypatch: pytest.MonkeyPatch,
     *,
     policy: TenantAccessPolicy | None = None,
+    clicks: int = 1,
+    superseded: bool = False,
+    external: bool = False,
+    seed_read_error: bool = False,
 ) -> Any:
     tenant = await make_tenant(db_session, platform="slack", workspace_id=_TEAM)
     await set_fields(
@@ -68,9 +80,79 @@ async def _click(
         assert team_id == _TEAM
         return fake_slack_web_client.client
 
+    fake_slack_web_client.mock.clear()
+    for method in ("chat.postMessage", "chat.update", "chat.postEphemeral"):
+        fake_slack_web_client.mock.post(
+            f"https://slack.com/api/{method}", payload={"ok": True}, repeat=True
+        )
+    fake_slack_web_client.mock.get(
+        re.compile(r"https://slack.com/api/users.info.*"),
+        payload={"ok": True, "user": {"is_admin": False}},
+        repeat=True,
+    )
+
+    def replies(url: URL, **kwargs: Any) -> CallbackResult:
+        if seed_read_error and "latest" in url.query:
+            return CallbackResult(payload={"ok": False, "error": "missing_scope"})
+        messages = [
+            {
+                "user": "U_CLICKER",
+                "ts": _THREAD_TS,
+                "text": "Please finish the analysis of our experiment.",
+            },
+            {"user": "U_OTHER", "ts": "1700000000.000150", "text": "other work"},
+        ]
+        if "oldest" in url.query:
+            messages = (
+                [
+                    {
+                        "user": "U_OTHER",
+                        "text": "actually stop",
+                        "ts": str((datetime.now(UTC) + timedelta(seconds=1)).timestamp()),
+                    }
+                ]
+                if superseded
+                else []
+            )
+        return CallbackResult(payload={"ok": True, "messages": messages, "has_more": False})
+
+    fake_slack_web_client.mock.get(
+        re.compile(r"https://slack.com/api/conversations.replies.*"),
+        callback=replies,
+        repeat=True,
+    )
+    tasks: list[Any] = []
+    run_turn = AsyncMock()
+
+    async def dispatch(**kwargs: Any) -> None:
+        await dispatch_pending_continuations(
+            db_session_factory,
+            runtime.anthropic,
+            fake_slack_web_client.client,
+            tenant_id=tenant.id,
+            channel=_CHANNEL,
+            thread_id=_THREAD_TS,
+            active_turn=False,
+            run_follow_up=run_turn,
+        )
+
+    app = SimpleNamespace(
+        _spawn=tasks.append, dispatch_continuations_in_thread=AsyncMock(side_effect=dispatch)
+    )
     monkeypatch.setattr(thread_handoff, "resolve_web_client", _client)
-    await handle_hand_over_click(cast(SlackRuntime, runtime), _payload())
-    return tenant
+    payload = _payload()
+    if external:
+        payload["user"]["team_id"] = "T_FOREIGN"
+    for index in range(clicks):
+        if index:
+            payload["user"]["id"] = "U_SECOND_CLICKER"
+        await handle_hand_over_click(cast(SlackRuntime, runtime), payload, app=cast(SlackApp, app))
+    async with db_session_factory() as session:
+        rows = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform="slack", thread_id=_THREAD_TS
+        )
+    await asyncio.gather(*tasks)
+    return SimpleNamespace(id=tenant.id, rows=rows, run_turn=run_turn, tasks=tasks)
 
 
 def _sent(fake_slack_web_client: Any, method: str) -> list[dict[str, Any]]:
@@ -82,17 +164,21 @@ def _sent(fake_slack_web_client: Any, method: str) -> list[dict[str, Any]]:
     ]
 
 
+@pytest.mark.parametrize("clicks", [1, 2])
 async def test_a_click_hands_the_thread_to_the_channels_agent(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
     fake_slack_web_client: Any,
     monkeypatch: pytest.MonkeyPatch,
+    clicks: int,
 ) -> None:
-    tenant = await _click(db_session, db_session_factory, fake_slack_web_client, monkeypatch)
+    tenant = await _click(
+        db_session, db_session_factory, fake_slack_web_client, monkeypatch, clicks=clicks
+    )
 
     (posted,) = _sent(fake_slack_web_client, "chat.postMessage")
     assert posted["thread_ts"] == _THREAD_TS
-    assert "research-bot answers in this conversation from the next message" in posted["text"]
+    assert "research-bot is picking up this conversation now" in posted["text"]
     (updated,) = _sent(fake_slack_web_client, "chat.update")
     assert updated["blocks"] == [], "the notice loses its button"
     async with db_session_factory() as session:
@@ -105,6 +191,17 @@ async def test_a_click_hands_the_thread_to_the_channels_agent(
         )
     assert routed.responder_ma_agent_id == "ag_research", "later messages go to research-bot"
     assert routed.thread_binding_kind == "handoff"
+    assert len(tenant.rows) == 1
+    row = tenant.rows[0]
+    assert row.attended and row.reason == "task_handoff"
+    assert row.requester_external_user_id == "U_CLICKER"
+    assert row.requested_work == "Please finish the analysis of our experiment."
+    tenant.run_turn.assert_awaited_once()
+    dispatched, seed = tenant.run_turn.await_args.args
+    assert dispatched.target_ma_agent_id == "ag_research" and row.requested_work in seed
+    async with db_session_factory() as session:
+        settled = await get_continuation(session, idempotency_key=row.idempotency_key)
+    assert settled is not None and settled.status == "delivered"
 
 
 async def test_a_refused_click_answers_privately_and_writes_nothing(
@@ -134,3 +231,47 @@ async def test_a_refused_click_answers_privately_and_writes_nothing(
             default=_DEFAULT,
         )
     assert routed.thread_binding_id is None
+    assert tenant.rows == [] and tenant.tasks == []
+
+
+async def test_a_human_message_after_the_click_supersedes_the_turn(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _click(
+        db_session, db_session_factory, fake_slack_web_client, monkeypatch, superseded=True
+    )
+    result.run_turn.assert_not_awaited()
+    async with db_session_factory() as session:
+        row = await get_continuation(session, idempotency_key=result.rows[0].idempotency_key)
+    assert row is not None and row.skip_reason == "skip_superseded"
+
+
+async def test_a_slack_connect_click_queues_and_dispatches_nothing(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _click(
+        db_session, db_session_factory, fake_slack_web_client, monkeypatch, external=True
+    )
+    assert result.rows == [] and result.tasks == []
+    result.run_turn.assert_not_awaited()
+
+
+async def test_unreadable_seed_history_uses_the_fixed_prompt(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    fake_slack_web_client: Any,
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    result = await _click(
+        db_session, db_session_factory, fake_slack_web_client, monkeypatch, seed_read_error=True
+    )
+    result.run_turn.assert_awaited_once()
+    row, seed = result.run_turn.await_args.args
+    assert row.requested_work == "Pick up this conversation where it left off."
+    assert row.requested_work in seed

@@ -3,8 +3,8 @@
 Every way a person moves a thread to another agent ends here: the
 `hand_off_task` tool the current agent calls when asked, and the button on the
 notice a thread shows when its channel now answers with an agent the thread's
-session does not belong to. The switch only writes the thread's binding. The
-caller's next message in the thread builds the new agent's session, carries
+session does not belong to. A button click also queues an attended continuation.
+Its first turn builds the new agent's session, carries
 the old one's work across (`daimon.core.session_preparation`) and closes the
 old one.
 
@@ -63,6 +63,7 @@ from daimon.core.authz import (
     build_agent_ref,
     build_subject,
 )
+from daimon.core.continuity.continuation import MAX_REQUESTED_WORK, sanitize_requested_work
 from daimon.core.continuity.handoff import (
     HandoffRefused,
     HandoffRefusedInSetupThread,
@@ -83,8 +84,9 @@ from daimon.core.stores.access_policy import (
 )
 from daimon.core.stores.accounts import key_share_lock_account
 from daimon.core.stores.domain import ThreadAgentBindingRow
-from daimon.core.stores.identity import find_platform_principal
+from daimon.core.stores.identity import find_platform_principal, get_or_create_platform_principal
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant, resolve
+from daimon.core.stores.task_continuations import get_continuation, record_continuation
 from daimon.core.stores.thread_agent_bindings import lock_binding, upsert_responder_binding
 from daimon.core.stores.thread_sessions import list_live_thread_sessions, record_session_seals
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -347,7 +349,10 @@ async def hand_over_thread(
         destination_name=destination.name,
         destination_reachable=reachable,
         existing_binding_kind=binding.kind if binding is not None else None,
-        origin_responder_ma_agent_id=current_responder_ma_agent_id,
+        origin_responder_ma_agent_id=(
+            current_responder_ma_agent_id
+            or (binding.responder_ma_agent_id if binding is not None else None)
+        ),
         access=access,
     )
     if isinstance(decision, HandoffRefused):
@@ -424,11 +429,12 @@ class SwitchOutcome:
     switched: bool
     text: str
     destination_name: str | None = None
+    requester_account_id: uuid.UUID | None = None
 
 
 def render_switched(name: str) -> str:
     return (
-        f"{name} answers in this conversation from the next message. The conversation "
+        f"{name} is picking up this conversation now. The conversation "
         f"and its working files move across, and {name} uses its own keys, connections "
         "and memory."
     )
@@ -447,6 +453,8 @@ async def switch_thread_on_request(
     default: DeploymentDefault,
     channel: str,
     now: datetime,
+    seed: str | None = None,
+    notice_message_id: str | None = None,
 ) -> SwitchOutcome:
     """The hand-over button: switch this thread to `ma_agent_id` for the person who clicked.
 
@@ -454,6 +462,9 @@ async def switch_thread_on_request(
     retrieved by that exact id and must still be a live agent of this tenant,
     and `hand_over_thread` decides it under the lock for the clicker, with
     their live admin role (`caller.is_server_admin`). `channel` names the parent channel.
+    A changed binding queues attended work for the clicker in the same transaction;
+    the adapter dispatches it after commit. The notice id makes retries and two
+    people clicking the same button share one continuation key.
     """
     try:
         agent = await get_setup_agent(anthropic, tenant_id=tenant_id, ma_agent_id=ma_agent_id)
@@ -471,7 +482,20 @@ async def switch_thread_on_request(
             text="That agent has no configuration name, so nobody can reach it by name. "
             "Nothing was changed.",
         )
-    recorded: tuple[RecordedSession, ...] | None = None
+    recorded = await recorded_thread_sessions(
+        anthropic, sessionmaker, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+    )
+    destination = HandoffDestination(
+        ma_agent_id=agent.id,
+        name=name,
+        agent=build_agent_ref(agent.name, agent.metadata, name),
+        is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
+    )
+    idempotency_key = uuid.uuid5(
+        tenant_id,
+        f"handover:{platform}:{parent_channel_id}:{thread_id}:{agent.id}:{notice_message_id}",
+    )
+    account_id: uuid.UUID | None = None
     try:
         async with sessionmaker.begin() as session:
             principal = (
@@ -494,19 +518,53 @@ async def switch_thread_on_request(
                     account_id=principal.account_id if principal is not None else None,
                     admin=caller,
                 ),
-                destination=HandoffDestination(
-                    ma_agent_id=agent.id,
-                    name=name,
-                    agent=build_agent_ref(agent.name, agent.metadata, name),
-                    is_daimon_managed=agent.metadata.get(MA_METADATA_KEY_MANAGED) == "true",
-                ),
-                # The session here belongs to another agent; a second click
-                # rewrites the same binding.
+                destination=destination,
                 current_responder_ma_agent_id=None,
                 default=default,
                 now=now,
                 recorded=recorded,
             )
+            if caller.platform_user_id is not None:
+                principal = principal or await get_or_create_platform_principal(
+                    session,
+                    tenant_id=tenant_id,
+                    platform=platform,
+                    external_id=caller.platform_user_id,
+                )
+                account_id = principal.account_id
+                # Read again under the switch's policy lock: seals may have grown.
+                live = await locked_thread_sessions(
+                    session, tenant_id=tenant_id, platform=platform, thread_id=thread_id
+                )
+                if (
+                    may_carry_work(
+                        await load_access_policy(session, tenant_id=tenant_id),
+                        destination=destination,
+                        parent_channel_id=parent_channel_id,
+                        thread_id=thread_id,
+                        recorded=live,
+                        account_id=account_id,
+                    )
+                    and await get_continuation(session, idempotency_key=idempotency_key) is None
+                ):
+                    work = sanitize_requested_work(seed, echoes=(name,))
+                    await record_continuation(
+                        session,
+                        tenant_id=tenant_id,
+                        platform=platform,
+                        parent_channel_id=parent_channel_id,
+                        thread_id=thread_id,
+                        requester_account_id=account_id,
+                        requester_external_user_id=caller.platform_user_id,
+                        target_ma_agent_id=agent.id,
+                        target_name=name,
+                        reason="task_handoff",
+                        attended=True,
+                        idempotency_key=idempotency_key,
+                        requested_work=(work or "Pick up this conversation where it left off.")[
+                            :MAX_REQUESTED_WORK
+                        ],
+                    )
     except ThreadHandoffRefused as refused:
         if refused.refusal.authz_reason is not None:
             await _audit_click(
@@ -538,7 +596,12 @@ async def switch_thread_on_request(
             outcome="allowed",
             reason="completed",
         )
-    return SwitchOutcome(switched=True, text=render_switched(name), destination_name=name)
+    return SwitchOutcome(
+        switched=True,
+        text=render_switched(name),
+        destination_name=name,
+        requester_account_id=account_id,
+    )
 
 
 async def _audit_click(

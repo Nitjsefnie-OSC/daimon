@@ -11,7 +11,11 @@ request.
 from __future__ import annotations
 
 from datetime import UTC, datetime
-from typing import Final
+from typing import TYPE_CHECKING, Final
+
+if TYPE_CHECKING:
+    from daimon.adapters.teams.app import TeamsApp
+    from daimon.adapters.teams.thread_reader import ThreadReader
 
 import structlog
 from daimon.adapters.teams.admin_caller import admin_caller
@@ -47,8 +51,12 @@ def hand_over_button(*, agent_id: str, agent_name: str) -> ExecuteAction:
 class TeamsThreadHandoff:
     """Hand over clicks."""
 
-    def __init__(self, runtime: TeamsRuntime) -> None:
+    def __init__(
+        self, runtime: TeamsRuntime, *, app: TeamsApp, reader: ThreadReader | None
+    ) -> None:
         self._runtime = runtime
+        self._app = app
+        self._reader = reader
 
     async def on_action(
         self, ctx: ActivityContext[AdaptiveCardInvokeActivity]
@@ -75,6 +83,19 @@ class TeamsThreadHandoff:
             return toast(FAILED)
         if not agent_id:
             return toast(FAILED)
+        seed: str | None = None
+        if self._reader is not None:
+            data = activity.channel_data
+            team = data.team if data is not None else None
+            seed = await self._reader.latest_user_message(
+                conversation_id=thread_id,
+                channel_id=conversation.split(";", 1)[0],
+                user_id=actor.user_id,
+                team_id=team.id if team is not None else None,
+                team_group_id=team.aad_group_id if team is not None else None,
+                before=notice,
+                kind=activity.conversation.conversation_type or "",
+            )
         outcome = await switch_thread_on_request(
             runtime.anthropic,
             runtime.sessionmaker,
@@ -89,12 +110,18 @@ class TeamsThreadHandoff:
             default=runtime.deployment_default,
             channel="this chat" if personal else "this channel",
             now=datetime.now(UTC),
+            seed=seed,
+            notice_message_id=notice,
         )
         log.info(
             "thread_handoff.clicked", platform="teams", switched=outcome.switched, agent_id=agent_id
         )
         if not outcome.switched:
             return toast(outcome.text)
+        self._app.spawn(
+            self._app.dispatch_after_input(actor.tenant_id, thread_id, activity.service_url),
+            name="teams.handoff",
+        )
         # Everyone sees who handed it over; the button has done its job.
         who = activity.from_.name or "Someone"
         text = f"{who} handed this conversation over. {outcome.text}"

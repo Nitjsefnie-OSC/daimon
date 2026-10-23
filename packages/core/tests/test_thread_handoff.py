@@ -12,9 +12,11 @@ import asyncio
 import uuid
 from collections.abc import AsyncIterator
 from datetime import UTC, datetime
+from unittest.mock import AsyncMock
 
 import pytest
 import pytest_asyncio
+from daimon.core import thread_handoff as handoff_module
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import (
     Action,
@@ -30,9 +32,12 @@ from daimon.core.native_admins import AdminCaller
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault
 from daimon.core.stores.access_policy import lock_access_policy, set_access_policy
 from daimon.core.stores.domain import TenantRow, ThreadAgentBindingRow
+from daimon.core.stores.identity import get_or_create_platform_principal
 from daimon.core.stores.scoped_config_write import set_fields
 from daimon.core.stores.security_audit import append_event, list_events
+from daimon.core.stores.task_continuations import list_pending_continuations
 from daimon.core.stores.thread_agent_bindings import create_binding, get_binding
+from daimon.core.stores.thread_sessions import create_thread_session
 from daimon.core.thread_handoff import (
     HandoffCaller,
     HandoffDestination,
@@ -542,3 +547,156 @@ async def test_a_hand_over_click_by_an_admin_is_audited(
     assert [(e.tool_name, e.outcome, e.reason) for e in events] == [row], (
         "one panel row per admin-tier click"
     )
+
+
+@pytest.mark.parametrize("seed", [None, "yes", " research-bot ", "x" * 600])
+async def test_button_sanitizes_and_bounds_the_attended_work(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    seed: str | None,
+) -> None:
+    tenant = await _seed(db_session)
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant.id))
+    result = await switch_thread_on_request(
+        build_fake_anthropic(router.dispatch),
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        ma_agent_id="agt_research",
+        caller=AdminCaller(platform_user_id="U1", is_server_admin=True),
+        default=_DEFAULT,
+        channel="#c1",
+        now=_NOW,
+        seed=seed,
+        notice_message_id="notice",
+    )
+    assert result.switched
+    async with db_session_factory() as session:
+        rows = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform="slack", thread_id="T1"
+        )
+    assert len(rows) == 1 and rows[0].attended
+    assert rows[0].requested_work == (
+        "x" * 500 if seed and len(seed) > 500 else "Pick up this conversation where it left off."
+    )
+
+
+async def test_button_withholds_seed_when_the_locked_session_cannot_carry_work(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed(db_session)
+    principal = await get_or_create_platform_principal(
+        db_session, tenant_id=tenant.id, platform="slack", external_id="U1"
+    )
+    await create_thread_session(
+        db_session,
+        tenant_id=tenant.id,
+        platform="slack",
+        thread_id="T1",
+        account_id=principal.account_id,
+        ma_session_id="old-session",
+        channel_id="C9",
+        seal_ids=frozenset({"C9"}),
+    )
+    await db_session.commit()
+    # A stale preflight read must not override the locked, persisted seals.
+    monkeypatch.setattr(handoff_module, "recorded_thread_sessions", AsyncMock(return_value=()))
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant.id))
+    result = await switch_thread_on_request(
+        build_fake_anthropic(router.dispatch),
+        db_session_factory,
+        tenant_id=tenant.id,
+        platform="slack",
+        parent_channel_id="C1",
+        thread_id="T1",
+        ma_agent_id="agt_research",
+        caller=AdminCaller(platform_user_id="U1", is_server_admin=True),
+        default=_DEFAULT,
+        channel="#c1",
+        now=_NOW,
+        seed="Private work must stay behind.",
+        notice_message_id="notice",
+    )
+    assert result.switched, "an admin may change the responder without carrying sealed work"
+    async with db_session_factory() as session:
+        assert (
+            await list_pending_continuations(
+                session, tenant_id=tenant.id, platform="slack", thread_id="T1"
+            )
+            == []
+        )
+
+
+async def test_two_clickers_racing_on_one_notice_queue_one_turn(
+    db_session: AsyncSession,
+    race_engine: AsyncEngine,
+) -> None:
+    tenant = await _seed(db_session)
+    factory = async_sessionmaker(race_engine, expire_on_commit=False)
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant.id))
+    anthropic = build_fake_anthropic(router.dispatch)
+
+    async def click(user: str) -> bool:
+        result = await switch_thread_on_request(
+            anthropic,
+            factory,
+            tenant_id=tenant.id,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="T1",
+            ma_agent_id="agt_research",
+            caller=AdminCaller(platform_user_id=user, is_server_admin=True),
+            default=_DEFAULT,
+            channel="#c1",
+            now=_NOW,
+            seed="Please continue the analysis.",
+            notice_message_id="same-notice",
+        )
+        return result.switched
+
+    assert sum(await asyncio.gather(click("U1"), click("U2"))) == 1
+    async with factory() as session:
+        rows = await list_pending_continuations(
+            session, tenant_id=tenant.id, platform="slack", thread_id="T1"
+        )
+    assert len(rows) == 1
+    assert rows[0].idempotency_key == uuid.uuid5(
+        tenant.id, "handover:slack:C1:T1:agt_research:same-notice"
+    )
+
+
+async def test_failed_continuation_write_rolls_back_the_binding(
+    db_session: AsyncSession,
+    db_session_factory: async_sessionmaker[AsyncSession],
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    tenant = await _seed(db_session)
+    router = MARouter()
+    router.add_agent(ma_agent(id="agt_research", name="research-bot", tenant_id=tenant.id))
+    monkeypatch.setattr(
+        handoff_module, "record_continuation", AsyncMock(side_effect=RuntimeError("write failed"))
+    )
+    with pytest.raises(RuntimeError, match="write failed"):
+        await switch_thread_on_request(
+            build_fake_anthropic(router.dispatch),
+            db_session_factory,
+            tenant_id=tenant.id,
+            platform="slack",
+            parent_channel_id="C1",
+            thread_id="T1",
+            ma_agent_id="agt_research",
+            caller=AdminCaller(platform_user_id="U1", is_server_admin=True),
+            default=_DEFAULT,
+            channel="#c1",
+            now=_NOW,
+            seed="Please continue the analysis.",
+            notice_message_id="notice",
+        )
+    assert await _binding(db_session_factory, tenant.id) is None

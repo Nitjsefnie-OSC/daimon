@@ -269,3 +269,75 @@ async def test_a_group_chat_graph_refuses_leaves_the_turn_its_text() -> None:
     block = await reader.read(_chat("1700000000010"), watermark=None, skip_ids=frozenset())
     assert block is not None and block.unavailable == "http error" and block.lines == ()
     assert await reader.read_media(_chat("1700000000010")) is None
+
+
+@pytest.mark.parametrize("kind", ["channel", "groupChat", "personal"])
+async def test_handover_seed_reads_only_the_clickers_latest_message_before_the_notice(
+    kind: str,
+) -> None:
+    def message(id: str, user: str = "clicker", **extra: object) -> dict[str, object]:
+        return {**_message(id), "from": {"user": {"id": user}}, **extra}
+
+    def handler(request: httpx.Request) -> httpx.Response:
+        if request.url.path.endswith("/" + ROOT):
+            return httpx.Response(200, json=message(ROOT))
+        return httpx.Response(
+            200,
+            json={
+                "value": [
+                    message("1700000000008"),  # sent after the notice
+                    message("1700000000006", "someone-else"),
+                    message("1700000000005", deletedDateTime="2026-10-23T00:00:00Z"),
+                    message("1700000000004"),
+                    message("1700000000002"),
+                ]
+            },
+        )
+
+    reader = _reader(httpx.MockTransport(handler))
+    seed = await reader.latest_user_message(
+        conversation_id=f"{CHANNEL_ID};messageid={ROOT}" if kind == "channel" else "chat",
+        channel_id=CHANNEL_ID,
+        user_id="clicker",
+        team_id=None,
+        team_group_id=GROUP,
+        before="1700000000007",
+        kind=kind,
+    )
+    assert seed == (None if kind == "personal" else "m1700000000004")
+
+
+async def test_unreadable_handover_history_returns_no_seed() -> None:
+    reader = _reader(httpx.MockTransport(lambda request: httpx.Response(403)))
+    assert (
+        await reader.latest_user_message(
+            conversation_id=f"{CHANNEL_ID};messageid={ROOT}",
+            channel_id=CHANNEL_ID,
+            user_id="clicker",
+            team_id=None,
+            team_group_id=GROUP,
+            before="1700000000007",
+            kind="channel",
+        )
+        is None
+    )
+
+
+async def test_incomplete_handover_history_cannot_choose_an_older_root() -> None:
+    def handler(request: httpx.Request) -> httpx.Response:
+        assert request.url.path.endswith("/replies"), "the older root is outside this window"
+        return httpx.Response(200, json={"value": [], "@odata.nextLink": "more"})
+
+    reader = _reader(httpx.MockTransport(handler))
+    assert (
+        await reader.latest_user_message(
+            conversation_id=f"{CHANNEL_ID};messageid={ROOT}",
+            channel_id=CHANNEL_ID,
+            user_id="clicker",
+            team_id=None,
+            team_group_id=GROUP,
+            before="1700000000007",
+            kind="channel",
+        )
+        is None
+    )

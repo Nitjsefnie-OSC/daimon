@@ -1266,7 +1266,7 @@ class SlackApp:
                 elif action_id.startswith(CONFIRMATION_CUSTOM_ID_PREFIX):
                     self._spawn(self._confirmations.handle_click(payload))
                 elif action_id == HAND_OVER_ACTION_ID:
-                    self._spawn(handle_hand_over_click(self.runtime, payload))
+                    self._spawn(handle_hand_over_click(self.runtime, payload, app=self))
         else:
             # Log unrecognised envelope types so the envelope key can be
             # confirmed or corrected from staging logs.

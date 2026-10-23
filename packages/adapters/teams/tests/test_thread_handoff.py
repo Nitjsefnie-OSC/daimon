@@ -2,8 +2,10 @@
 
 from __future__ import annotations
 
+import asyncio
 import json
 import uuid
+from datetime import UTC, datetime
 from typing import Any
 from unittest.mock import AsyncMock, patch
 
@@ -11,18 +13,22 @@ import pytest
 from daimon.adapters.teams import app as app_module
 from daimon.adapters.teams.app import TeamsApp
 from daimon.adapters.teams.thread_handoff import VERB
+from daimon.adapters.teams.thread_reader import ThreadReader
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.scope import ChannelScopeRef, DeploymentDefault, ScopeContext
 from daimon.core.stores.access_policy import set_access_policy
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.stores.scoped_config_write import set_fields
+from daimon.core.stores.task_continuations import get_continuation, list_pending_continuations
+from daimon.core.teams_threads import conversation_of
 from daimon.core.turn.errors import SessionAgentMismatch
 from daimon.testing import ma_agent
 from daimon.testing.ma import MARouter, build_fake_anthropic
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 
 from .conftest import (
+    AAD_OBJECT_ID,
     CHANNEL_ID,
     CONVERSATION_ID,
     ENTRA_TENANT_ID,
@@ -37,6 +43,7 @@ from .conftest import (
     patched_admission,
     post_activity,
     running_service,
+    settle,
 )
 
 pytestmark = pytest.mark.usefixtures("entra_env", "stub_bot_token", "provisioned_tenant")
@@ -68,6 +75,9 @@ async def _hand_over(
     click: dict[str, object] | None = None,
     channel_id: str = CHANNEL_ID,
     thread_id: str = THREAD_ID,
+    clicks: int = 1,
+    superseded: bool = False,
+    seed: str | None = "Please finish the analysis of our experiment.",
 ) -> tuple[Any, str | None]:
     """Click Hand over; the invoke's answer and the thread's responder afterwards."""
     async with db_factory.begin() as session:
@@ -84,8 +94,31 @@ async def _hand_over(
     runtime = build_teams_runtime(
         db_factory, anthropic=build_fake_anthropic(router.dispatch), deployment_default=_DEFAULT
     )
-    async with running_service(runtime, fake) as service:
-        answer = await post_activity(service, click or _click())
+    run_turn = AsyncMock()
+    ready = asyncio.Event()
+    original_dispatch = TeamsApp.dispatch_after_input
+
+    async def dispatch(self: TeamsApp, *args: Any, **kwargs: Any) -> None:
+        await ready.wait()
+        await original_dispatch(self, *args, **kwargs)
+
+    with (
+        patch.object(TeamsApp, "_run_turn", run_turn),
+        patch.object(TeamsApp, "dispatch_after_input", dispatch),
+        patch.object(ThreadReader, "latest_user_message", AsyncMock(return_value=seed)),
+    ):
+        async with running_service(runtime, fake) as service:
+            answer = await post_activity(service, click or _click())
+            for _ in range(clicks - 1):
+                await post_activity(service, click or _click())
+            async with db_factory() as session:
+                rows = await list_pending_continuations(
+                    session, tenant_id=TENANT, platform="teams", thread_id=thread_id
+                )
+            if superseded:
+                service.turns._last_message_at[conversation_of(thread_id)] = datetime.now(UTC)
+            ready.set()
+            await settle(service.turns)
     async with db_factory() as session:
         routed = await resolve(
             session,
@@ -94,6 +127,28 @@ async def _hand_over(
             ),
             default=_DEFAULT,
         )
+    if routed.thread_binding_id is None:
+        assert rows == []
+        run_turn.assert_not_awaited()
+    else:
+        assert len(rows) == 1, "one click or repeated clicks queue exactly one continuation"
+        row = rows[0]
+        assert row.reason == "task_handoff" and row.attended
+        assert row.requester_external_user_id == AAD_OBJECT_ID
+        assert row.target_ma_agent_id == "ag_research"
+        assert row.requested_work == (seed or "Pick up this conversation where it left off.")
+        async with db_factory() as session:
+            settled = await get_continuation(session, idempotency_key=row.idempotency_key)
+        assert settled is not None
+        if superseded:
+            run_turn.assert_not_awaited()
+            assert settled.skip_reason == "skip_superseded"
+        else:
+            run_turn.assert_awaited_once()
+            inbound = run_turn.await_args.args[0]
+            assert row.requested_work in inbound.text and inbound.user_id == AAD_OBJECT_ID
+            assert run_turn.await_args.kwargs["continuation"].target_ma_agent_id == "ag_research"
+            assert settled.status == "delivered"
     return answer, routed.responder_ma_agent_id if routed.thread_binding_id else None
 
 
@@ -125,10 +180,13 @@ async def test_the_responder_changed_notice_offers_hand_over(
     assert f'"verb": "{VERB}"' in notice, "the button routes to the hand-over handler"
 
 
+@pytest.mark.parametrize("clicks", [1, 2])
 async def test_a_click_hands_the_thread_to_the_channels_agent(
-    db_session_factory: async_sessionmaker[AsyncSession], teams_api_fake: TeamsApiFake
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+    clicks: int,
 ) -> None:
-    answer, responder = await _hand_over(db_session_factory, teams_api_fake)
+    answer, responder = await _hand_over(db_session_factory, teams_api_fake, clicks=clicks)
 
     assert "handed this conversation over" in json.dumps(answer), "everyone sees who did it"
     assert '"verb"' not in json.dumps(answer), "the replaced card loses its button"
@@ -171,3 +229,17 @@ async def test_a_channel_click_without_its_notice_writes_nothing(
 
     assert "something went wrong" in json.dumps(answer), "no thread to name, so it fails"
     assert responder is None, "no binding was written"
+
+
+async def test_a_human_message_after_the_click_supersedes_the_turn(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+) -> None:
+    await _hand_over(db_session_factory, teams_api_fake, superseded=True)
+
+
+async def test_unreadable_history_uses_the_fixed_seed(
+    db_session_factory: async_sessionmaker[AsyncSession],
+    teams_api_fake: TeamsApiFake,
+) -> None:
+    await _hand_over(db_session_factory, teams_api_fake, seed=None)

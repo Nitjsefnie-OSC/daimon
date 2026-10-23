@@ -25,6 +25,10 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ### Fixed
 
+- The hand-over button on Discord, Slack and Teams now starts the receiving
+  agent immediately, using the clicker’s latest readable message and carrying
+  across the previous session’s context. Repeated clicks start no extra turn.
+
 - Close recruitment boundaries for unresolved Discord channel forms, lead intake
   and recovery, saved channel routines, persistent wizard controls and channel
   metadata. Require explicit source authority at the core turn driver and gate

@@ -5,8 +5,8 @@ agent can't take a turn: its session belongs to the previous agent, so every
 mention is answered with a notice instead (`SessionAgentMismatch`). The notice
 carries this button. A click hands the thread to the agent named in the
 custom_id, for the person who clicked, through the same locked decision the
-`hand_off_task` tool uses (`daimon.core.thread_handoff`). The next message in
-the thread then runs as that agent, with the work carried across.
+`hand_off_task` tool uses (`daimon.core.thread_handoff`). The click starts an
+attended turn for that agent, with the work carried across.
 
 The custom_id names the agent only; it is a request, not a grant. The click is
 decided for the clicker's live role and grants in the thread they clicked in,
@@ -27,6 +27,7 @@ import structlog
 from daimon.adapters.discord.bot import DaimonBot
 from daimon.adapters.discord.checks import admin_caller
 from daimon.adapters.discord.post_transport import DiscordPostTransport
+from daimon.adapters.discord.recruitment_guard import protected_for_client
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.thread_handoff import switch_thread_on_request
 
@@ -88,10 +89,20 @@ class HandOverButton(
                 "This button only works in a conversation thread.", ephemeral=True
             )
             return
+        if protected_for_client(interaction.client, thread, str(interaction.guild_id)):
+            return
         await interaction.response.defer(ephemeral=True, thinking=True)
         bot = cast(DaimonBot, interaction.client)
         runtime = bot.runtime
         guild_id = str(interaction.guild_id)
+        seed: str | None = None
+        try:
+            async for message in thread.history(limit=100, before=interaction.message):
+                if message.author.id == interaction.user.id and not message.author.bot:
+                    seed = message.content
+                    break
+        except discord.HTTPException:
+            _log.warning("thread_handoff.seed_unreadable", thread_id=thread.id)
         outcome = await switch_thread_on_request(
             runtime.anthropic,
             runtime.sessionmaker,
@@ -104,6 +115,8 @@ class HandOverButton(
             default=runtime.turn_deps.deployment_default,
             channel=f"<#{thread.parent_id}>",
             now=datetime.now(UTC),
+            seed=seed,
+            notice_message_id=str(interaction.message.id) if interaction.message else None,
         )
         _log.info(
             "thread_handoff.clicked",
@@ -114,6 +127,13 @@ class HandOverButton(
         if not outcome.switched:
             await interaction.followup.send(outcome.text, ephemeral=True)
             return
+        bot._spawn(  # pyright: ignore[reportPrivateUsage]  # tracked turn must outlive the interaction
+            bot.dispatch_continuations_in_thread(
+                tenant_id=derive_tenant_uuid(platform="discord", workspace_id=guild_id),
+                thread=thread,
+                guild_id=guild_id,
+            )
+        )
         await thread.send(
             f"{interaction.user.mention} handed this conversation over. {outcome.text}",
             allowed_mentions=discord.AllowedMentions.none(),
