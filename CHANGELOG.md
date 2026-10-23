@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- On the opt-in mux turn path, routines, `daimon smoke` and workspace-transfer checkpoint turns now run: smoke passes its provisioned account, and a headless or checkpoint turn started inside another turn no longer inherits that turn's state and gets refused. A headless turn reads the turn path once and passes it down, and callers can pass it in. Nothing changes on the default legacy path.
 - Fleet: a worker running as an agent created with `daimon agents create` (with model controls such as speed) no longer fails at dispatch. An agent on OpenAI or Gemini can be a worker: what that provider's worker can't carry (its native tools, skills, MCP, memory, sandbox, model controls) becomes a declared loss, together with the losses its owner accepted for that backend. The root may declare more with `agent={"name": …, "declared_drops": […]}`, and the spawn reply lists every loss. The "Fleet is still working" answer no longer lists worker states that went stale; the fleet card shows progress and ends in the run's final state.
 
 - Admins can clear a channel's model-provider pin from chat: "clear this channel's pin" shows what the channel pins and clears it after the admin confirms on the card, so each agent answers there on its own provider again. Refusals and provider switches that mention a channel pin now give those words.
