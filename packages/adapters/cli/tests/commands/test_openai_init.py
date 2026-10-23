@@ -479,14 +479,12 @@ def test_init_normalizes_only_uploaded_name_and_pins_the_uploaded_bytes(
 
     (upload,) = [call for call in calls if call.url.path == "/v1/skills"]
     with zipfile.ZipFile(io.BytesIO(packed(upload))) as archive:
-        files = {
-            name.removeprefix("bundle/"): archive.read(name) for name in archive.namelist()
-        }
+        files = {name.removeprefix("bundle/"): archive.read(name) for name in archive.namelist()}
     spec, body = parse_skill_markdown(files["SKILL.md"].decode(), source=directory)
     assert spec.name == "marimo-notebooks"
     assert spec.description == "Keep marimo_notebooks here."
     assert spec.model_extra == {"metadata": {"name": "keep_underscores"}}
-    assert body == "\nKeep marimo_notebooks in the body.\n"
+    assert body == "Keep marimo_notebooks in the body.\n"
     assert files["assets/example.bin"] == b"keep_underscores\x00"
     assert (skill_dir / "SKILL.md").read_bytes() == source
     assert sorted(p.name for p in (defaults_root / "skills").iterdir()) == [directory]
@@ -510,7 +508,8 @@ def test_init_normalizes_only_uploaded_name_and_pins_the_uploaded_bytes(
 
 
 @pytest.mark.parametrize(
-    "name", ["Uppercase", "has.dot", "has space", "two--hyphens", "two__underscores", "_start", "end_", ""]
+    "name",
+    ["Uppercase", "has.dot", "has space", "two--hyphens", "two__underscores", "_start", "end_", ""],
 )
 def test_init_rejects_names_that_underscore_replacement_cannot_fix(
     monkeypatch: pytest.MonkeyPatch, manifest_path: Path, name: str
