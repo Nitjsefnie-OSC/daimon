@@ -46,7 +46,7 @@ from daimon.core.defaults.metadata import MA_METADATA_KEY_MANAGED, MA_METADATA_K
 from daimon.core.native_admins import AdminCaller
 from daimon.core.security_audit import record_authz_denial
 from daimon.core.stores.access_policy import load_access_policy
-from daimon.core.stores.domain import ChatPlatform
+from daimon.core.stores.domain import ChatPlatform, TurnOriginRow
 from daimon.core.stores.task_continuations import record_continuation
 from daimon.core.stores.thread_session_lineage import request_fresh_start
 from daimon.core.stores.thread_sessions import (
@@ -66,6 +66,7 @@ from daimon.core.thread_handoff import (
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from pydantic import Field
+from sqlalchemy.ext.asyncio import AsyncSession
 
 #: What the model must do with the returned copy. Both tools return final
 #: person-facing text, so the model's job is to relay it, not to rewrite it.
@@ -248,6 +249,9 @@ async def _hand_off_task_impl(
                 # binds. Written in the same transaction as the binding so a
                 # thread can never end up switched with the answer lost.
                 await set_pending_unsaved_work(session, id=live_session.id, choice=unsaved_work)
+            moved_to = await _release_for_another_provider(
+                session, auth, origin, destination_ma_agent_id=destination.id
+            )
             recorded = await locked_thread_sessions(
                 session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id
             )
@@ -296,6 +300,11 @@ async def _hand_off_task_impl(
         channel=_channel_mention(platform, origin.parent_channel_id),
         requested_work=queued_work,
     )
+    if moved_to is not None:
+        confirmation += (
+            f"\n{destination_name} answers here on {moved_to} from your next message; "
+            "earlier messages in this conversation aren't carried over."
+        )
     if work_withheld:
         confirmation += (
             f"\n{destination_name} can't read this conversation's history, which only "
@@ -309,6 +318,46 @@ async def _hand_off_task_impl(
         confirmation=confirmation,
         instruction=_REPLY_VERBATIM,
     )
+
+
+async def _release_for_another_provider(
+    session: AsyncSession,
+    auth: AuthIdentity,
+    origin: TurnOriginRow,
+    *,
+    destination_ma_agent_id: str,
+) -> str | None:
+    """When the destination runs on another provider, move the caller's slot of this
+    thread with it (`daimon.core.thread_release`); otherwise it would answer here on
+    the provider the thread is pinned to. Returns the provider's display name."""
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends, mux_state
+    from daimon.core.thread_release import caller_slot, request_thread_release
+    from daimon.core.turn.notices import provider_name
+
+    setting = await agent_backends.current(
+        session,
+        auth.tenant_id,
+        derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=destination_ma_agent_id),
+    )
+    target = setting.backend if setting is not None and setting.backend else "anthropic"
+    slot = caller_slot(
+        tenant_id=auth.tenant_id,
+        platform=origin.platform,
+        channel_id=origin.parent_channel_id,
+        thread_id=origin.thread_id,
+        account_id=auth.account_id,
+    )
+    pinned = await mux_state.get_binding(session, slot, include_released=True)
+    if (pinned.provider if pinned is not None else "anthropic") == target:
+        return None
+    await request_thread_release(
+        session,
+        slot,
+        generation=pinned.generation if pinned is not None else 0,
+        now=datetime.now(UTC),
+    )
+    return provider_name(target)
 
 
 def _refusal_text(refusal: HandoffRefused, *, channel: str, admin: str) -> str:

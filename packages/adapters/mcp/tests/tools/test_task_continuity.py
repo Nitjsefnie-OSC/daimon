@@ -1476,3 +1476,64 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
         True,
         "authz:runs_elsewhere",
     ), "the refusal is audited as the policy's denial, not a tool error"
+
+
+async def test_an_admin_hands_this_thread_to_a_copy_on_another_provider_and_it_moves(
+    db_session: AsyncSession,
+    committing_sessionmaker: async_sessionmaker[AsyncSession],
+) -> None:
+    """J2: a fresh copy, routed nowhere, switched to Gemini, takes over this thread on
+    Gemini from the next message, without any channel routing."""
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_backends
+    from daimon.core.thread_release import pending_releases
+
+    tenant = await make_tenant(db_session)
+    caller = await make_account(db_session, tenant=tenant)
+    await db_session.commit()
+    async with committing_sessionmaker.begin() as session:
+        await agent_backends.put_revision(
+            session,
+            tenant_id=tenant.id,
+            agent_id=derive_agent_uuid(tenant_id=tenant.id, ma_agent_id=_DESTINATION_ID),
+            local=1,
+            backend="gemini",
+            digest="d" * 64,
+            previous_local=None,
+            agent_name="research-bot",
+            preview_digest="p" * 64,
+        )
+    runtime = _runtime(
+        committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
+    )
+    auth = AuthIdentity(
+        account_id=caller.id,
+        tenant_id=tenant.id,
+        role=Role.ADMIN,
+        is_admin=True,
+        platform="discord",
+        platform_user_id="42",
+    )
+    async with turn_origin(
+        committing_sessionmaker,
+        tenant_id=tenant.id,
+        account_id=caller.id,
+        platform="discord",
+        parent_channel_id="C_PARENT",
+        thread_id="T_THREAD",
+        responder_ma_agent_id=_RESPONDER_ID,
+        responder_name="daimon",
+        role=Role.ADMIN,
+        sender_foreign=False,
+        shared_channel=False,
+    ) as origin:
+        result = await _hand_off_task_impl(
+            runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+        )
+    assert "answers here on Gemini from your next message" in result.confirmation
+    assert "aren't carried over" in result.confirmation
+    async with committing_sessionmaker() as session:
+        rows = await pending_releases(session, tenant_id=tenant.id)
+        channels, tenants = await _count_routing_rows(session, tenant.id)
+    assert [(thread, account) for _, thread, account, _ in rows] == [("T_THREAD", str(caller.id))]
+    assert (channels, tenants) == (0, 0), "no channel routing: this thread only"

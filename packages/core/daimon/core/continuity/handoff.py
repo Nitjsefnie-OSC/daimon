@@ -133,7 +133,11 @@ def decide_handoff(
         return HandoffRefused(
             reason=_POLICY_REFUSALS[denied], destination_name=destination_name, authz_reason=denied
         )
-    if not destination_reachable:
+    if not destination_reachable and denied is not None:
+        # An authorized caller (an admin) may hand this thread to an agent routed
+        # nowhere yet, such as a fresh copy: the binding is this thread only, and
+        # the alternative, routing it to a channel, is a wider change. Others
+        # still learn it answers nowhere.
         return HandoffRefused(reason="unreachable", destination_name=destination_name)
     if destination_ma_agent_id == origin_responder_ma_agent_id:
         return HandoffRefused(reason="same_agent", destination_name=destination_name)
