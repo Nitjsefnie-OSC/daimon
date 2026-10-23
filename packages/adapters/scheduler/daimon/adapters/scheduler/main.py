@@ -51,7 +51,7 @@ from daimon.core.authz import (
 from daimon.core.billing import BillingConfig, is_over_cap, load_billing_config
 from daimon.core.channel_backend import effective_thread_backend, is_selfhosted_channel
 from daimon.core.channel_budget import is_over_channel_budget
-from daimon.core.config import Settings, load_settings
+from daimon.core.config import Settings, load_settings, load_turn_settings
 from daimon.core.constants import MA_MAX_RETRIES
 from daimon.core.db import build_engine, build_session_factory
 from daimon.core.defaults.loader import parse_deployment_default
@@ -575,6 +575,7 @@ async def _build_fire(
             on_state=final_state.append,
             mcp_settings=settings.mcp,
             account_id=account_id,
+            turn_path=load_turn_settings().path,
             usage_record_factory=usage_record_factory,
             tenant_id=row.tenant_id,
             agent_uuid=agent_uuid,
