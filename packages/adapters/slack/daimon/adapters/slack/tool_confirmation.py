@@ -154,6 +154,7 @@ class SlackConfirmationCards:
             if backend_selection_enabled(runtime.settings.turn):
                 from daimon.adapters.slack.admin import resolve_is_admin
                 from daimon.core.confirmation import backend_switch_callbacks
+                from mux.contracts.ids import ChannelRef
 
                 if tenant_id is None or account_id is None:
                     raise ValueError("Backend confirmation requires an admitted account and tenant")
@@ -187,6 +188,14 @@ class SlackConfirmationCards:
                     current_admin=current_admin,
                     default_agent_name=runtime.deployment_default.agent_name,
                     place_word="workspace",
+                    # A channel-pin card clears only the channel this turn runs in.
+                    pin_channel=ChannelRef(
+                        tenant_id=str(tenant_id),
+                        platform="slack",
+                        channel_id=admission.origin_channel_id,
+                    )
+                    if admission is not None and admission.origin_channel_id is not None
+                    else None,
                 )
 
         rule_factory = runtime.sessionmaker if runtime is not None else None

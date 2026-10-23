@@ -741,3 +741,37 @@ async def test_private_notice_uses_sdk_endpoint_for_conversation_type(
     request = wire.activity_requests[0]
     assert ("isTargetedActivity=true" in request.url) is (conversation_type != "personal")
     assert request.body["text"] == "private refusal"
+
+
+async def test_runtime_hook_binds_pin_cards_to_the_admitted_origin_channel(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    from types import SimpleNamespace
+
+    from daimon.core import confirmation
+    from mux.contracts.ids import ChannelRef
+
+    runtime = MagicMock(
+        team_owners=AsyncMock(return_value=frozenset()), group_members=GroupMembersCache()
+    )
+    runtime.settings.turn = TurnSettings(path="mux", channel_backends=True)
+    runtime.settings.teams.admin_team_id = "0f2c8a51-7d3e-4b9a-8c61-2e5f4a9b7c10"
+    factory = MagicMock(return_value=(AsyncMock(), AsyncMock()))
+    monkeypatch.setattr(confirmation, "backend_switch_callbacks", factory)
+    tenant, account = uuid.uuid4(), uuid.uuid4()
+
+    def hook(admission):
+        TeamsConfirmationCards(FakeSender()).hook(
+            conversation_id=CONVERSATION_ID,
+            service_url=SERVICE_URL,
+            runtime=runtime,
+            admission=admission,
+            tenant_id=tenant,
+            account_id=account,
+        )
+        return factory.call_args.kwargs["pin_channel"]
+
+    assert hook(SimpleNamespace(origin_channel_id="19:origin@thread.tacv2")) == ChannelRef(
+        tenant_id=str(tenant), platform="teams", channel_id="19:origin@thread.tacv2"
+    )
+    assert hook(None) is None, "no admitted channel, no pin card"

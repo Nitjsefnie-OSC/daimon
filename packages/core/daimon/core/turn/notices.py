@@ -223,7 +223,7 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
 _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {
     "channel_pin": _Copy(
         "This channel is pinned to {provider}, which can't run here.",
-        "Ask {who} to clear this channel's pin, so {agent_mid} answers on its own provider.",
+        'Ask {who} to say "clear this channel\'s pin", so {agent_mid} answers on its own provider.',
     ),
     "provider_not_allowed": _Copy(
         "{Provider} isn't turned on for this {scope}.",

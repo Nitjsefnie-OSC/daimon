@@ -81,7 +81,9 @@ def test_worker_agent_field_roundtrips_without_widening_legacy_grants(agents):
             AgentFleetGrant.model_validate_json(json.dumps({**stored, "worker_agents": bad}))
 
 
-@pytest.mark.parametrize("tool", ["request_fleet_config", "request_provider_allowlist"])
+@pytest.mark.parametrize(
+    "tool", ["request_fleet_config", "request_provider_allowlist", "request_channel_pin_clear"]
+)
 @pytest.mark.parametrize("safety", [False, True])
 def test_both_writes_always_ask_and_cannot_run_unattended(tool, safety):
     selected = backend_switch_tools(enabled=True)
@@ -347,3 +349,65 @@ async def test_removing_only_one_of_the_paired_root_budgets_is_refused():
     )
     with pytest.raises(ValidationError):
         complete.grant(NOW, models=before.models, worker_ids=None)
+
+
+async def test_channel_pin_card_binds_the_chat_channel_and_a_current_admin(owned_preview):
+    from daimon.core.channel_backend import channel_ref, clear_channel_backend, set_channel_backend
+    from daimon.core.fleet_configuration import channel_pin_digest
+    from mux.contracts.config import BackendConfig
+
+    service, agent, actor, sessions, client, trace, _, _, _ = owned_preview
+    here = channel_ref(agent.tenant_id, "discord", "pinned-channel")
+    elsewhere = channel_ref(agent.tenant_id, "discord", "never-pinned")
+    async with sessions.begin() as session:
+        pin = await set_channel_backend(
+            session,
+            here,
+            BackendConfig(
+                backend="openai", profile="openai.persistent_workspace", model="gpt-6-luna"
+            ),
+        )
+    prompt = prompt_for_tool_call(
+        call(
+            "request_channel_pin_clear",
+            expected_revision=pin.local,
+            preview_digest=channel_pin_digest(pin),
+            # A model-supplied channel or text is never read.
+            channel_id="never-pinned",
+            summary="No risk",
+        ),
+        requester_platform_user_id="requester",
+        now=NOW,
+    )
+    assert (
+        prompt.configuration is not None and prompt.configuration.operation == "channel_pin_clear"
+    )
+    admin = AsyncMock(return_value=True)
+
+    def callbacks(channel):
+        return backend_switch_callbacks(
+            service,
+            sessionmaker=sessions,
+            anthropic=client,
+            tenant_id=agent.tenant_id,
+            account_id=actor.account_id,
+            current_admin=admin,
+            pin_channel=channel,
+        )
+
+    prepare, check = callbacks(here)
+    prepared = await prepare(prompt)
+    assert prepared.title == "Clear this channel's provider pin?"
+    assert "This channel pins OpenAI (gpt-6-luna)." in prepared.consequence
+    assert "No risk" not in prepared.consequence
+    assert await check(prompt, "requester") is None
+    # Another chat's card, or one with no bound chat, never clears this pin.
+    assert await callbacks(elsewhere)[1](prompt, "requester")
+    assert await callbacks(None)[1](prompt, "requester")
+    admin.return_value = False
+    assert await check(prompt, "requester"), "a non-admin cannot confirm"
+    admin.return_value = True
+    async with sessions.begin() as session:
+        await clear_channel_backend(session, here)
+    assert await check(prompt, "requester"), "a cleared pin's card is stale"
+    assert not trace.replies and not trace.violations

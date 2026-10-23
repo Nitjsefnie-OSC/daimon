@@ -1235,7 +1235,7 @@ async def _channel_pin_line(runtime: McpRuntime, origin: TurnOriginRow) -> str |
     model = f" ({pinned.model})" if pinned.model else ""
     return (
         f"This channel pins {provider_name(pinned.backend)}{model}, so this agent keeps "
-        "answering on that here until the channel's pin is cleared."
+        'answering on that here until an admin clears it: say "clear this channel\'s pin".'
     )
 
 

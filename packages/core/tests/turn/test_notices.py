@@ -309,7 +309,7 @@ def test_dm_refusal_keeps_the_pinned_agent_separate_from_the_bot_name() -> None:
             "channel_pin",
             "openai",
             "This channel is pinned to OpenAI, which can't run here.",
-            "Ask an admin to clear this channel's pin, so churn-explorer answers on its own"
+            'Ask an admin to say "clear this channel\'s pin", so churn-explorer answers on its own'
             " provider.",
         ),
         (
