@@ -355,7 +355,10 @@ class GeminiPlan(BaseModel):
         if request.worker is not None:
             return self.worker_deployment(request.worker, revision, markup=request.deps.markup)
         target, source = request.target_spec, request.source
-        from daimon.core.turn.runtime_manifest import source_instructions_preserved
+        from daimon.core.turn.runtime_manifest import (
+            keeps_memory_through_tools,
+            source_instructions_preserved,
+        )
 
         full = self.source_capabilities is not None
         mcp = self.template_capabilities == "mcp"
@@ -376,7 +379,12 @@ class GeminiPlan(BaseModel):
                 self.source_capabilities is not None
                 and self.source_capabilities.model.id != revision.model
             )
-            or "memory" not in target.declared_drops
+            or (
+                # Memory is either a consented loss or kept through this template's
+                # Daimon memory tools (each turn's credential carries a memory grant).
+                "memory" not in target.declared_drops
+                and not (mcp and keeps_memory_through_tools(target))
+            )
             or target.name != source.effective_spec.name
             or not source_instructions_preserved(source.effective_spec.system, target.system)
             or (full and represented is None)
@@ -694,7 +702,7 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 agent_id=agent_id,
                 account_id=account,
                 platform=request.platform,
-                thread_id=request.thread_id,
+                worker=request.worker is not None,
                 expires_at=now + timedelta(seconds=ttl_s),
             )
             if memory is not None:

@@ -21,6 +21,7 @@ from dataclasses import dataclass
 from datetime import datetime
 from typing import TYPE_CHECKING, Literal
 
+import structlog
 from anthropic import APIStatusError, AsyncAnthropic
 from daimon.core.stores.turn_memory_grants import TurnMemoryGrantRow, get_turn_memory_grant
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -28,13 +29,18 @@ from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
 if TYPE_CHECKING:
     from daimon.core.turn.admission import Admission
 
+_log = structlog.get_logger(__name__)
+
 #: The tools a provider turn's Daimon MCP connection carries for memory.
 MEMORY_TOOLS: tuple[str, ...] = ("memory_list", "memory_read", "memory_write", "memory_delete")
 
 MemoryKind = Literal["shared", "personal"]
 _PREFIXES: dict[MemoryKind, str] = {"shared": "shared/", "personal": "personal/"}
 _MAX_PATH = 512
-_MAX_CONTENT = 100_000
+#: One memory's content, in UTF-8 bytes.
+_MAX_CONTENT_BYTES = 100_000
+#: Memories one store may hold through these tools, and one listing returns.
+_MAX_MEMORIES = 1_000
 
 
 class MemoryRefused(Exception):
@@ -55,16 +61,18 @@ def turn_memory_grant(
     agent_id: uuid.UUID,
     account_id: uuid.UUID,
     platform: str,
-    thread_id: str,
+    worker: bool,
     expires_at: datetime,
 ) -> TurnMemoryGrantRow | None:
     """The grant a provider turn's credential carries, from that turn's own admission.
 
     The same facts a native mount follows: a shared thread has no personal store,
     and the admitted memory posture (seals, a read-only DM) is the read-only flag.
-    None without the admission's recorded grant: no memory is offered then.
+    None without the admission's recorded grant, for a held turn (natively it
+    mounts only its channel's store, which these tools do not serve) and for a
+    worker (workers never get memory): no memory is offered then.
     """
-    if admission.grant is None:
+    if admission.grant is None or admission.hold is not None or worker:
         return None
     return TurnMemoryGrantRow(
         jti=jti,
@@ -76,8 +84,8 @@ def turn_memory_grant(
         read_only=admission.memory_read_only,
         is_dm=admission.grant.is_dm,
         platform=platform,
-        channel_id=admission.origin_channel_id or thread_id,
-        thread_id=thread_id,
+        channel_id=admission.grant.channel_id,
+        thread_id=admission.grant.thread_id,
         expires_at=expires_at,
     )
 
@@ -223,7 +231,7 @@ async def list_memories(
             MemoryEntry(path=_shown(kind, record.path), content_sha256=record.content_sha256)
             for record in await _entries(anthropic, store_id, grant)
         )
-    return out
+    return out[:_MAX_MEMORIES]
 
 
 async def read_memory_at(
@@ -252,16 +260,18 @@ async def write_memory_at(
 ) -> str:
     """Create the memory, or replace it only while it still has `expected_content_sha256`."""
     from daimon.core.memory_view import delete_memory_records
-    from daimon.core.mux_compat import write_memory
+    from daimon.core.mux_compat import read_memory, write_memory
 
     kind, native = split_path(path)
-    if len(content) > _MAX_CONTENT:
+    if len(content.encode()) > _MAX_CONTENT_BYTES:
         raise MemoryRefused("That memory is too large.")
     if not await writable_now(sessions, grant):
         raise MemoryRefused("Memory is read-only in this conversation.")
     store_id = await _store(anthropic, sessions, grant, kind, create=True)
     assert store_id is not None
-    existing = [r for r in await _entries(anthropic, store_id, grant) if r.path == native]
+    records = await _entries(anthropic, store_id, grant)
+    existing = [r for r in records if r.path == native]
+    previous: str | None = None
     if existing:
         if expected_content_sha256 is None:
             raise MemoryRefused(
@@ -270,15 +280,26 @@ async def write_memory_at(
             )
         if existing[0].content_sha256 != expected_content_sha256:
             raise MemoryRefused("That memory changed since you read it. Read it again.")
+        # Kept so a failed replacement never loses the memory it replaces.
+        previous = (
+            await read_memory(anthropic, store_id, existing[0].id, scope=_scope(grant))
+        ).content
         deleted = await delete_memory_records(anthropic, store_id, existing, scope=_scope(grant))
         if deleted != len(existing):
             raise MemoryRefused("That memory changed since you read it. Read it again.")
     elif expected_content_sha256 is not None:
         raise MemoryRefused("That memory no longer exists. Read it again.")
+    elif len(records) >= _MAX_MEMORIES:
+        raise MemoryRefused("This memory is full. Replace or delete a memory first.")
     try:
         await write_memory(anthropic, store_id, native, content, scope=_scope(grant))
-    except APIStatusError as error:
-        if error.status_code in (409, 412):
+    except Exception as error:
+        if previous is not None:
+            try:
+                await write_memory(anthropic, store_id, native, previous, scope=_scope(grant))
+            except Exception:
+                _log.warning("memory_tools.restore_failed", path=native)
+        if isinstance(error, APIStatusError) and error.status_code in (409, 412):
             raise MemoryRefused("Another writer saved that memory first. Read it again.") from error
         raise
     return hashlib.sha256(content.encode()).hexdigest()

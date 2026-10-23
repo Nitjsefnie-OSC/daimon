@@ -2410,7 +2410,11 @@ credential's jti, and refuse any credential without one. Every write and delete
 re-checks the posture against the tenant policy as it is now, so a seal or the
 DM memory policy switched on mid-turn takes effect at the next write. An
 overwrite must name the content hash it read (`expected_content_sha256`);
-writes are otherwise create-only. A pinned row's credential carries no grant
+writes are otherwise create-only, and a replacement whose create fails restores
+the memory it replaced. One memory holds at most 100 kB (UTF-8), a store at
+most 1,000 memories through these tools, and a listing returns at most 1,000.
+A held turn (which natively mounts only its channel's store) and a fleet
+worker get no grant, so no memory. A pinned row's credential carries no grant
 yet, so its representation keeps the memory tools as declared losses.
 
 Selection only offers a row to the turn origin it serves: an agent's turn

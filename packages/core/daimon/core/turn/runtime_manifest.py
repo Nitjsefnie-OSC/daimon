@@ -2089,12 +2089,16 @@ def worker_model_spec(ceiling: AgentSpec, target: AgentSpec) -> AgentSpec:
 
 
 def keeps_memory_through_tools(target: AgentSpec) -> bool:
-    """A non-Anthropic target whose Daimon MCP connection runs every memory tool."""
+    """A Gemini target whose Daimon MCP connection runs every memory tool.
+
+    Only Gemini template turns mint a per-turn credential with a memory grant;
+    OpenAI (and Anthropic, which keeps memory natively) never count here.
+    """
     from daimon.core.memory_tools import MEMORY_TOOLS
     from daimon.core.tool_safety import DAIMON_SERVER_NAME
-    from mux.profiles import MANAGED_AGENTS
+    from mux.profiles import INLINE_REUSE
 
-    if target.model.provider == MANAGED_AGENTS.provider:
+    if target.model.provider != INLINE_REUSE.provider:
         return False
     for connection in target.mcp_servers or ():
         if connection.name != DAIMON_SERVER_NAME:

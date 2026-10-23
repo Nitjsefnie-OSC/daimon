@@ -61,6 +61,8 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         # Daimon tool rules need an approval pause this backend does not have.
         # Refused before any key, transport or journal is touched.
         raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
+    from daimon.core.turn.runtime_manifest import keeps_memory_through_tools
+
     target = request.worker.spec if request.worker is not None else request.target_spec
     # Shared ownership, seals, mounts and transfer require a separate complete
     # deployment adapter. Never silently drop those obligations in this slice.
@@ -70,7 +72,15 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         or admission.hold is not None
         or admission.origin_seal_ids
         or (
-            admission.memory_read_only and (target is None or "memory" not in target.declared_drops)
+            # Read-only memory is either a consented loss or kept through the memory
+            # tools, whose grant carries the read-only posture and enforces it.
+            admission.memory_read_only
+            and (
+                target is None
+                or (
+                    "memory" not in target.declared_drops and not keeps_memory_through_tools(target)
+                )
+            )
         )
         or admission.asks_before_publishing
         or (admission.channel_skills and (target is None or "skills" not in target.declared_drops))

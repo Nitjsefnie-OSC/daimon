@@ -76,6 +76,7 @@ def fake(monkeypatch) -> FakeMemory:
     monkeypatch.setattr(memory_view, "read_memory", memory.read)
     monkeypatch.setattr(memory_view, "delete_memory", memory.delete)
     monkeypatch.setattr(mux_compat, "write_memory", memory.write)
+    monkeypatch.setattr(mux_compat, "read_memory", memory.read)
     return memory
 
 
@@ -322,10 +323,11 @@ async def test_a_grant_goes_with_its_token(turn):
 )
 def test_the_grant_follows_the_turns_own_admission(shared_owner, read_only, is_dm):
     admission = SimpleNamespace(
-        grant=SimpleNamespace(is_dm=is_dm),
+        grant=SimpleNamespace(is_dm=is_dm, channel_id="parent", thread_id="thread"),
         shared_owner=shared_owner,
+        hold=None,
         memory_read_only=read_only,
-        origin_channel_id="parent",
+        origin_channel_id="not-this",
         config=SimpleNamespace(agent_name="researcher"),
         agent=SimpleNamespace(name="ma-name"),
     )
@@ -335,7 +337,7 @@ def test_the_grant_follows_the_turns_own_admission(shared_owner, read_only, is_d
         "agent_id": uuid.uuid4(),
         "account_id": uuid.uuid4(),
         "platform": "discord",
-        "thread_id": "thread",
+        "worker": False,
         "expires_at": NOW,
     }
     grant = memory_tools.turn_memory_grant(admission, **args)  # pyright: ignore[reportArgumentType]
@@ -343,16 +345,20 @@ def test_the_grant_follows_the_turns_own_admission(shared_owner, read_only, is_d
     # A shared thread never offers anyone's personal store.
     assert grant.personal is (shared_owner is None)
     assert (grant.read_only, grant.is_dm) == (read_only, is_dm)
+    # The place is the admission grant's own, never the origin field.
     assert (grant.channel_id, grant.thread_id, grant.agent_name) == (
         "parent",
         "thread",
         "researcher",
     )
-    assert memory_tools.turn_memory_grant(replace_grant(admission), **args) is None  # pyright: ignore[reportArgumentType]
-
-
-def replace_grant(admission):
-    return SimpleNamespace(**{**vars(admission), "grant": None})
+    for no_memory in (
+        SimpleNamespace(**{**vars(admission), "grant": None}),
+        # Held turns mount only their channel's store natively; these tools never serve it.
+        SimpleNamespace(**{**vars(admission), "hold": object()}),
+    ):
+        assert memory_tools.turn_memory_grant(no_memory, **args) is None  # pyright: ignore[reportArgumentType]
+    # Workers never get memory.
+    assert memory_tools.turn_memory_grant(admission, **{**args, "worker": True}) is None  # pyright: ignore[reportArgumentType]
 
 
 def test_only_a_provider_target_running_every_memory_tool_keeps_memory():
@@ -379,8 +385,9 @@ def test_only_a_provider_target_running_every_memory_tool_keeps_memory():
     assert keeps_memory_through_tools(target("gemini", everything))
     assert not keeps_memory_through_tools(target("gemini", memory_tools.MEMORY_TOOLS[:-1]))
     assert not keeps_memory_through_tools(target("gemini", everything, server="other"))
-    # An Anthropic target keeps memory natively, never through these tools.
+    # Anthropic keeps memory natively; OpenAI turns mint no memory grant (yet).
     assert not keeps_memory_through_tools(target("anthropic", everything))
+    assert not keeps_memory_through_tools(target("openai", everything))
 
 
 async def test_the_mcp_memory_tools_serve_only_a_granted_provider_turn(turn, fake, monkeypatch):
@@ -465,3 +472,52 @@ def json_text(value) -> str:
     import json
 
     return json.dumps(value)
+
+
+async def test_a_failed_replacement_restores_the_memory_it_replaces(turn, fake, monkeypatch):
+    client = object()
+    first = await memory_tools.write_memory_at(
+        client, turn.sessions, turn.mine, "shared/a.md", "keep me", expected_content_sha256=None
+    )
+    real = fake.write
+    calls = []
+
+    async def failing_once(*args, **kwargs):
+        calls.append(args[3])
+        if len(calls) == 1:
+            raise RuntimeError("provider down")
+        return await real(*args, **kwargs)
+
+    monkeypatch.setattr(mux_compat, "write_memory", failing_once)
+    with pytest.raises(RuntimeError, match="provider down"):
+        await memory_tools.write_memory_at(
+            client, turn.sessions, turn.mine, "shared/a.md", "new", expected_content_sha256=first
+        )
+    assert calls == ["new", "keep me"]
+    assert await memory_tools.read_memory_at(client, turn.sessions, turn.mine, "shared/a.md") == (
+        "keep me"
+    )
+
+
+async def test_memory_size_and_count_are_capped(turn, fake, monkeypatch):
+    client = object()
+    monkeypatch.setattr(memory_tools, "_MAX_MEMORIES", 2)
+    monkeypatch.setattr(memory_tools, "_MAX_CONTENT_BYTES", 8)
+    # Bytes, not characters: four two-byte characters fill eight bytes, a fifth exceeds them.
+    await memory_tools.write_memory_at(
+        client, turn.sessions, turn.mine, "shared/a.md", "éééé", expected_content_sha256=None
+    )
+    with pytest.raises(MemoryRefused, match="too large"):
+        await memory_tools.write_memory_at(
+            client, turn.sessions, turn.mine, "shared/b.md", "ééééé", expected_content_sha256=None
+        )
+    await memory_tools.write_memory_at(
+        client, turn.sessions, turn.mine, "shared/b.md", "b", expected_content_sha256=None
+    )
+    with pytest.raises(MemoryRefused, match="full"):
+        await memory_tools.write_memory_at(
+            client, turn.sessions, turn.mine, "shared/c.md", "c", expected_content_sha256=None
+        )
+    fake.stores[next(iter(fake.stores))]["/d.md"] = "written natively"
+    listed = await memory_tools.list_memories(client, turn.sessions, turn.mine)
+    assert len(listed) == 2, "a listing never exceeds the cap"
