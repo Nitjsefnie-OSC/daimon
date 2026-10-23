@@ -153,6 +153,10 @@ class ToolRuleCardReference(BaseModel):
 STALE_CLICK_MESSAGE: Final[str] = (
     "This preview changed, so nothing ran. Ask the agent to show the change again."
 )
+#: The clicker's own account changed between the checks.
+ACCESS_CHANGED_CLICK_MESSAGE: Final[str] = (
+    "Your access changed, so nothing ran. Ask the agent to show the change again."
+)
 
 
 class ConfirmationRefused(ValueError):
@@ -163,13 +167,16 @@ class ConfirmationRefused(ValueError):
     and nothing they can ask for in this chat changes that.
     """
 
-    def __init__(self, reason: str, *, stale: bool = False) -> None:
+    def __init__(self, reason: str, *, stale: bool = False, click: str | None = None) -> None:
         super().__init__(reason)
         self.stale = stale
+        self._click = click
 
     @property
     def click_message(self) -> str:
         """The refusal the clicker sees: a reason they can act on."""
+        if self._click is not None:
+            return self._click
         return STALE_CLICK_MESSAGE if self.stale else str(self)
 
 
@@ -668,9 +675,8 @@ def backend_switch_callbacks(
             or identity.tenant_id != tenant_id
             or identity.platform_user_id != clicker
         ):
-            raise ConfirmationRefused(
-                "This confirmation is unavailable. Preview again.", stale=True
-            )
+            # A different account or workspace: a new preview can't fix that.
+            raise ConfirmationRefused("This confirmation is unavailable. Preview again.")
         agent = await load_backend_agent(
             anthropic,
             sessionmaker,
@@ -705,7 +711,9 @@ def backend_switch_callbacks(
             current = await get_account_with_tenant(session, account_id=account_id)
         if current != identity:
             raise ConfirmationRefused(
-                "This permission changed. Preview and confirm again.", stale=True
+                "This permission changed. Preview and confirm again.",
+                stale=True,
+                click=ACCESS_CHANGED_CLICK_MESSAGE,
             )
         return agent, preview
 
@@ -726,9 +734,8 @@ def backend_switch_callbacks(
             or identity.tenant_id != tenant_id
             or identity.platform_user_id != clicker
         ):
-            raise ConfirmationRefused(
-                "This confirmation is unavailable. Preview again.", stale=True
-            )
+            # A different account or workspace: a new preview can't fix that.
+            raise ConfirmationRefused("This confirmation is unavailable. Preview again.")
         subject = build_subject(is_admin=await current_admin(clicker), platform_user_id=clicker)
         if (
             reference.operation in ("provider_allowlist", "channel_pin_clear")
@@ -852,7 +859,9 @@ def backend_switch_callbacks(
             current = await get_account_with_tenant(session, account_id=account_id)
         if current != identity:
             raise ConfirmationRefused(
-                "This permission changed. Preview and confirm again.", stale=True
+                "This permission changed. Preview and confirm again.",
+                stale=True,
+                click=ACCESS_CHANGED_CLICK_MESSAGE,
             )
         return action, details
 

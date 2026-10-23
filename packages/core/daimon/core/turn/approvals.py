@@ -22,6 +22,7 @@ from __future__ import annotations
 
 import uuid
 from collections.abc import Awaitable, Callable, Iterable, Mapping, Sequence
+from contextlib import nullcontext
 from datetime import UTC, datetime, timedelta
 
 import structlog
@@ -556,7 +557,8 @@ def interactive_decider(
                 )
                 if read_failed or (latest is not None and latest.rule == "deny"):
                     if isinstance(response, ApprovedConfirmation):
-                        with refused_after_approval():
+                        # Only a real deny names the rule; a failed read may pass next time.
+                        with refused_after_approval() if not read_failed else nullcontext():
                             await response.retire_unsent()
                     return ToolConfirmationResult(
                         allow=False,

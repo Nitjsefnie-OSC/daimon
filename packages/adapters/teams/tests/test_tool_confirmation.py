@@ -31,9 +31,11 @@ from daimon.core.native_admins import GroupMembersCache
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
     NOT_YOURS_MESSAGE,
+    RULE_REFUSED_FOOTER,
     STOPPED_MESSAGE,
     ConfirmationCardState,
     build_confirmation_card,
+    refused_after_approval,
 )
 from daimon.core.posted_controls.lifecycle import drain_card_edits
 from daimon.core.tool_safety import ToolCall
@@ -458,6 +460,23 @@ async def test_approved_card_can_retire_stopped_before_allow_is_sent() -> None:
 
     assert sender.activities[-1].id == "m-1"
     assert "Stopped" in _json(sender, -1)
+
+
+async def test_a_rule_refused_approved_card_retires_with_the_rules_footer() -> None:
+    sender = FakeSender()
+    cards = TeamsConfirmationCards(sender)
+    waiting, token = await _post(cards, sender)
+    await cards.on_action(_click(token, "approve", AAD_OBJECT_ID))
+
+    result = await asyncio.wait_for(waiting, timeout=1)
+    assert isinstance(result, ApprovedConfirmation)
+    with refused_after_approval():
+        await result.retire_unsent()
+    assert await drain_card_edits(1) == 0
+
+    assert "Stopped" in _json(sender, -1)
+    assert RULE_REFUSED_FOOTER in _json(sender, -1)
+    assert "Ask again" not in _json(sender, -1)
 
 
 async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> None:

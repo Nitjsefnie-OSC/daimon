@@ -316,7 +316,11 @@ async def test_card_scope_refuses_before_any_agent_read(owned_preview, bad_scope
         account_id=account_id,
         current_admin=admin,
     )
-    assert await check(prompt, "other" if bad_scope == "requester" else "requester") is not None
+    refusal = await check(prompt, "other" if bad_scope == "requester" else "requester")
+    assert refusal is not None
+    if bad_scope != "requester":
+        # Another account or workspace: a new preview can't fix it, so it isn't called stale.
+        assert refusal == "This confirmation is unavailable. Preview again."
     admin.assert_not_awaited()
     assert len(trace.requests) == 1
     assert await service.current(agent) is None
@@ -1042,3 +1046,23 @@ def test_switch_prompt_binds_the_stated_agent_settings() -> None:
         prompt_for_tool_call(
             _call(thread_mode="everyone"), requester_platform_user_id="r", now=datetime.now(UTC)
         )
+
+
+def test_each_refusal_gives_the_clicker_its_own_cause() -> None:
+    from daimon.core.confirmation import (
+        ACCESS_CHANGED_CLICK_MESSAGE,
+        STALE_CLICK_MESSAGE,
+        ConfirmationRefused,
+    )
+
+    authority = ConfirmationRefused("This change needs a current workspace admin.")
+    stale = ConfirmationRefused("This preview changed. Preview and confirm again.", stale=True)
+    access = ConfirmationRefused(
+        "This permission changed. Preview and confirm again.",
+        stale=True,
+        click=ACCESS_CHANGED_CLICK_MESSAGE,
+    )
+    assert authority.click_message == "This change needs a current workspace admin."
+    assert stale.click_message == STALE_CLICK_MESSAGE
+    assert access.click_message.startswith("Your access changed")
+    assert not authority.stale and stale.stale and access.stale

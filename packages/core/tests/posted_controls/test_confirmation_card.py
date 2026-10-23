@@ -584,3 +584,49 @@ def test_a_one_day_notebook_link_reads_singular() -> None:
 
     assert "Link expires: in 1 day" in lines(1)
     assert "Link expires: in 14 days" in lines(14)
+
+
+@pytest.mark.parametrize("read_fails", [False, True])
+async def test_a_rule_refusal_after_approval_names_the_rule_only_for_a_real_deny(
+    read_fails: bool,
+) -> None:
+    """The turn retires the approved card; a failed rule read is not a refusal."""
+    from daimon.core.confirmation import ApprovedConfirmation
+    from daimon.core.tool_safety import ResolvedAgentToolRule, ToolSafetyPolicy
+    from daimon.core.turn.approvals import chat_tool_confirmation
+    from daimon.core.turn.posture import PolicyApproval
+
+    footers: list[str | None] = []
+    reads = 0
+
+    async def rules_for(_call: ToolCall) -> ResolvedAgentToolRule | None:
+        nonlocal reads
+        reads += 1
+        if reads == 1:
+            return None
+        if read_fails:
+            raise RuntimeError("rules table unavailable")
+        return ResolvedAgentToolRule(rule="deny")
+
+    async def confirm(prompt: ConfirmationPrompt) -> ApprovedConfirmation:
+        async def retire_unsent() -> None:
+            # Built in a queued task, as Slack and Teams edits are.
+            task = asyncio.ensure_future(
+                asyncio.sleep(0, build_confirmation_card(prompt, state="stopped").footer)
+            )
+            footers.append(await task)
+
+        return ApprovedConfirmation(answer="approved", retire_unsent=retire_unsent)
+
+    posture = chat_tool_confirmation(
+        ToolSafetyPolicy(enabled=True, agent_rules=True),
+        requester_platform_user_id="U1",
+        confirm=confirm,
+        rules_for=rules_for,
+    )
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(
+        ToolCall(tool_use_id="tu_1", server_name="linear", tool_name="create_issue", input={})
+    )
+    assert result.allow is False
+    assert footers == [NOTHING_RAN_FOOTER if read_fails else RULE_REFUSED_FOOTER]
