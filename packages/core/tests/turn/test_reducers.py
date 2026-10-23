@@ -49,6 +49,7 @@ from daimon.core.turn.state import (
     extract_final_response,
     extract_sealed_responses,
 )
+from daimon.core.turn.termination import TerminationReason
 from mux.testing.drivers.anthropic.ma_models import ma_model_usage
 
 from .conftest import (
@@ -460,6 +461,37 @@ def test_apply_sets_stop_reason_to_retries_exhausted_variant() -> None:
     )
     assert state.stop_reason is not None
     assert state.stop_reason.type == "retries_exhausted"
+
+
+def test_apply_finalizes_refusal_idle_as_refused_error() -> None:
+    """A refusal idles as `end_turn` with no text; without `stop_details` it
+    would finalize as an empty success that the chat card shows as stopped."""
+    state = apply(
+        TurnState(),
+        make_status_idle(
+            event_id="s_1",
+            stop_details={"type": "refusal", "category": "cyber", "explanation": "x"},
+        ),
+    )
+    assert state.error is not None, "a refusal must set a TurnError"
+    assert state.error.kind == "refused", f"unexpected kind {state.error.kind}"
+    assert "cyber" in state.error.message, "the category should reach the log line"
+    assert state.termination is TerminationReason.REFUSED, "refusal has its own reason"
+
+
+@pytest.mark.parametrize("details", [{"type": "other"}, {}, "refusal", ["refusal"]], ids=str)
+def test_apply_leaves_end_turn_idle_without_refusal_details_unfinalized(details: object) -> None:
+    """An unexpected `stop_details` shape must not crash the turn."""
+    state = apply(TurnState(), make_status_idle(event_id="s_1", stop_details=details))
+    assert state.error is None, "only a refusal in stop_details is a failure"
+    assert state.termination is None, "the driver decides an ordinary end"
+
+
+def test_apply_reads_a_refusal_with_an_odd_category() -> None:
+    details = {"type": "refusal", "category": 5}
+    state = apply(TurnState(), make_status_idle(event_id="s_1", stop_details=details))
+    assert state.error is not None, "a refusal must not depend on the category's shape"
+    assert "no category" in state.error.message, state.error.message
 
 
 # --- session.status_terminated: finalizes as an upstream error ---

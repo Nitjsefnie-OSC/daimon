@@ -74,6 +74,7 @@ from daimon.core.turn.state import (
 from daimon.core.turn.status_log import status_log_enabled
 from daimon.core.turn.termination import TerminationReason
 from mux.contracts.usage import UsageObservation
+from pydantic import BaseModel
 
 
 def apply_usage_observation(state: TurnState, usage: UsageObservation) -> TurnState:
@@ -131,6 +132,17 @@ def apply(
             return _apply_tool_result(state, event, seen)
         case "session.status_idle":
             assert isinstance(event, BetaManagedAgentsSessionStatusIdleEvent)
+            refusal = refusal_error((event.model_extra or {}).get("stop_details"))
+            if refusal is not None:
+                # A refusal idles as a plain `end_turn`, usually with no text, which
+                # would otherwise finalize as an empty success.
+                return dataclasses.replace(
+                    state,
+                    stop_reason=event.stop_reason,
+                    error=refusal,
+                    termination=TerminationReason.REFUSED,
+                    seen_event_ids=seen,
+                )
             return dataclasses.replace(state, stop_reason=event.stop_reason, seen_event_ids=seen)
         case "session.error":
             assert isinstance(event, BetaManagedAgentsSessionErrorEvent)
@@ -294,6 +306,25 @@ def _apply_tool_result(
 
 
 _MCP_FAILURE_TYPES = ("mcp_connection_failed_error", "mcp_authentication_failed_error")
+
+
+class _StopDetails(BaseModel):
+    type: object = None
+    category: object = None
+
+
+def refusal_error(stop_details: object) -> TurnError | None:
+    """The API's refusal from an idle's `stop_details`, which the pinned SDK keeps as an extra.
+
+    Read leniently: an unexpected shape is no refusal, never a crashed turn.
+    """
+    if not isinstance(stop_details, dict):
+        return None
+    details = _StopDetails.model_validate(stop_details)
+    if details.type != "refusal":
+        return None
+    category = details.category if isinstance(details.category, str) else "no category"
+    return TurnError(kind="refused", message=f"the model refused the request ({category})")
 
 
 def _apply_session_error(

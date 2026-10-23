@@ -116,6 +116,7 @@ from daimon.core.stores.github_issued_tokens import touch_unmapped_app_session
 from daimon.core.stores.scoped_config_read import resolve
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import ExemptReason
+from daimon.core.turn.reducers import refusal_error
 from daimon.core.turn.termination import TerminationReason
 from daimon.core.usage_sweep import settle_finished_turn
 from fastmcp import Context, FastMCP
@@ -1156,6 +1157,8 @@ async def _ask_impl(
         if current.status == "idle":
             page: str | None = None
             final_text: str | None = None
+            # The newest idle decides: a refusal ends the turn whatever text came before it.
+            refused: bool | None = None
             for _ in range(_MAX_EVENT_PAGES):
                 events = await _list_events_impl(
                     runtime,
@@ -1165,10 +1168,15 @@ async def _ask_impl(
                     100,
                     "desc",
                     created_at_gte=turn_started_at.isoformat(),
-                    types=["agent.message"],
+                    types=["agent.message", "session.status_idle"],
                 )
                 for event in events.items:
                     if event.id == turn_event_id:
+                        continue
+                    if event.type == "session.status_idle":
+                        if refused is None:
+                            details = (event.model_extra or {}).get("stop_details")
+                            refused = refusal_error(details) is not None
                         continue
                     final_text = _agent_message_text(event)
                     if final_text is not None:
@@ -1177,6 +1185,13 @@ async def _ask_impl(
                     break
                 page = events.next_page
 
+            if refused:
+                if (observation := current_outcome.get()) is not None:
+                    observation.finish(reason=TerminationReason.REFUSED)
+                raise ToolError(
+                    "Daimon's AI declined this request; rephrase it and ask again "
+                    f"with handle {handle}"
+                )
             if final_text is not None:
                 delivery = await deliver_hosted_charts(
                     runtime.client,
