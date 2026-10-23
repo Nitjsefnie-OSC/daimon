@@ -330,6 +330,7 @@ async def test_with_the_flag_on_a_cleared_pin_is_admitted_as_unconfigured_only_o
     else:
         assert admission.backend_revision is not None
         assert admission.backend_revision.digest == _DEFAULT_DIGEST
+        assert admission.backend is not None
 
 
 @pytest.mark.parametrize("provider_enabled", [True, False])
