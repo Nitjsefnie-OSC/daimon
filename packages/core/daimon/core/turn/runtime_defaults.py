@@ -7,10 +7,10 @@ validate them, and any file row for the turn wins over them. Each row names this
 request's tenant and wildcards only platform, channel and account, so one tenant's
 default never serves another.
 
-Served today: Gemini agent turns (a tenant-wide agent template) and Gemini and
-OpenAI fleet workers. An OpenAI agent's own turn needs a hosted environment
-(`openai.persistent_workspace`), which a tenant gets from its own row until it is
-provisioned automatically.
+Served today: Gemini agent turns (a tenant-wide agent template), Gemini and
+OpenAI fleet workers, and an OpenAI agent's own turn once its tenant's hosted
+environment (`openai.persistent_workspace`) exists: the turn's preparation creates
+it on first use (`openai_environment`) and this row runs on it.
 """
 
 from __future__ import annotations
@@ -31,6 +31,8 @@ DEFAULT_PROJECT = "daimon-deployment"
 # Every OpenAI worker from these rows is capped per session unless the worker
 # brings its own native budget (Astra must never run uncapped).
 OPENAI_WORKER_SPEND_LIMIT_CENTS = 50
+# An agent's own GPT turn from the code-default template, per session.
+OPENAI_ROOT_SPEND_LIMIT_CENTS = 50
 _GEMINI_ROOT_HOLD, _GEMINI_ROOT_CAP = "0.25", "0.50"
 _GEMINI_WORKER_HOLD = _GEMINI_WORKER_CAP = "0.49"
 
@@ -111,7 +113,25 @@ def _openai_rows(
     }
     if not budgeted:
         row["spend_limit_usd_cents"] = OPENAI_WORKER_SPEND_LIMIT_CENTS
-    return [row]
+    rows = [row]
+    environment_id = getattr(request, "openai_environment_id", None)
+    if environment_id is not None and request is not None and request.worker is None:
+        # An agent's own GPT turn: a tenant-wide agent template on the hosted
+        # environment provisioned for this tenant (`openai_environment`), only once
+        # it exists. Capped like every template that serves switched agents.
+        root_profile = "openai.persistent_workspace"
+        rows.append(
+            {
+                **_scope(tenant_id, root_profile),
+                "api_key_env": DEFAULT_KEY_ENV["openai"],
+                "project_header": False,
+                "configuration_grant": _grant(root_profile, selectable_models("openai")),
+                "environment_id": environment_id,
+                "root_materialization": True,
+                "spend_limit_usd_cents": OPENAI_ROOT_SPEND_LIMIT_CENTS,
+            }
+        )
+    return rows
 
 
 def template_rows(
