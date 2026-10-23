@@ -6,22 +6,24 @@ import asyncio
 import contextlib
 import json
 import secrets
+import time
 from collections.abc import Awaitable, Callable, Coroutine, Iterator, Sequence
 from contextvars import ContextVar
-from dataclasses import dataclass
+from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Any, cast
 
-from anthropic import APIStatusError
+import structlog
 from daimon.core.stores.mux_state import BeforeClaim, PostgresStateStore
 from mux.contracts.events import AgentMessagePayload, Event, NativeProvenance
 from mux.contracts.ids import ResourceRef, Scope
 from mux.contracts.receipts import CancelReceipt, OperationStatus
 from mux.contracts.resources import ProviderBinding
-from mux.drivers.anthropic import single_attempt_mutation
+from mux.drivers.anthropic import classify_mutation_failure, single_attempt_mutation
 from mux.errors import ProviderError, ScopeViolation
 from mux.state.journal import JournalAppend, JournalEntry, is_authoritative
 from mux.state.lease import Lease, LeaseBusy, Slot, StaleFence
+from mux.state.mutation_retry import MutationRetryPolicy
 from mux.state.operations import OperationRecord, SendClaimed, request_digest
 from mux.state.store import StateStore, binding_slot
 from pydantic import BaseModel, JsonValue
@@ -29,6 +31,11 @@ from pydantic import BaseModel, JsonValue
 if TYPE_CHECKING:
     from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer
 
+
+log = structlog.get_logger(__name__)
+
+# Kinds that never pass the root budget check, and so never count an input.
+_UNCOUNTED_KINDS = frozenset({"cancel", "archive", "recovery-interrupt"})
 
 current_persistence: ContextVar[TurnPersistence | None] = ContextVar(
     "turn_persistence", default=None
@@ -69,6 +76,22 @@ class LeaseWait:
     poll_max_s: float = 1.0
 
 
+@dataclass(frozen=True)
+class MutationRetry:
+    """Host limits for retrying a definitely refused mutation within one call.
+
+    `deadline` is on the `time.monotonic()` clock (the event loop's default)
+    and bounds every wait, so no retry outlives the turn. `cancel` is the
+    turn's cancel signal: it ends a wait at once and nothing more is sent.
+    Without an explicit value, `TurnPersistence` takes both from its
+    `LeaseWait`, which the host derives from the turn's ceiling.
+    """
+
+    policy: MutationRetryPolicy = field(default_factory=MutationRetryPolicy)
+    deadline: float | None = None
+    cancel: asyncio.Event | None = None
+
+
 class TurnPersistence:
     """One root operation and its persisted binding's lease.
 
@@ -94,6 +117,7 @@ class TurnPersistence:
         renew_interval_s: float = 60.0,
         send_timeout_s: float = 120.0,
         lease_wait: LeaseWait | None = None,
+        retry: MutationRetry | None = None,
     ) -> None:
         slot = binding_slot(binding) if binding is not None else slot
         if slot is None:
@@ -127,6 +151,10 @@ class TurnPersistence:
         self._send_timeout_s = send_timeout_s
         self._lease: Lease | None = None
         self._lease_wait = lease_wait
+        self._retry = retry or MutationRetry(
+            deadline=time.monotonic() + lease_wait.timeout_s if lease_wait is not None else None,
+            cancel=lease_wait.cancel if lease_wait is not None else None,
+        )
         self.lease_acquired = False
 
     @property
@@ -268,9 +296,18 @@ class TurnPersistence:
     ) -> M:
         """Intent then send CAS, or restore an acknowledged receipt.
 
-        A definite HTTP refusal permits a fresh attempt. A sent/uncertain
-        predecessor never does, including a crash after provider acceptance
-        but before the receipt commit. Request bytes are part of the digest.
+        A definite refusal permits a fresh attempt under the next key
+        (`<key>:<kind>:<n>`). A sent/uncertain predecessor never does,
+        including a crash after provider acceptance but before the receipt
+        commit. Request bytes are part of the digest.
+
+        When the driver classifies a failure as rejected and retryable (for
+        example a 429 with Retry-After), this call takes that next attempt
+        itself, within `MutationRetry`: each attempt is its own durable
+        operation claimed under the current lease fence, and the attempt
+        index caps all attempts, so a restart cannot reset the allowance.
+        Allocation keys (`retry_failed=False`), a caller-supplied `begin` and
+        root-counted inputs are never retried here.
         """
         if session is not None:
             self.check_session(self.scope, session)
@@ -281,9 +318,13 @@ class TurnPersistence:
                 "request": request,
             }
         )
+        policy = self._retry.policy
+        may_retry = retry_failed and begin is None and not self._counts_input(kind)
+        base = f"{operation_key or self.operation_key}:{kind}"
         attempt = 0
+        first_began: datetime | None = None
         while True:
-            key = f"{operation_key or self.operation_key}:{kind}:{attempt}"
+            key = f"{base}:{attempt}"
             if begin is None:
                 begun = await self.store.begin_operation(
                     self.scope,
@@ -296,6 +337,8 @@ class TurnPersistence:
                 record = begun.record
             else:
                 record = await begin(key, digest)
+            if first_began is None:
+                first_began = record.operation.created_at
             if record.operation.status == "failed":
                 if not retry_failed:
                     raise ProviderError(
@@ -314,24 +357,100 @@ class TurnPersistence:
                 return cached
             if record.operation.status != "pending":
                 raise UncertainSend(f"{kind} was already claimed; reconcile before delivery")
+            if attempt >= policy.max_attempts:
+                error = ProviderError(
+                    "upstream", retryable=False, native_code="mutation_attempts_exhausted"
+                )
+                error.add_note(
+                    f"{kind}: all {policy.max_attempts} attempts of {base} were refused; "
+                    "nothing was sent"
+                )
+                raise error
             if guard is not None:
                 await guard()
+            await self._claim(session, kind, key, request)
             try:
-                store = self.store
-                check = self.root_claim
-                context = contextlib.nullcontext()
-                if check is not None and kind not in {"cancel", "archive", "recovery-interrupt"}:
-                    if not isinstance(store, PostgresStateStore):
-                        raise ScopeViolation("root-budget", "transactional root store required")
-                    inputs = request.get("events") if isinstance(request, dict) else request
-                    if kind == "send" and (not isinstance(inputs, list) or len(inputs) != 1):
-                        raise ScopeViolation("root-budget", "one counted input required")
-                    context = store.checking_claims(check(session, kind == "send"), compose=True)
-                with context:
-                    await store.claim_send(self.scope, key, now=self._now(), fence=self._fence())
-            except SendClaimed as error:
-                raise UncertainSend(f"{kind} was claimed by another sender") from error
-            break
+                return await self._send(session, kind, key, call, status)
+            except Exception as error:
+                if not may_retry:
+                    raise
+                failure = classify_mutation_failure(error)
+                decision = policy.decide(
+                    failure,
+                    attempts_made=attempt + 1,
+                    elapsed_s=(self._now() - first_began).total_seconds(),
+                    remaining_s=self._retry_remaining_s(),
+                )
+                log.info(
+                    "mux.mutation_attempt_failed",
+                    operation=key,
+                    kind=kind,
+                    attempt=attempt + 1,
+                    max_attempts=policy.max_attempts,
+                    delivery=failure.delivery,
+                    reason=failure.reason,
+                    retry_after_s=failure.retry_after_s,
+                    wait_s=decision.wait_s if decision.retry else None,
+                    stop=decision.stop,
+                )
+                if decision.retry and await self._wait_to_retry(decision.wait_s):
+                    error.add_note(
+                        f"{kind}: attempt {attempt + 1} {failure.delivery} ({failure.reason}); "
+                        "retry abandoned: the turn was cancelled"
+                    )
+                    raise
+                if not decision.retry:
+                    error.add_note(
+                        f"{kind}: attempt {attempt + 1} of {policy.max_attempts} "
+                        f"{failure.delivery} ({failure.reason}); not retried: {decision.stop}"
+                    )
+                    raise
+            attempt += 1
+
+    def _counts_input(self, kind: str) -> bool:
+        """A root-funded claim counts each attempt key; a retry would count twice."""
+        return self.root_claim is not None and kind not in _UNCOUNTED_KINDS
+
+    def _retry_remaining_s(self) -> float | None:
+        deadline = self._retry.deadline
+        return None if deadline is None else deadline - time.monotonic()
+
+    async def _wait_to_retry(self, delay: float) -> bool:
+        """Sleep before a retry; True when the turn was cancelled meanwhile."""
+        cancel = self._retry.cancel
+        if cancel is None or not cancel.is_set():
+            await self._sleep_or_cancel(delay, cancel)
+        return cancel is not None and cancel.is_set()
+
+    async def _claim(
+        self, session: ResourceRef | None, kind: str, key: str, request: JsonValue
+    ) -> None:
+        """Win `pending -> sent` under the lease fence (and the root budget)."""
+        try:
+            store = self.store
+            check = self.root_claim
+            context = contextlib.nullcontext()
+            if check is not None and kind not in _UNCOUNTED_KINDS:
+                if not isinstance(store, PostgresStateStore):
+                    raise ScopeViolation("root-budget", "transactional root store required")
+                inputs = request.get("events") if isinstance(request, dict) else request
+                if kind == "send" and (not isinstance(inputs, list) or len(inputs) != 1):
+                    raise ScopeViolation("root-budget", "one counted input required")
+                context = store.checking_claims(check(session, kind == "send"), compose=True)
+            with context:
+                await store.claim_send(self.scope, key, now=self._now(), fence=self._fence())
+        except SendClaimed as error:
+            raise UncertainSend(f"{kind} was claimed by another sender") from error
+
+    async def _send[M: BaseModel](
+        self,
+        session: ResourceRef | None,
+        kind: str,
+        key: str,
+        call: Callable[[str], Awaitable[M]],
+        status: Callable[[M], OperationStatus],
+    ) -> M:
+        """One provider attempt for a claimed key; record what it proves."""
         try:
             # Refresh under the database clock before starting bounded provider I/O.
             self._lease = await self.store.renew_lease(
@@ -341,9 +460,10 @@ class TurnPersistence:
                 with single_attempt_mutation():
                     receipt = await call(key)
         except BaseException as error:
-            # Only an explicit client refusal proves this request was rejected.
-            cause = error.__cause__ if isinstance(error, ProviderError) else error
-            refused = isinstance(cause, APIStatusError) and 400 <= cause.status_code < 500
+            # Only a driver-classified refusal proves this request was not
+            # executed; everything else, including cancellation, stays unknown.
+            failure = classify_mutation_failure(error)
+            refused = failure.delivery == "rejected"
             with contextlib.suppress(StaleFence):
                 await self.store.advance_operation(
                     self.scope,
@@ -352,6 +472,7 @@ class TurnPersistence:
                     now=self._now(),
                     fence=self._fence(),
                     resource=session,
+                    result={"failure": failure.as_json()} if refused else None,
                 )
             if isinstance(error, TimeoutError):
                 raise UncertainSend(f"{kind} delivery timed out") from error
