@@ -826,3 +826,67 @@ async def test_a_release_requested_before_the_binding_moved_is_never_applied(sel
     stays = await host.prepare("thread")
     assert stays.ma_session_id == first.ma_session_id and stays.session_ref is None
     assert await host.store.get_binding(host.slot) == moved
+
+
+async def _request_release(host):
+    from daimon.core.thread_release import request_thread_release
+
+    seen = await host.store.get_binding(host.slot, include_released=True)
+    async with host.sessions.begin() as db:
+        await request_thread_release(
+            db, host.slot, generation=seen.generation if seen else 0, now=datetime.now(UTC)
+        )
+    return seen
+
+
+async def _apply(host):
+    from daimon.core.thread_release import apply_thread_release
+
+    return await apply_thread_release(
+        host.sessions,
+        host.store,
+        host.slot,
+        tenant_id=TENANT,
+        account_id=ACCOUNT,
+        now=datetime.now(UTC),
+    )
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_refused_turn_leaves_the_release_for_the_next_one(selector_host, monkeypatch):
+    from daimon.core.thread_release import pending_releases
+    from daimon.core.turn import admission
+
+    host = selector_host
+    await host.prepare("thread")
+    seen = await _request_release(host)
+
+    async def refuse(*args, **kwargs):
+        raise AdmissionDenied(reason="backend_unsupported")
+
+    # Any refusal after the release is found (access, balance, provider).
+    monkeypatch.setattr(admission, "load_access_policy", refuse)
+    with pytest.raises(AdmissionDenied):
+        await host.prepare("thread")
+    assert await host.store.get_binding(host.slot) == seen, "nothing was released"
+    async with host.sessions() as db:
+        assert len(await pending_releases(db, tenant_id=TENANT)) == 1
+
+
+@pytest.mark.parametrize("initial_backend", [None], indirect=True)
+async def test_a_release_interrupted_after_its_binding_write_is_finished_not_redone(
+    selector_host,
+):
+    from daimon.core.thread_release import pending_releases
+    from mux.state.store import released_successor
+
+    host = selector_host
+    await host.prepare("thread")
+    seen = await _request_release(host)
+    # The binding write committed, then the request's transaction failed.
+    await host.store.put_binding(released_successor(seen), expected_generation=seen.generation)
+    assert await _apply(host) is True
+    after = await host.store.get_binding(host.slot, include_released=True)
+    assert after.generation == seen.generation + 1
+    async with host.sessions() as db:
+        assert await pending_releases(db, tenant_id=TENANT) == []

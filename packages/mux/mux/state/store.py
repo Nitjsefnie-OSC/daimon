@@ -66,9 +66,10 @@ def binding_slot(binding: ProviderBinding) -> Slot:
 
 
 RELEASED_REF = "released"
+"""The `native_refs` key of a released binding: the slot no longer pins a provider."""
+
 ERA_REF = "era"
 """The `native_refs` key a host stamps on a slot it adopted: the era suffix of its keys."""
-"""The `native_refs` key of a released binding: the slot no longer pins a provider."""
 
 
 def is_released(binding: ProviderBinding | None) -> bool:
@@ -128,7 +129,9 @@ def check_binding_successor(
 
     The slot's generation must still be `expected_generation` (0 for an
     unbound slot), the new binding must be the next generation, and a
-    rebind keeps the binding's `id`.
+    rebind keeps the binding's `id`. A first bind of a released slot has
+    already been made its successor by `adopt_released`, so it is judged as
+    one; there is no other exception.
     """
     actual = current.generation if current else 0
     if actual != expected_generation:

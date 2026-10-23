@@ -240,6 +240,14 @@ async def _hand_off_task_impl(
                 now=datetime.now(UTC),
                 recorded=recorded,
             )
+            # After the decision, so authorization speaks first; raising rolls it back.
+            await _refuse_another_providers_destination(
+                session,
+                auth,
+                origin,
+                destination_ma_agent_id=destination.id,
+                destination_name=destination_name,
+            )
             if repo is not None and unsaved_work is None:
                 # Raised inside the transaction, so the binding rolls back.
                 raise ToolError(render_tool_unsaved_work_question(repo))
@@ -249,9 +257,6 @@ async def _hand_off_task_impl(
                 # binds. Written in the same transaction as the binding so a
                 # thread can never end up switched with the answer lost.
                 await set_pending_unsaved_work(session, id=live_session.id, choice=unsaved_work)
-            moved_to = await _release_for_another_provider(
-                session, auth, origin, destination_ma_agent_id=destination.id
-            )
             recorded = await locked_thread_sessions(
                 session, tenant_id=auth.tenant_id, platform=platform, thread_id=origin.thread_id
             )
@@ -300,11 +305,6 @@ async def _hand_off_task_impl(
         channel=_channel_mention(platform, origin.parent_channel_id),
         requested_work=queued_work,
     )
-    if moved_to is not None:
-        confirmation += (
-            f"\n{destination_name} answers here on {moved_to} from your next message; "
-            "earlier messages in this conversation aren't carried over."
-        )
     if work_withheld:
         confirmation += (
             f"\n{destination_name} can't read this conversation's history, which only "
@@ -320,27 +320,33 @@ async def _hand_off_task_impl(
     )
 
 
-async def _release_for_another_provider(
+async def _refuse_another_providers_destination(
     session: AsyncSession,
     auth: AuthIdentity,
     origin: TurnOriginRow,
     *,
     destination_ma_agent_id: str,
-) -> str | None:
-    """When the destination runs on another provider, move the caller's slot of this
-    thread with it (`daimon.core.thread_release`); otherwise it would answer here on
-    the provider the thread is pinned to. Returns the provider's display name."""
+    destination_name: str,
+) -> None:
+    """Refuse a hand-off to an agent on another provider than this thread is pinned to.
+
+    The thread keeps its provider, so the destination would answer here on the
+    old one. Moving a thread drops its history, which only a confirmed switch
+    may do (`daimon.core.thread_release`), never this unconfirmed tool.
+    """
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores import agent_backends, mux_state
-    from daimon.core.thread_release import caller_slot, request_thread_release
+    from daimon.core.stores.thread_sessions import get_thread_session_at
+    from daimon.core.thread_release import caller_slot
     from daimon.core.turn.notices import provider_name
+    from mux.contracts.config import DEFAULT_BACKEND
 
     setting = await agent_backends.current(
         session,
         auth.tenant_id,
         derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id=destination_ma_agent_id),
     )
-    target = setting.backend if setting is not None and setting.backend else "anthropic"
+    target = (setting.backend if setting is not None else None) or DEFAULT_BACKEND
     slot = caller_slot(
         tenant_id=auth.tenant_id,
         platform=origin.platform,
@@ -348,16 +354,31 @@ async def _release_for_another_provider(
         thread_id=origin.thread_id,
         account_id=auth.account_id,
     )
-    pinned = await mux_state.get_binding(session, slot, include_released=True)
-    if (pinned.provider if pinned is not None else "anthropic") == target:
-        return None
-    await request_thread_release(
+    pinned = await mux_state.get_binding(
+        session, slot.model_copy(update={"account_id": None})
+    ) or await mux_state.get_binding(session, slot)
+    if pinned is not None:
+        here = pinned.provider
+    elif await get_thread_session_at(
         session,
-        slot,
-        generation=pinned.generation if pinned is not None else 0,
-        now=datetime.now(UTC),
+        tenant_id=auth.tenant_id,
+        platform=origin.platform,
+        thread_id=origin.thread_id,
+        account_id=auth.account_id,
+        at=datetime.now(UTC),
+    ):
+        here = DEFAULT_BACKEND
+    else:
+        return  # Nothing pins this thread yet: the destination's provider applies.
+    if here == target:
+        return
+    raise ToolError(
+        f"{destination_name} runs on {provider_name(target)}, and this conversation runs on "
+        f"{provider_name(here)}, so it can't take over here. Nothing changed. To have "
+        f"{destination_name} answer here, hand this conversation over while it is on "
+        f"{provider_name(here)}, then switch it with a confirmation; or ask it in a new "
+        "conversation."
     )
-    return provider_name(target)
 
 
 def _refusal_text(refusal: HandoffRefused, *, channel: str, admin: str) -> str:

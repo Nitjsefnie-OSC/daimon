@@ -201,11 +201,16 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             }
         )
         try:
-            await store.put_binding(binding, expected_generation=0)
+            # A released slot is adopted at its next generation: keep what was written.
+            binding = await store.put_binding(binding, expected_generation=0)
         except BindingConflict:
             winner = await store.get_binding(slot)
-            if winner != binding:
+            if (
+                winner is None
+                or winner.model_copy(update={"generation": binding.generation}) != binding
+            ):
                 raise
+            binding = winner
         session_ref = session.ref
     else:
         binding = prior

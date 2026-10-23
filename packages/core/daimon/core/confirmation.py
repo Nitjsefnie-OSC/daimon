@@ -903,7 +903,8 @@ def backend_switch_callbacks(
                     + "; other existing threads keep their model."
                     + (
                         f" This conversation moves to {provider} from your next message "
-                        "(a shared one stays); earlier messages here aren't carried over."
+                        "(unless it's shared or this channel pins its provider); earlier "
+                        "messages here aren't carried over."
                         if answering_agent_name == agent.name
                         else ""
                     )

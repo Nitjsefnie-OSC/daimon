@@ -1478,18 +1478,36 @@ async def test_a_policy_refused_handoff_is_audited_as_an_authz_denial(
     ), "the refusal is audited as the policy's denial, not a tool error"
 
 
-async def test_an_admin_hands_this_thread_to_a_copy_on_another_provider_and_it_moves(
+@pytest.mark.parametrize("pinned", ["unpinned", "older_session", "shared_binding"])
+async def test_a_hand_off_never_moves_a_thread_to_another_provider_by_itself(
     db_session: AsyncSession,
     committing_sessionmaker: async_sessionmaker[AsyncSession],
+    pinned: str,
 ) -> None:
-    """J2: a fresh copy, routed nowhere, switched to Gemini, takes over this thread on
-    Gemini from the next message, without any channel routing."""
+    """A copy on Gemini, routed nowhere: an admin may hand an unpinned thread to it
+    (its own provider applies). A thread pinned to Claude (by an older session, or
+    a shared binding) is refused: moving it drops history, and only a confirmed
+    switch may do that. Nothing is released either way."""
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.stores import agent_backends
-    from daimon.core.thread_release import pending_releases
+    from daimon.core.stores import agent_backends, mux_state
+    from daimon.core.thread_release import caller_slot, pending_releases
+    from daimon.testing.factories import make_thread_session
+    from mux.contracts.config import DEFAULT_BACKEND
+    from mux.contracts.resources import ProviderBinding
+    from mux.profiles import MANAGED_AGENTS
 
     tenant = await make_tenant(db_session)
     caller = await make_account(db_session, tenant=tenant)
+    if pinned == "older_session":
+        await make_thread_session(
+            db_session,
+            tenant=tenant,
+            account=caller,
+            thread_id="T_THREAD",
+            channel_id="C_PARENT",
+            ma_session_id="sess_old",
+            ma_agent_id=_RESPONDER_ID,
+        )
     await db_session.commit()
     async with committing_sessionmaker.begin() as session:
         await agent_backends.put_revision(
@@ -1503,6 +1521,28 @@ async def test_an_admin_hands_this_thread_to_a_copy_on_another_provider_and_it_m
             agent_name="research-bot",
             preview_digest="p" * 64,
         )
+        if pinned == "shared_binding":
+            slot = caller_slot(
+                tenant_id=tenant.id,
+                platform="discord",
+                channel_id="C_PARENT",
+                thread_id="T_THREAD",
+                account_id=caller.id,
+            )
+            await mux_state.put_binding(
+                session,
+                ProviderBinding(
+                    id="shared-binding",
+                    thread=slot.thread,
+                    provider=DEFAULT_BACKEND,
+                    profile=MANAGED_AGENTS.profile_id,
+                    native_refs={"session": "sess_shared"},
+                    generation=1,
+                    config_revision=0,
+                    legacy_account_id=None,
+                ),
+                expected_generation=0,
+            )
     runtime = _runtime(
         committing_sessionmaker, _client([_destination(tenant.id)]), default_agent_name="daimon"
     )
@@ -1527,13 +1567,23 @@ async def test_an_admin_hands_this_thread_to_a_copy_on_another_provider_and_it_m
         sender_foreign=False,
         shared_channel=False,
     ) as origin:
-        result = await _hand_off_task_impl(
-            runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
-        )
-    assert "answers here on Gemini from your next message" in result.confirmation
-    assert "aren't carried over" in result.confirmation
+        if pinned == "unpinned":
+            result = await _hand_off_task_impl(
+                runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+            )
+            assert "research-bot will handle your next message." in result.confirmation
+        else:
+            with pytest.raises(ToolError, match="runs on Gemini.*can't take over here"):
+                await _hand_off_task_impl(
+                    runtime, auth, origin_context_id=str(origin.id), agent_id=_DESTINATION_ID
+                )
     async with committing_sessionmaker() as session:
-        rows = await pending_releases(session, tenant_id=tenant.id)
-        channels, tenants = await _count_routing_rows(session, tenant.id)
-    assert [(thread, account) for _, thread, account, _ in rows] == [("T_THREAD", str(caller.id))]
-    assert (channels, tenants) == (0, 0), "no channel routing: this thread only"
+        assert await pending_releases(session, tenant_id=tenant.id) == []
+        handed = await get_binding(
+            session,
+            tenant_id=tenant.id,
+            platform="discord",
+            parent_channel_id="C_PARENT",
+            thread_id="T_THREAD",
+        )
+    assert (handed is not None) == (pinned == "unpinned"), "a refusal rolls the hand-off back"

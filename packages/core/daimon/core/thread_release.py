@@ -28,6 +28,7 @@ from daimon.core.stores.thread_sessions import get_live_thread_session
 from mux.contracts.ids import ChannelRef, ThreadRef
 from mux.contracts.resources import ProviderBinding
 from mux.errors import BindingConflict
+from mux.profiles import MANAGED_AGENTS
 from mux.state.lease import Slot
 from mux.state.store import RELEASED_REF, StateStore, is_released, released_successor
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -74,33 +75,37 @@ async def apply_thread_release(
             return False
         current = await store.get_binding(slot, include_released=True)
         generation = current.generation if current is not None else 0
-        if generation != requested:
+        # The binding write commits on its own; if this transaction then failed, the
+        # request is still here with the slot one generation on: finish it, don't redo it.
+        finishing = is_released(current) and generation == requested + 1
+        if generation != requested and not finishing:
             log.info("thread_release_stale", requested=requested, current=generation)
             return False
-        if is_released(current):
-            return True
-        if current is None:
-            # Pinned only by an older Managed Agents session: a released first generation.
-            released = ProviderBinding(
-                id=str(
-                    uuid.uuid5(uuid.NAMESPACE_URL, f"daimon.turn.binding:{slot.model_dump_json()}")
-                ),
-                thread=slot.thread,
-                provider="anthropic",
-                profile="anthropic.managed_agents",
-                native_refs={RELEASED_REF: "1"},
-                generation=1,
-                config_revision=0,
-                legacy_account_id=slot.account_id,
-            )
-            expected = 0
-        else:
-            released, expected = released_successor(current), current.generation
-        try:
-            await store.put_binding(released, expected_generation=expected)
-        except BindingConflict:
-            log.info("thread_release_lost_race", generation=expected)
-            return False
+        if not finishing and not is_released(current):
+            if current is None:
+                # Pinned only by an older Managed Agents session: a released first generation.
+                released = ProviderBinding(
+                    id=str(
+                        uuid.uuid5(
+                            uuid.NAMESPACE_URL, f"daimon.turn.binding:{slot.model_dump_json()}"
+                        )
+                    ),
+                    thread=slot.thread,
+                    provider=MANAGED_AGENTS.provider,
+                    profile=MANAGED_AGENTS.profile_id,
+                    native_refs={RELEASED_REF: "1"},
+                    generation=1,
+                    config_revision=0,
+                    legacy_account_id=slot.account_id,
+                )
+                expected = 0
+            else:
+                released, expected = released_successor(current), current.generation
+            try:
+                await store.put_binding(released, expected_generation=expected)
+            except BindingConflict:
+                log.info("thread_release_lost_race", generation=expected)
+                return False
         live = await get_live_thread_session(
             session,
             tenant_id=tenant_id,
@@ -111,6 +116,22 @@ async def apply_thread_release(
         if live is not None:
             await request_fresh_start(session, id=live.id, at=now)
     return True
+
+
+async def release_due(
+    sessionmaker: async_sessionmaker[AsyncSession], store: StateStore, slot: Slot
+) -> bool:
+    """Whether `slot` is released or has a current pending release (read only).
+
+    Admission selects as if released, and applies the release only once the
+    turn is admitted, so a refused turn leaves the request for the next one.
+    """
+    current = await store.get_binding(slot, include_released=True)
+    if is_released(current):
+        return True
+    async with sessionmaker() as session:
+        requested = await thread_provider_releases.requested_generation(session, slot)
+    return requested is not None and requested == (current.generation if current is not None else 0)
 
 
 async def release_pending(session: AsyncSession, slot: Slot) -> bool:

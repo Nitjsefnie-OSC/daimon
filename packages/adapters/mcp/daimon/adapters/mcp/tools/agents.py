@@ -454,18 +454,37 @@ async def _move_this_thread(
     origin: TurnOriginRow,
     agent_name: str,
     target: Provider,
+    *,
+    pinned_here: bool,
 ) -> str:
     """After a confirmed switch, move the requester's own slot of this thread too.
 
     Only when the switched agent is the one answering here, and never a shared
     thread (it stays pinned for everyone in it). Says plainly what happens.
     """
-    from daimon.core.stores import mux_state
+    from daimon.core.stores import mux_state, thread_agent_bindings
     from daimon.core.thread_release import caller_slot, request_thread_release
     from daimon.core.turn.notices import provider_name
 
     provider = provider_name(target)
-    if agent_name not in (origin.responder_name, origin.configuration_target_name):
+    if pinned_here:
+        return "This channel pins its own provider, so this conversation stays on it."
+    async with runtime.session_factory() as session:
+        handed = await thread_agent_bindings.get_binding(
+            session,
+            tenant_id=auth.tenant_id,
+            platform=origin.platform,
+            parent_channel_id=origin.parent_channel_id,
+            thread_id=origin.thread_id,
+        )
+    # Who answers this conversation's next message: a hand-off's agent, else this
+    # turn's responder. A setup conversation's configuration target never moves it.
+    answering = (
+        handed.responder_name
+        if handed is not None and handed.kind == "handoff"
+        else origin.responder_name
+    )
+    if (handed is not None and handed.kind == "setup") or agent_name != answering:
         return f"{agent_name} isn't the one answering here, so this conversation is unchanged."
     slot = caller_slot(
         tenant_id=auth.tenant_id,
@@ -1584,7 +1603,7 @@ async def _request_agent_backend_switch_impl(
             from daimon.core.turn.notices import provider_name
 
             before = await service.current(agent)
-            old_provider = provider_name((before.backend if before else None) or "anthropic")
+            old_provider = provider_name((before.backend if before else None) or DEFAULT_BACKEND)
             await service.set_backend(
                 agent,
                 target_backend,
@@ -1603,7 +1622,14 @@ async def _request_agent_backend_switch_impl(
             summary = (
                 f"Model provider changed. New conversations with {agent_name} use "
                 f"{provider_name(target_backend)}; other existing threads keep {old_provider}. "
-                + await _move_this_thread(runtime, auth, origin, agent_name, target_backend)
+                + await _move_this_thread(
+                    runtime,
+                    auth,
+                    origin,
+                    agent_name,
+                    target_backend,
+                    pinned_here=await _channel_pin_line(runtime, origin) is not None,
+                )
             )
         channel_pin = await _channel_pin_line(runtime, origin)
         if channel_pin is not None:
@@ -1900,10 +1926,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             new conversations wherever the agent answers, and to this conversation
             from the next message when the switched agent answers here (the result's
             summary says which); switching the default agent applies to every channel on
-            this server. For "make a copy of yourself on Gemini", copy the agent with
-            fork_agent, switch the copy, then offer to hand this conversation to the
-            copy with hand_off_task: from the next message the copy answers here on its
-            provider.
+            this server. For "make a copy of yourself on Gemini": copy the agent with
+            fork_agent, hand this conversation to the copy with hand_off_task while it is
+            still on this provider, then switch the copy here; the confirmed switch moves
+            this conversation to Gemini from the next message.
             First call without preview_digest and show the returned compatibility,
             shared-thread limits, what won't be available, and the cost line. Call again
             with the same model and that preview's expected_revision, preview_digest and
