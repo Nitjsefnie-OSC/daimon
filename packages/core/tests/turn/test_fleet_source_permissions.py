@@ -272,12 +272,25 @@ async def test_each_exact_role_pair_derives_without_source_model_substitution(ca
     assert child.permissions.backend_grants == (backend,) and child.permissions.models == (model,)
 
 
-@pytest.mark.parametrize("captured", ("caller_credentials", "mcp"), indirect=True)
+@pytest.mark.parametrize("captured", ("mcp",), indirect=True)
 async def test_actual_projector_keeps_unsupported_main_credentials_and_mcp(captured):
     source, _, _, _, _, trace = captured
     assert source.resource_requirements or source.effective_spec.mcp_servers
     with pytest.raises(WorkerSpecRefused):
         compose(captured)
+    assert len(trace.requests) == 1
+
+
+@pytest.mark.parametrize("captured", ("caller_credentials",), indirect=True)
+async def test_a_caller_login_connector_is_left_out_of_the_worker_ceiling(captured):
+    """The connector with the caller's login stays the root's; workers never get it."""
+    source, _, _, _, _, trace = captured
+    logins = {binding.credential_ref for binding in source.resource_requirements}
+    assert logins - {None}
+    root = compose(captured)
+    assert not {binding.credential_ref for binding in root.resources} & logins
+    assert not {server.credential_ref for server in root.spec.mcp_servers or ()} & logins
+    assert "mcp" in root.spec.declared_drops
     assert len(trace.requests) == 1
 
 

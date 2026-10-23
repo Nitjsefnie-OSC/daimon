@@ -2106,15 +2106,45 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
 
 
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
-    """Exclude validated native-only capabilities and their paired resources."""
+    """Exclude validated native-only capabilities and their paired resources.
+
+    A connector with its own login (an MCP server carrying a credential, or one a
+    projected credential is paired with) never enters a worker ceiling either: the
+    agent can still run a fleet, its workers run without that connector, and the
+    credential never reaches a worker. The ceiling declares the loss (`mcp`).
+    """
     spec = source.effective_spec
     if spec is None:
         return source
     normalized, excluded = worker_spec_ceiling(spec)
+    logins = login_mcp_servers(source)
+    if logins - excluded:
+        normalized = normalized.model_copy(
+            update={
+                "mcp_servers": tuple(
+                    server for server in normalized.mcp_servers or () if server.name not in logins
+                ),
+                "tools": tuple(
+                    tool
+                    for tool in normalized.tools or ()
+                    if not (tool.kind == "mcp_toolset" and tool.name in logins)
+                )
+                if normalized.tools is not None
+                else None,
+                "declared_drops": tuple(sorted({*normalized.declared_drops, "mcp"})),
+            }
+        )
+    excluded |= logins
+    credentials = {
+        server.credential_ref
+        for server in spec.mcp_servers or ()
+        if server.name in logins and server.credential_ref is not None
+    }
     resources = tuple(
         binding
         for binding in source.resource_requirements
         if not ((paired := _mcp_credential_servers(source, binding)) and paired <= excluded)
+        and not (binding.kind == "credential" and binding.credential_ref in credentials)
     )
     return source.model_copy(
         update={
@@ -2122,6 +2152,17 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
             "resource_requirements": resources,
         }
     )
+
+
+def login_mcp_servers(source: BackendAgent) -> frozenset[str]:
+    """The agent's connectors that carry their own login; workers run without them."""
+    spec = source.effective_spec
+    if spec is None:
+        return frozenset()
+    names = {server.name for server in spec.mcp_servers or () if server.credential_ref}
+    for binding in source.resource_requirements:
+        names |= _mcp_credential_servers(source, binding)
+    return frozenset(names)
 
 
 def worker_spec_ceiling(spec: AgentSpec) -> tuple[AgentSpec, frozenset[str]]:
