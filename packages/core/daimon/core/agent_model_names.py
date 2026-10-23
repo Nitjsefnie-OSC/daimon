@@ -19,11 +19,17 @@ from mux.profiles import (
 
 
 def model_name(model: ModelRef) -> str:
-    return (
-        model.id.replace("claude-", "Claude ")
-        .replace("gemini-", "Gemini ")
-        .replace("gpt-", "GPT ")
-        .replace("-", " ")
+    """The name people say: "Claude Opus 5.5", "GPT-6 Astra", "Gemini 4 Argon"."""
+    from daimon.core.constants import MODEL_DISPLAY_NAMES
+
+    if model.id in MODEL_DISPLAY_NAMES:
+        return "Claude " + MODEL_DISPLAY_NAMES[model.id]
+    words = model.id.split("-")
+    if words[0] == "gpt" and len(words) > 1:
+        words = [f"GPT-{words[1]}", *words[2:]]
+    return " ".join(
+        word if word.startswith("GPT") or word[:1].isdigit() else word.capitalize()
+        for word in words
     )
 
 
@@ -41,7 +47,6 @@ def agent_catalog() -> tuple[AgentModel, ...]:
             f"~${rates.input:g} input / ${rates.output:g} output per million tokens",
         )
         for name, rates in AGENT_MODEL_PRICING.items()
-        if not name.endswith("-fast")
     ]
     for provider in PROVIDERS:
         if provider == MANAGED_AGENTS.provider or not any(
@@ -104,6 +109,8 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
     ):
         if "lite" not in family:
             matches = [model for model in matches if "lite" not in _key(model.id).split()]
+        # "opus" never means the pricier fast variant; "opus fast" names it.
+        matches = [model for model in matches if "fast" not in _key(model.id).split()]
         if matches:
             return max(matches, key=lambda model: tuple(map(int, re.findall(r"\d+", model.id))))
     if not matches:

@@ -32,7 +32,7 @@ def test_real_phrasings_and_b2_availability():
     # With Astra selectable, a bare "gpt" names two OpenAI models: never guess.
     with pytest.raises(ValueError, match="could mean") as error:
         resolve_models("compare with claude opus and gpt")
-    assert "luna" in str(error.value) and "astra" in str(error.value)
+    assert "luna" in str(error.value).lower() and "astra" in str(error.value).lower()
     assert [m.id for m in resolve_models("3 workers: sonnet, luna, flash")] == [
         "claude-sonnet-5-5",
         "gpt-6-luna",
@@ -49,7 +49,7 @@ def test_ambiguous_provider_and_unknown_names_never_pick_a_model():
     choices = tuple(ModelRef(provider="openai", id="gpt-6-" + name) for name in ("luna", "astra"))
     with pytest.raises(ValueError, match="could mean") as error:
         resolve_model("gpt", available=choices)
-    assert "luna" in str(error.value) and "astra" in str(error.value)
+    assert "luna" in str(error.value).lower() and "astra" in str(error.value).lower()
     with pytest.raises(ValueError, match="isn't a known"):
         resolve_model("nothing-like-a-model")
 
@@ -81,3 +81,29 @@ def test_unambiguous_typos_match_the_exact_family_selection(typo, family):
 def test_typo_in_an_explicit_version_never_chooses_another_version():
     with pytest.raises(ValueError):
         resolve_model("opuss 4.9")
+
+
+def test_opus_fast_is_chosen_only_by_name_never_by_family_shorthand():
+    # Friction #80: "Opus 5.5 fast" was not in the catalog at all.
+    assert resolve_model("opus 5.5 fast").id == "claude-opus-5-5-fast"
+    assert resolve_model("Opus fast").id == "claude-opus-5-5-fast"
+    # Plain "opus" / "Opus 5.5" still mean the standard, cheaper model.
+    assert resolve_model("opus").id == "claude-opus-5-5"
+    assert resolve_model("Opus 5.5").id == "claude-opus-5-5"
+
+
+@pytest.mark.parametrize(
+    ("provider", "model_id", "name"),
+    [
+        ("anthropic", "claude-opus-5-5", "Claude Opus 5.5"),
+        ("anthropic", "claude-opus-5-5-fast", "Claude Opus 5.5 fast"),
+        ("openai", "gpt-6-astra", "GPT-6 Astra"),
+        ("openai", "gpt-6-luna", "GPT-6 Luna"),
+        ("gemini", "gemini-4-argon", "Gemini 4 Argon"),
+        ("gemini", "gemini-3.8-flash", "Gemini 3.8 Flash"),
+    ],
+)
+def test_model_names_are_the_ones_people_say(provider, model_id, name):
+    from daimon.core.agent_model_names import model_name
+
+    assert model_name(ModelRef(provider=provider, id=model_id)) == name

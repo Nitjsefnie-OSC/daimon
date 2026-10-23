@@ -1483,7 +1483,7 @@ async def test_unknown_or_ambiguous_worker_model_names_get_a_plain_refusal_with_
             await client.call_tool("fleet_spawn", request)
     text = str(refused.value)
     assert message in text and "not_subset" not in text
-    assert "GPT 6 astra (gpt-6-astra)" in text and "Gemini 4 argon (gemini-4-argon)" in text
+    assert "GPT-6 Astra (gpt-6-astra)" in text and "Gemini 4 Argon (gemini-4-argon)" in text
     orchestrator.spawn.assert_not_awaited()
     (entry,) = [e for e in logs if e["event"] == "fleet.spawn_refused"]
     assert entry["category"] == "request" and entry["operation_key"] == "W1"
@@ -1531,8 +1531,8 @@ async def test_fleet_agents_lists_the_models_a_task_worker_may_run_on_by_plain_n
     content = listed.structured_content
     assert content["agents"] == [{"name": "researcher", "model": "gpt-6-luna"}]
     assert content["models"] == [
-        {"name": "Claude sonnet 5 5", "id": "claude-sonnet-5-5", "provider": "anthropic"},
-        {"name": "Claude opus 5 5", "id": "claude-opus-5-5", "provider": "anthropic"},
-        {"name": "GPT 6 astra", "id": "gpt-6-astra", "provider": "openai"},
-        {"name": "Gemini 4 argon", "id": "gemini-4-argon", "provider": "gemini"},
+        {"name": "Claude Sonnet 5.5", "id": "claude-sonnet-5-5", "provider": "anthropic"},
+        {"name": "Claude Opus 5.5", "id": "claude-opus-5-5", "provider": "anthropic"},
+        {"name": "GPT-6 Astra", "id": "gpt-6-astra", "provider": "openai"},
+        {"name": "Gemini 4 Argon", "id": "gemini-4-argon", "provider": "gemini"},
     ]
