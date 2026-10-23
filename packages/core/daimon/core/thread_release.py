@@ -1,9 +1,11 @@
 """Move one caller's thread to the provider a confirmed switch selected.
 
 A thread keeps its provider through its slot binding, so a switch normally
-applies to new threads only. A confirmed switch (or hand-off) from a thread
-records a release request for the requester's own slot of that thread; the
-next turn there applies it before it reads the binding:
+applies to new threads only. A confirmed switch from a thread, of the agent
+answering it, records a release request for the requester's own slot of that
+thread. A hand-off never does: it is not confirmed, and moving a thread drops
+its history. The next turn there selects as if released and, once admitted,
+applies it:
 
 - only while the slot is still at the generation the confirmation saw, so a
   binding that moved since (another turn, another change) is never released;

@@ -14,8 +14,8 @@ import sqlalchemy as sa
 from alembic import op
 from sqlalchemy.dialects import postgresql
 
-revision: str = "0121_thread_provider_release"
-down_revision: str | None = "0120_mcp_token_surface"
+revision: str = "0122_thread_provider_release"
+down_revision: str | None = "0121_refused_turn_outcome"
 branch_labels: str | None = None
 depends_on: str | None = None
 

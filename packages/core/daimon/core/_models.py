@@ -3605,7 +3605,7 @@ class ThreadLease(Base):
 class ThreadProviderRelease(Base):
     """A confirmed provider switch's request to move one caller's thread.
 
-    The next turn in the slot applies it (`daimon.core.thread_release`): when the
+    The next admitted turn in the slot applies it (`daimon.core.thread_release`): when the
     slot's binding is still at `generation` (0 = unbound), it writes a released
     successor through the binding compare-and-swap, and the turn then selects its
     provider afresh. Applied or stale, the row is deleted.
