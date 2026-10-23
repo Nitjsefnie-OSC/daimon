@@ -1445,6 +1445,7 @@ class HostFleetPorts:
             WorkerSpecRefused,
             agent_worker_backend,
             agent_worker_permissions,
+            worker_agent_allowed,
         )
         from daimon.core.stores import agent_backends
         from daimon.core.stores.access_policy import load_access_policy
@@ -1470,6 +1471,9 @@ class HostFleetPorts:
             grant = await read_agent_fleet_grant(deps, root.admission, now=datetime.now(UTC))
             if grant is None:
                 raise FleetRefused("fleet_grant_unavailable")
+            if not worker_agent_allowed(grant, parent.agent_id, source.agent_id):
+                # Before any admission work, and before its memory store could be made.
+                raise FleetRefused("worker_agent_not_in_grant")
             try:
                 request = await prepare_worker_agent(deps, root, source)
                 if request.source is not None and request.source.memory_store_id is None:
@@ -1520,8 +1524,6 @@ class HostFleetPorts:
 
     async def _provision_agent_memory(self, source: BackendAgent) -> None:
         """Create an agent's shared memory store the way its first session does."""
-        import anthropic
-        from daimon.core.errors import StoreError
         from daimon.core.memory_resource import ensure_memory_store_and_mount
 
         deps = self._deps
@@ -1536,7 +1538,8 @@ class HostFleetPorts:
                 agent_name=source.name,
                 read_only=True,
             )
-        except (anthropic.APIError, StoreError):
+        except Exception as error:  # an API, store, timeout or binding failure; not cancel
+            log.warning("fleet.worker_agent_memory_unavailable", error=type(error).__name__)
             raise FleetRefused("worker_agent_memory_unavailable") from None
 
     async def worker_agents(

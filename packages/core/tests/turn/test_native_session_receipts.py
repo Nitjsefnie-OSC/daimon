@@ -416,6 +416,14 @@ async def native_worker(db_preflight, db_committing_engine, db_clean, source_rea
             raw["agent"]["system"] = "unapproved readback instructions"
         if controls["fault"] == "resource_drift":
             raw["resources"][0]["memory_store_id"] = "foreign-memory"
+        readback = controls.get("readback")
+        if readback == "resource_appears":
+            # The provider attached a store the memoryless worker never asked for.
+            raw["resources"] = [
+                {"type": "memory_store", "memory_store_id": "memstore-x", "access": "read_only"}
+            ]
+        elif readback == "resources_missing":
+            raw.pop("resources", None)
         return httpx.Response(200, json=raw)
 
     from mux.testing.drivers.anthropic.ma import (
@@ -717,6 +725,19 @@ async def test_a_native_worker_that_dropped_memory_mounts_no_store(native_worker
     )
     assert not payload.get("resources")
     assert not any(call.path.startswith("/v1/memory_stores") for call in trace.requests)
+
+
+@pytest.mark.parametrize("readback", ["resource_appears", "resources_missing"])
+@pytest.mark.parametrize("native_worker", ["paid_w1_memory"], indirect=True)
+async def test_a_memoryless_worker_session_must_read_back_with_no_resources(
+    native_worker, readback
+):
+    from mux.errors import ScopeViolation
+
+    *_, controls = native_worker
+    controls["readback"] = readback
+    with pytest.raises(ScopeViolation, match="native source resource readback differs"):
+        await _exercise_session_receipt(native_worker, None, native_path=True)
 
 
 @pytest.mark.parametrize("native_worker", ["paid_w1_sandbox"], indirect=True)

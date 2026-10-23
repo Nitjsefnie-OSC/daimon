@@ -745,3 +745,106 @@ async def test_a_never_run_agent_gets_its_memory_store_and_its_worker_reads_it(
     (mount,) = [r for r in worker_root.resources if r.resource.kind == "memory_store"]
     assert mount.resource.id == "memstore-fresh"
     assert worker_root.memory_read_only is True
+
+
+@pytest.mark.parametrize("refusal", ["policy", "grant"])
+async def test_no_memory_store_is_created_for_an_agent_the_requester_may_not_use(
+    captured, owned, monkeypatch, refusal
+):
+    """The store is made only after the grant and a fresh policy decision allow the agent."""
+    from contextlib import asynccontextmanager
+    from types import SimpleNamespace
+
+    from daimon.core import channel_backend, memory_resource, mux_compat
+    from daimon.core.fleet_orchestration import FleetRefused, HostFleetPorts
+    from daimon.core.scope import ResolvedConfig
+    from daimon.core.session_compat import DEFAULT_MA_CAPABILITIES
+    from daimon.core.turn import admission as admission_module
+    from daimon.core.turn import runtime_manifest
+    from daimon.core.turn.admission import Admission
+    from daimon.core.turn.errors import AdmissionDenied
+    from daimon.core.turn.prepare import ProviderPreparationRequest
+
+    _, admission, grant, fleet, _, _ = captured
+    root = compose(captured)
+    _, identity, actor, sessions = owned
+    fresh, actual = await capture_agent(
+        owned, fleet.scope, ma_id="fresh-source", name="fresh", memory_store=False
+    )
+    deps = SimpleNamespace(
+        anthropic=None, sessionmaker=sessions, tool_safety=None, fleet_enabled=False
+    )
+    request = ProviderPreparationRequest(
+        deps,
+        Admission(
+            actor.account_id,
+            ma_agent(id="root-source", name="helper", tenant_id=identity.tenant_id),
+            ma_environment(tenant_id=identity.tenant_id),
+            ResolvedConfig(
+                agent_name="helper", environment_name="default", responder_ma_agent_id="root-source"
+            ),
+            grant=admission,
+        ),
+        fleet.scope,
+        identity.tenant_id,
+        "discord",
+        "member",
+        "thread",
+        actor.account_id,
+        False,
+        DEFAULT_MA_CAPABILITIES,
+        None,
+        NOW + timedelta(minutes=5),
+        lambda: NOW,
+    )
+    provisions, decided = [], []
+
+    async def load(client, sessionmaker, *, tenant_id, agent_name):
+        return fresh
+
+    async def read_grant(deps, admitted, *, now):
+        value = grant if refusal == "grant" else any_agent(grant)
+        limits = value.limits.model_copy(update={"deadline": now + timedelta(days=1)})
+        return value.model_copy(update={"limits": limits})
+
+    async def retrieve(client, agent_id, *, scope):
+        return actual
+
+    async def reauthorize(deps, again):
+        # The current policy says this requester may not run that agent here.
+        decided.append(again)
+        raise AdmissionDenied(reason="invoker_not_allowed")
+
+    async def rules(*args, **kwargs):
+        return SimpleNamespace(tools=frozenset(), needs_driver=False)
+
+    async def skills(*args, **kwargs):
+        return ()
+
+    async def ensure(*args, **kwargs):
+        provisions.append(kwargs)
+
+    monkeypatch.setattr(channel_backend, "load_backend_agent", load)
+    monkeypatch.setattr(runtime_manifest, "read_agent_fleet_grant", read_grant)
+    monkeypatch.setattr(mux_compat, "retrieve_agent", retrieve)
+    monkeypatch.setattr(admission_module, "reauthorize", reauthorize)
+    monkeypatch.setattr(admission_module, "daimon_rule_set_for", rules)
+    monkeypatch.setattr(admission_module, "turn_channel_skills", skills)
+    monkeypatch.setattr(memory_resource, "ensure_memory_store_and_mount", ensure)
+    ports = HostFleetPorts(
+        sessions, prices={}, markup=Decimal(1), deps=deps, preparation=lambda parent: None
+    )
+
+    @asynccontextmanager
+    async def root_request(parent, deadline=None):
+        yield request
+
+    monkeypatch.setattr(ports, "_load_preparation", root_request)
+    expected = (
+        "worker_agent_not_in_grant" if refusal == "grant" else "worker_agent_not_allowed_here"
+    )
+    with pytest.raises(FleetRefused, match=expected):
+        await ports.agent_worker_parent(root, "fresh")
+    assert provisions == []
+    # The grant check comes before any admission work; the policy check is the real one's.
+    assert len(decided) == (0 if refusal == "grant" else 1)

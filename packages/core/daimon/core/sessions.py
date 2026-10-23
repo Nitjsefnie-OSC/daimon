@@ -1357,8 +1357,10 @@ async def create_session(
                     not owned_created
                     or observed.get("archived_at") is not None
                     or (
-                        # A memoryless worker's session reads back with no resources at all.
-                        native_resources not in (None, [])
+                        # A memoryless worker's session reads back with no resources at
+                        # all. The API always returns the list (a required field of
+                        # BetaManagedAgentsSession), so a missing one is malformed too.
+                        native_resources != []
                         if memoryless
                         else (
                             not isinstance(native_resources, list)
