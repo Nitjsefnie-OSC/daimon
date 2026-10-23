@@ -609,3 +609,20 @@ async def test_a_finalizer_outliving_its_wait_stays_referenced_and_its_failure_i
     assert not run_module._PENDING_FINALIZERS  # pyright: ignore[reportPrivateUsage]
     events = [entry["event"] for entry in logs]
     assert "turn.finalize_timeout" in events and "turn.finalize_failed" in events
+
+
+@pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
+async def test_a_turn_without_a_recorded_grant_gets_no_memory(template):
+    """Memory posture comes only from a recorded admission grant; without one, none."""
+    from daimon.core.stores.turn_memory_grants import get_turn_memory_grant
+
+    request, *_ = template
+    assert request.admission.grant is None, "this hand-built admission records no grant"
+    selected, runtime = await _prepared(request)
+    connection = _connection(selected)
+    transport = runtime.transport_factory(request.admission.backend_revision, request.scope)
+    token = await transport.mcp_secrets(request.scope, connection.credential_ref, connection.url)
+    async with request.deps.sessionmaker() as db:
+        assert await get_mcp_token(db, jti=token_jti(token)) is not None
+        assert await get_turn_memory_grant(db, jti=token_jti(token)) is None
+    await runtime.end_of_turn()

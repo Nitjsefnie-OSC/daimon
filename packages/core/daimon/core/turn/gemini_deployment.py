@@ -682,6 +682,23 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 chat_execution=True,
                 surface="provider_turn",
             )
+            # Which memory this turn's tools may use, from its own admission (the same
+            # facts a native mount follows), read later only by this jti.
+            from daimon.core.memory_tools import turn_memory_grant
+            from daimon.core.stores.turn_memory_grants import put_turn_memory_grant
+
+            memory = turn_memory_grant(
+                request.admission,
+                jti=token_jti(token),
+                tenant_id=tenant,
+                agent_id=agent_id,
+                account_id=account,
+                platform=request.platform,
+                thread_id=request.thread_id,
+                expires_at=now + timedelta(seconds=ttl_s),
+            )
+            if memory is not None:
+                await put_turn_memory_grant(db, memory)
         minted = token, token_jti(token)
         try:
             await validate_agent_mcp_token(
