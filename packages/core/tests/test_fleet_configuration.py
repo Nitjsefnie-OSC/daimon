@@ -12,6 +12,7 @@ from daimon.core.fleet_configuration import (
     ConfigurationReference,
     FleetConfigInput,
     configured_fleet_grant,
+    fleet_default_line,
     fleet_detail_lines,
     provider_preview_digest,
 )
@@ -164,7 +165,8 @@ async def test_fleet_card_reloads_effective_models_and_rechecks_permission_and_c
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
-    assert prepared.detail_lines == lines
+    # The agent had no grant: the card says it runs on the default today.
+    assert prepared.detail_lines == (fleet_default_line("default", revoke=False) + lines)
     assert "any on this server" in prepared.consequence
     assert "own model and settings" in prepared.consequence
     trace.queue(reply())

@@ -1403,7 +1403,14 @@ async def bind_session_impl(
                     read_agent_fleet_grant,
                 )
 
-                if await read_agent_fleet_grant(deps, result.admission, now=now()) is not None:
+                fleet_grant = await read_agent_fleet_grant(deps, result.admission, now=now())
+                if fleet_grant is not None:
+                    from anthropic import APIError
+                    from daimon.core.errors import DaimonError
+                    from daimon.core.fleet_configuration import is_default_fleet
+                    from daimon.core.neutral_resources import WorkerSpecRefused
+                    from mux.errors import ScopeViolation
+
                     root_scope = admitted_session_scope(
                         result.admission,
                         tenant_id=tenant_id,
@@ -1411,9 +1418,20 @@ async def bind_session_impl(
                         prepared=result._scope,  # pyright: ignore[reportPrivateUsage]
                     )
                     root_request = replace(request, admission=result.admission, scope=root_scope)
-                    source = await capture_preparation_source(root_request)
+                    try:
+                        source = await capture_preparation_source(root_request)
+                    except (WorkerSpecRefused, ScopeViolation, DaimonError, APIError) as error:
+                        # The default fleet never fails a chat turn: without a captured
+                        # source the root freeze skips fleet and the tools say why.
+                        if not is_default_fleet(fleet_grant):
+                            raise
+                        log.warning(
+                            "fleet.default_capture_skipped", error_type=type(error).__name__
+                        )
+                        source = None
                     remaining_s(effective_deadline, now=now(), refuse_expired=True)
-                    result = replace(result, _source=source, _preparation=root_request)
+                    if source is not None:
+                        result = replace(result, _source=source, _preparation=root_request)
             if worker is not None:
                 remaining_s(effective_deadline, now=now(), refuse_expired=True)
             if _on_prepared is not None:

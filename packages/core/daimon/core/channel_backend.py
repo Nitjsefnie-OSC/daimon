@@ -53,6 +53,7 @@ from daimon.core.pricing import (
 from daimon.core.stores import access_policy as policy_store
 from daimon.core.stores import agent_backends, agent_owners, mux_state, security_audit
 from daimon.core.stores.domain import (
+    FLEET_OFF,
     AgentBackendRevision,
     BackendAgent,
     CompatibilityItem,
@@ -1108,10 +1109,34 @@ class AgentBackendService:
             return None
         if current.fleet_grant_invalid:
             raise AgentBackendRefused("invalid_fleet_grant")
-        if current.fleet_grant is None:
+        if current.fleet_grant is None or current.fleet_off:
             return None
         value = AgentFleetGrant.model_validate_json(json.dumps(current.fleet_grant))
         return value if value.expires_at > now else None
+
+    async def fleet_setting(
+        self, tenant_id: uuid.UUID, agent_id: uuid.UUID, *, now: datetime
+    ) -> FleetSetting:
+        """The agent's fleet as it applies now: custom, off, or the computed default.
+
+        An agent with no stored grant gets the default (nothing is written). An
+        explicit grant always wins, and an explicit "off" or an expired grant stays
+        off: the default never widens what an owner or admin chose.
+        """
+        from daimon.core.fleet_configuration import default_fleet_grant
+
+        if not self.enabled:
+            return FleetSetting("off", None, None)
+        explicit = await self.read_fleet_grant(tenant_id, agent_id, now=now)
+        async with self._sessions() as session:
+            current = await agent_backends.current(session, tenant_id, agent_id)
+            default = default_fleet_grant(await self._policy(session, tenant_id))
+        if explicit is not None:
+            return FleetSetting("custom", explicit, explicit)
+        if current is not None and current.fleet_grant is not None:
+            # Turned off, or a custom grant that expired.
+            return FleetSetting("off", None, default)
+        return FleetSetting("default", default, default)
 
     async def _fleet_preview(
         self,
@@ -1160,6 +1185,9 @@ class AgentBackendService:
                 # Financial admission refuses every spawn of such a run; say so now.
                 raise AgentBackendRefused("fleet_provider_limits_exceed_budget")
             normalized = value.model_copy(update={"epoch": local + 1}).model_dump(mode="json")
+        else:
+            # Off is stored, so a revoked agent never falls back to the default fleet.
+            normalized = dict(FLEET_OFF)
         preview = compatibility_preview(
             agent,
             (current.backend if current else None) or DEFAULT_BACKEND,
@@ -1645,6 +1673,15 @@ async def load_backend_agent(
         required_capabilities=("multiagent",) if actual.multiagent is not None else (),
         source=source_agent_record(actual, resource_scope(tenant_id=str(tenant_id))),
     )
+
+
+@dataclass(frozen=True)
+class FleetSetting:
+    """`grant` is what turns may use (None: off); `base` is what an edit starts from."""
+
+    kind: Literal["custom", "default", "off"]
+    grant: AgentFleetGrant | None
+    base: AgentFleetGrant | None
 
 
 def backend_is_enabled(backend: Provider, enabled_backends: tuple[Provider, ...]) -> bool:

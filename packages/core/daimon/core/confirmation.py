@@ -35,6 +35,7 @@ from daimon.core.fleet_configuration import (
     ConfigurationReference,
     complete_fleet_config,
     configured_fleet_grant,
+    fleet_default_line,
     fleet_detail_lines,
     provider_preview_digest,
 )
@@ -756,12 +757,17 @@ def backend_switch_callbacks(
                 )
                 if not await service.may_edit(agent, actor):
                     raise ValueError("This change needs the agent's owner or a current admin.")
-                previous = await service.read_fleet_grant(
+                setting = await service.fleet_setting(
                     tenant_id, agent.agent_id, now=datetime.now(prompt.expires_at.tzinfo)
                 )
+                previous = setting.base
                 complete = (
                     await complete_fleet_config(
-                        reference.config, previous, anthropic, tenant_id=tenant_id
+                        reference.config,
+                        previous,
+                        anthropic,
+                        tenant_id=tenant_id,
+                        default=setting.kind != "custom",
                     )
                     if reference.config
                     else None
@@ -790,10 +796,14 @@ def backend_switch_callbacks(
                     if reference.operation == "fleet_revoke"
                     else "Configure fleet for "
                 ) + agent.name
-                details = fleet_detail_lines(
-                    preview,
-                    worker_names=complete.worker_agents if complete else None,
-                    previous=previous,
+                details = (
+                    *fleet_default_line(setting.kind, revoke=reference.operation == "fleet_revoke"),
+                    *fleet_detail_lines(
+                        preview,
+                        worker_names=complete.worker_agents if complete else None,
+                        # The default's fixed expiry isn't a limit an owner set.
+                        previous=previous if setting.kind == "custom" else None,
+                    ),
                 )
         except AgentBackendRefused as exc:
             raise ValueError("This preview changed. Preview and confirm again.") from exc

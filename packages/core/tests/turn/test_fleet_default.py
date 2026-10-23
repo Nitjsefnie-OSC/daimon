@@ -1,0 +1,402 @@
+"""J10: every agent has a fleet with safe default caps, and nobody has to set it up."""
+
+from __future__ import annotations
+
+import uuid
+from dataclasses import replace
+from datetime import UTC, datetime, timedelta
+from decimal import Decimal
+
+import pytest
+from daimon.core._models import AgentBackendRevisionRecord
+from daimon.core.agent_model_names import agent_catalog
+from daimon.core.fleet_configuration import (
+    DEFAULT_FLEET_BUDGET_USD,
+    DEFAULT_FLEET_MAX_WORKERS,
+    default_fleet_grant,
+    is_default_fleet,
+)
+from daimon.core.fleet_orchestration import FleetRefused, HostFleetPorts
+from daimon.core.neutral_resources import (
+    AgentFleetGrant,
+    WorkerLimits,
+    WorkerSpecRefused,
+    default_worker_limits,
+    resolve_worker_spec,
+    task_worker_spec,
+)
+from daimon.core.stores import fleet, tenant_ledger, tenants
+from daimon.core.stores.domain import FLEET_OFF, TenantBackendPolicy
+from daimon.core.turn.runtime_manifest import read_agent_fleet_grant, read_frozen_root, root_refusal
+from mux.contracts.ids import ModelRef
+from mux.profiles import backend_selection, selectable_models
+from mux.state.operations import request_digest
+from sqlalchemy import delete, func, select
+
+from ..test_agent_backend import enable
+from ..test_agent_backend import owned as owned
+from .test_frozen_root import freeze
+from .test_frozen_root import root_turn as root_turn
+
+NOW = datetime(2026, 10, 23, 6, tzinfo=UTC)
+ALL = ("anthropic", "openai", "gemini")
+
+
+def policy(*providers):
+    return TenantBackendPolicy(tenant_id=uuid.uuid4(), revision="r", enabled_backends=providers)
+
+
+def ids(grant: AgentFleetGrant) -> set[str]:
+    return {model.id for model in grant.models}
+
+
+# --- The computed default -------------------------------------------------------------
+
+
+def test_default_offers_every_enabled_providers_selectable_models_and_never_pro():
+    grant = default_fleet_grant(policy(*ALL))
+    assert grant is not None and is_default_fleet(grant)
+    assert grant.max_workers == DEFAULT_FLEET_MAX_WORKERS == 4
+    assert grant.limits.budget_usd == DEFAULT_FLEET_BUDGET_USD == Decimal(2)
+    assert grant.limits.provider_limits_usd is None  # one shared $2 budget
+    assert grant.worker_agents == "any"
+    assert grant.native_root_budget_usd is None and grant.root_cash_budget_usd is None
+    assert 0 < grant.max_worker_seconds <= grant.max_run_seconds
+    # J3's "fork yourself across Opus 5.5, Astra and Argon" is inside the default.
+    assert {"claude-opus-5-5", "gpt-6-astra", "gemini-4-argon"} <= ids(grant)
+    catalog = {(entry.model.provider, entry.model.id) for entry in agent_catalog()}
+    assert {(model.provider, model.id) for model in grant.models} <= catalog
+    assert not any("pro" in model.id.split("-") for model in grant.models)
+    for model in grant.models:
+        if model.provider != "anthropic":
+            assert model.id in selectable_models(model.provider)
+    assert "gemini-3.5-flash-lite" not in ids(grant)  # worker-only, not selectable
+
+
+def test_default_never_offers_a_provider_the_tenant_has_not_enabled():
+    only = default_fleet_grant(policy("anthropic"))
+    assert only is not None and {model.provider for model in only.models} == {"anthropic"}
+    two = default_fleet_grant(policy("anthropic", "openai"))
+    assert two is not None and {model.provider for model in two.models} == {"anthropic", "openai"}
+    assert default_fleet_grant(policy()) is None
+
+
+def test_default_never_offers_a_pro_model_even_if_the_catalog_had_one(monkeypatch):
+    from daimon.core import agent_model_names
+    from daimon.core.agent_model_names import AgentModel
+
+    real = agent_catalog()
+    monkeypatch.setattr(
+        agent_model_names,
+        "agent_catalog",
+        lambda: (*real, AgentModel(ModelRef(provider="gemini", id="gemini-3.8-pro"), "$")),
+    )
+    grant = default_fleet_grant(policy(*ALL))
+    assert grant is not None and "gemini-3.8-pro" not in ids(grant)
+
+
+def test_default_reads_the_same_every_time_so_a_frozen_root_never_goes_stale():
+    first = default_fleet_grant(policy(*ALL))
+    second = default_fleet_grant(policy(*ALL))
+    assert first is not None and second is not None
+    assert request_digest(first.model_dump(mode="json")) == request_digest(
+        second.model_dump(mode="json")
+    )
+    assert first.expires_at > datetime.now(UTC) + timedelta(days=365)
+
+
+def test_cap_refusals_are_plain():
+    assert "Use fewer workers" in str(FleetRefused("worker_limit_reached"))
+    assert "owner or an admin" in str(FleetRefused("worker_limit_reached"))
+    assert "budget" in str(FleetRefused("financial_admission_refused"))
+    assert FleetRefused("worker_limit_reached").reason == "worker_limit_reached"
+
+
+# --- Stored settings: default, custom, off -------------------------------------------
+
+
+def custom(max_workers=2, *, deadline=NOW + timedelta(days=30)):
+    return AgentFleetGrant(
+        max_workers=max_workers,
+        choices=(
+            (backend_selection("anthropic"), ModelRef(provider="anthropic", id="claude-haiku-5-5")),
+        ),
+        limits=WorkerLimits(budget_usd=Decimal("0.5"), deadline=deadline, max_turns=1),
+        max_run_seconds=600,
+        max_worker_seconds=120,
+        max_root_turns=3,
+    )
+
+
+async def put(service, agent, actor, value):
+    preview = await service.preview_fleet_grant(agent, value, now=NOW)
+    if value is None:
+        return await service.revoke_fleet_grant(
+            agent,
+            preview.setting_revision,
+            actor,
+            expected_preview_digest=preview.digest,
+            now=NOW,
+        )
+    return await service.set_fleet_grant(
+        agent,
+        value,
+        preview.setting_revision,
+        actor,
+        expected_preview_digest=preview.digest,
+        now=NOW,
+    )
+
+
+async def revisions(sessions, agent) -> int:
+    async with sessions() as db:
+        return await db.scalar(
+            select(func.count())
+            .select_from(AgentBackendRevisionRecord)
+            .where(AgentBackendRevisionRecord.agent_id == agent.agent_id)
+        )
+
+
+async def test_a_fresh_agent_gets_the_default_and_nothing_is_written(owned):
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    assert setting.kind == "default" and setting.grant == setting.base
+    assert setting.grant == default_fleet_grant(await service.tenant_policy(agent.tenant_id))
+    assert await service.read_fleet_grant(agent.tenant_id, agent.agent_id, now=NOW) is None
+    assert await revisions(sessions, agent) == 0
+
+
+async def test_the_default_follows_the_tenants_providers(owned):
+    service, agent, actor, _ = owned
+    # A fresh tenant's stored allowlist: only providers it enabled, never an unkeyed one.
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    enabled = (await service.tenant_policy(agent.tenant_id)).enabled_backends
+    assert {model.provider for model in setting.grant.models} <= set(enabled)
+    await enable(service, agent, actor)
+    policy_now = await service.tenant_policy(agent.tenant_id)
+    await service.set_tenant_allowlist(agent.tenant_id, ("anthropic",), policy_now.revision, actor)
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    assert {model.provider for model in setting.grant.models} == {"anthropic"}
+
+
+async def test_an_explicit_owner_tightening_wins_over_the_default(owned):
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    await put(service, agent, actor, custom(max_workers=2))
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    assert setting.kind == "custom" and setting.grant.max_workers == 2
+    assert ids(setting.grant) == {"claude-haiku-5-5"}
+    assert not is_default_fleet(setting.grant)
+
+
+async def test_turning_fleet_off_stays_off_through_backend_changes_and_reverts(owned):
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    await put(service, agent, actor, custom())
+    off = await put(service, agent, actor, None)
+    assert off.fleet_grant == FLEET_OFF and off.fleet_off
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    assert setting.kind == "off" and setting.grant is None
+    # An edit after "off" starts from the default limits, not from nothing.
+    assert setting.base == default_fleet_grant(await service.tenant_policy(agent.tenant_id))
+    switched = await service.set_backend(agent, "openai", off.local, actor)
+    assert switched.fleet_off
+    reverted = await service.revert(agent, actor, expected_revision=switched.local)
+    assert reverted.fleet_off
+    assert (await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)).grant is None
+    again = await put(service, agent, actor, custom(max_workers=3))
+    assert again.fleet_grant["max_workers"] == 3
+
+
+async def test_turning_off_a_never_configured_agent_stays_off(owned):
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    await put(service, agent, actor, None)
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    assert setting.kind == "off" and setting.grant is None
+
+
+async def test_an_expired_custom_grant_is_off_never_widened_to_the_default(owned):
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    await put(service, agent, actor, custom(deadline=NOW + timedelta(hours=1)))
+    later = NOW + timedelta(hours=2)
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=later)
+    assert setting.kind == "off" and setting.grant is None
+
+
+async def test_a_backend_change_on_an_unconfigured_agent_keeps_the_default(owned):
+    service, agent, actor, _ = owned
+    await enable(service, agent, actor)
+    await service.set_backend(agent, "openai", 0, actor)
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    assert setting.kind == "default" and setting.grant is not None
+
+
+async def test_a_disabled_service_reads_fleet_off(owned):
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    disabled = type(service)(sessions, enabled=False)
+    setting = await disabled.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    assert setting.kind == "off" and setting.grant is None
+
+
+# --- The turn path: a never-set-up channel, no grant ----------------------------------
+
+
+async def unconfigured(value):
+    """The root_turn fixture's agent with its grant rows removed: a fresh agent."""
+    deps, prepared, *_ = value
+    async with deps.sessionmaker.begin() as db:
+        await db.execute(delete(AgentBackendRevisionRecord))
+    grant = await read_agent_fleet_grant(deps, prepared.admission, now=datetime.now(UTC))
+    assert grant is not None and is_default_fleet(grant)
+    return grant
+
+
+async def test_fresh_agent_spawns_three_workers_under_the_default_caps(root_turn):
+    deps, prepared, _, intent, origin, scope, _, _ = root_turn
+    grant = await unconfigured(root_turn)
+    await freeze(root_turn)
+    parent, policy_now = await read_frozen_root(
+        deps, scope, intent_id=intent.id, now=datetime.now(UTC)
+    )
+    assert parent.limits.budget_usd == DEFAULT_FLEET_BUDGET_USD
+    run, _ = await fleet.run_status(
+        deps.sessionmaker, tenant_id=prepared.admission.grant.tenant_id, run_id=parent.fleet.run_id
+    )
+    assert run.max_workers == min(deps.fleet_max_workers, DEFAULT_FLEET_MAX_WORKERS)
+    assert run.total_budget_usd == DEFAULT_FLEET_BUDGET_USD
+    tenant_id = prepared.admission.grant.tenant_id
+    async with deps.sessionmaker.begin() as db:
+        await tenants.set_funding_mode(db, tenant_id=tenant_id, funding_mode="prepaid")
+        await tenant_ledger.insert_entry(
+            db,
+            tenant_id=tenant_id,
+            delta_usd=Decimal(10),
+            reason="trial_credit",
+            idempotency_key=f"trial:{tenant_id}",
+        )
+    dispatched = []
+
+    async def dispatch(*args):
+        dispatched.append(args)
+
+    from daimon.core.pricing import provider_prices
+
+    prices = {}
+    for backend in parent.backend_grants:
+        prices.update(provider_prices(backend.profile))
+    ports = HostFleetPorts(deps.sessionmaker, prices=prices, markup=Decimal(1), dispatch=dispatch)
+    root_model = parent.spec.model.id
+    models = [model.id for model in grant.models if model.provider == "anthropic"][:3]
+    assert root_model not in models or len(models) == 3
+    workers = []
+    for ordinal, model in enumerate(models):
+        spec = task_worker_spec(parent, role=f"W{ordinal}", task="Postgres or SQLite?", model=model)
+        limits = default_worker_limits(
+            parent.limits, run, tuple(workers), provider="anthropic", planned_workers=3
+        )
+        assert limits.budget_usd <= Decimal("0.67")  # a third of $2, in cents
+        resolved = resolve_worker_spec(
+            parent,
+            spec,
+            policy=policy_now,
+            now=datetime.now(UTC),
+            captured_source=prepared._source,
+            resources=parent.resources,
+            environment=parent.environment,
+            limits=limits,
+        )
+        run_now, worker = await ports.admit(
+            parent,
+            resolved,
+            run_id=run.id,
+            operation_key=f"default-{ordinal}",
+            role=f"W{ordinal}",
+            session=None,
+            result_contract=None,
+            reviewer_of=None,
+            reviewed_result=None,
+        )
+        assert worker.status != "cancelled", worker.error_code
+        workers.append(worker)
+    assert len(workers) == 3 and len(dispatched) == 3
+    assert root_refusal(origin.id) is None
+
+
+async def test_fleet_kill_switch_stops_the_default(root_turn):
+    deps, prepared, _, intent, _, scope, _, _ = root_turn
+    await unconfigured(root_turn)
+    stopped = replace(deps, fleet_enabled=False)
+    assert await read_agent_fleet_grant(stopped, prepared.admission, now=datetime.now(UTC)) is None
+
+
+async def test_a_default_root_refusal_never_fails_the_turn(root_turn, monkeypatch):
+    from daimon.core import neutral_resources
+
+    deps, prepared, _, intent, origin, scope, _, _ = root_turn
+    await unconfigured(root_turn)
+
+    def refused(*args, **kwargs):
+        raise WorkerSpecRefused("backend", "unsupported")
+
+    monkeypatch.setattr(neutral_resources, "fleet_root_permissions", refused)
+    await freeze(root_turn)  # no raise: the turn answers with fleet off
+    assert root_refusal(origin.id) == "unavailable"
+    with pytest.raises((WorkerSpecRefused, Exception)):
+        await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+
+
+async def test_a_held_turn_under_the_default_answers_with_fleet_off(root_turn):
+    from daimon.core.turn_hold import TurnHold
+
+    deps, prepared, _, intent, origin, scope, binding, transport = root_turn
+    await unconfigured(root_turn)
+    hold = TurnHold(platform="discord", channel_id="channel", client=True)
+    held = replace(prepared, admission=replace(prepared.admission, hold=hold))
+    await freeze((deps, held, None, intent, origin, scope, binding, transport))
+    assert root_refusal(origin.id) == "held"
+
+
+async def test_a_plan_beyond_the_default_caps_is_refused_with_the_real_limits(root_turn):
+    """J7: "40 Opus agents" is refused plainly; nothing is spawned or offered."""
+    from daimon.core.fleet_orchestration import FleetOrchestrator
+
+    deps, _, _, intent, _, scope, _, _ = root_turn
+    await unconfigured(root_turn)
+    await freeze(root_turn)
+    parent, policy_now = await read_frozen_root(
+        deps, scope, intent_id=intent.id, now=datetime.now(UTC)
+    )
+    orchestrator = FleetOrchestrator(
+        HostFleetPorts(deps.sessionmaker, prices={}, markup=Decimal(1))
+    )
+    with pytest.raises(FleetRefused) as refused:
+        await orchestrator.spawn_limits(
+            parent,
+            policy_now,
+            operation_key="forty",
+            provider="anthropic",
+            now=datetime.now(UTC),
+            planned_workers=40,
+        )
+    assert refused.value.reason == "over_fleet_limits"
+    message = str(refused.value)
+    assert "limited to 4 workers and $2 a run" in message
+    assert "owner or an admin" in message and "don't offer a bigger limit" in message
+    run, workers = await fleet.run_status(
+        deps.sessionmaker, tenant_id=uuid.UUID(scope.tenant_id), run_id=parent.fleet.run_id
+    )
+    assert workers == () and run.reserved_usd == 0
+    # Within the caps the same plan shape is fine.
+    limits = await orchestrator.spawn_limits(
+        parent,
+        policy_now,
+        operation_key="three",
+        provider="anthropic",
+        now=datetime.now(UTC),
+        planned_workers=3,
+    )
+    assert limits.budget_usd <= Decimal("0.67")
