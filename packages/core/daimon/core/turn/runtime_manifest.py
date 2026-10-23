@@ -2108,17 +2108,29 @@ def _mcp_credential_servers(source: BackendAgent, binding: ResourceBinding) -> f
 def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
     """Exclude validated native-only capabilities and their paired resources.
 
-    A connector with its own login (an MCP server carrying a credential, or one a
-    projected credential is paired with) never enters a worker ceiling either: the
-    agent can still run a fleet, its workers run without that connector, and the
-    credential never reaches a worker. The ceiling declares the loss (`mcp`).
+    Nothing with its own login enters a worker ceiling: the agent can still run a
+    fleet, its workers run without it, and no credential ever reaches a worker. Each
+    loss is declared (`mcp`, `files`, `repository`):
+    - a connector with its own login (an MCP server carrying a credential, or one a
+      projected credential pairs with), with its toolset and binding;
+    - a stored connector login the projector can't pair with one server
+      (`agent-mcp:<id>`): fail safe, workers then run without any external connector;
+    - stored secrets the session would write to a file (`.env`);
+    - repositories cloned with a login.
     """
     spec = source.effective_spec
     if spec is None:
         return source
     normalized, excluded = worker_spec_ceiling(spec)
     logins = login_mcp_servers(source)
+    stored_logins = any(
+        _stored_connector_login(binding) for binding in source.resource_requirements
+    )
+    if stored_logins:
+        logins |= {server.name for server in spec.mcp_servers or ()}
+    drops: set[str] = set()
     if logins - excluded:
+        drops.add("mcp")
         normalized = normalized.model_copy(
             update={
                 "mcp_servers": tuple(
@@ -2131,7 +2143,6 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
                 )
                 if normalized.tools is not None
                 else None,
-                "declared_drops": tuple(sorted({*normalized.declared_drops, "mcp"})),
             }
         )
     excluded |= logins
@@ -2140,22 +2151,50 @@ def worker_source_ceiling(source: BackendAgent) -> BackendAgent:
         for server in spec.mcp_servers or ()
         if server.name in logins and server.credential_ref is not None
     }
-    resources = tuple(
-        binding
-        for binding in source.resource_requirements
-        if not ((paired := _mcp_credential_servers(source, binding)) and paired <= excluded)
-        and not (binding.kind == "credential" and binding.credential_ref in credentials)
-    )
+    resources: list[ResourceBinding] = []
+    for binding in source.resource_requirements:
+        paired = _mcp_credential_servers(source, binding)
+        if (paired and paired <= excluded) or (
+            binding.kind == "credential" and binding.credential_ref in credentials
+        ):
+            continue
+        if _stored_connector_login(binding):
+            continue
+        if binding.kind == "credential" and binding.target_path is not None:
+            drops.add("files")
+            continue
+        resources.append(binding)
+    repositories = tuple(repo for repo in source.repository_sources if repo.credential_ref is None)
+    if len(repositories) != len(source.repository_sources):
+        drops.add("repository")
+    if drops:
+        normalized = normalized.model_copy(
+            update={"declared_drops": tuple(sorted({*normalized.declared_drops, *drops}))}
+        )
     return source.model_copy(
         update={
             "effective_spec": normalized,
-            "resource_requirements": resources,
+            "resource_requirements": tuple(resources),
+            "repository_sources": repositories,
         }
     )
 
 
+def _stored_connector_login(binding: ResourceBinding) -> bool:
+    """A projected stored MCP login (`agent-mcp:<id>`), which names no server."""
+    return (
+        binding.kind == "credential"
+        and binding.credential_ref is not None
+        and binding.id == binding.credential_ref
+        and binding.credential_ref.startswith("agent-mcp:")
+        and binding.native is None
+        and binding.resource is None
+        and binding.target_path is None
+    )
+
+
 def login_mcp_servers(source: BackendAgent) -> frozenset[str]:
-    """The agent's connectors that carry their own login; workers run without them."""
+    """The agent's connectors that carry their own paired login; workers run without them."""
     spec = source.effective_spec
     if spec is None:
         return frozenset()

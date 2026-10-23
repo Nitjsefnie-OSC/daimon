@@ -291,6 +291,10 @@ async def test_a_caller_login_connector_is_left_out_of_the_worker_ceiling(captur
     assert not {binding.credential_ref for binding in root.resources} & logins
     assert not {server.credential_ref for server in root.spec.mcp_servers or ()} & logins
     assert "mcp" in root.spec.declared_drops
+    dumped = json.dumps(
+        [root.spec.model_dump(mode="json"), [r.model_dump(mode="json") for r in root.resources]]
+    )
+    assert not any(str(ref) in dumped for ref in logins - {None})
     assert len(trace.requests) == 1
 
 
