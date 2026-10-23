@@ -31,7 +31,7 @@ from typing import TYPE_CHECKING
 from uuid import UUID
 
 import structlog
-from daimon.adapters.discord.checks import admin_caller
+from daimon.adapters.discord.checks import ADMIN_NOUN, admin_caller
 from daimon.adapters.discord.turn_card_recovery import turn_card_custom_id
 
 import discord
@@ -41,7 +41,7 @@ if TYPE_CHECKING:
 
 log = structlog.get_logger()
 
-STOP_NOT_ALLOWED = "Only the person who asked, or a server admin, can stop this reply."
+STOP_NOT_ALLOWED = f"Only the person who asked, or {ADMIN_NOUN}, can stop this reply."
 
 
 async def finish_control(

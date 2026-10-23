@@ -714,7 +714,7 @@ async def test_a_card_post_failure_after_admission_still_finishes_the_outcome(
     )
 
 
-def _click(key: str, clicker: str) -> Any:
+def _click(key: str, clicker: str | None) -> Any:
     action = SimpleNamespace(data={"action": "cancel_turn", "turn": key})
     activity = SimpleNamespace(
         value=SimpleNamespace(action=action), from_=SimpleNamespace(aad_object_id=clicker)
@@ -840,30 +840,33 @@ async def test_a_current_deployment_admin_can_stop_anyones_reply(
     owners.assert_awaited_with(ADMIN_TEAM)
 
 
-@pytest.mark.parametrize("owners_readable", [True, False])
+@pytest.mark.parametrize("case", ["non_admin", "owners_unreadable", "no_entra_id"])
 async def test_a_non_admin_or_an_unreadable_role_cannot_stop_anothers_reply(
-    db_session_factory: async_sessionmaker[AsyncSession], owners_readable: bool
+    db_session_factory: async_sessionmaker[AsyncSession], case: str
 ) -> None:
     sender = FakeSender()
     teams = _app(db_session_factory, sender)
     teams._teams = teams._teams.model_copy(update={"admin_team_id": ADMIN_TEAM})
     owners = (
-        AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
-        if owners_readable
-        else AsyncMock(side_effect=GroupLookupFailed("http error (status 503)"))
+        AsyncMock(side_effect=GroupLookupFailed("http error (status 503)"))
+        if case == "owners_unreadable"
+        else AsyncMock(return_value=frozenset({AAD_OBJECT_ID}))
     )
     teams.runtime = dataclasses.replace(teams.runtime, team_owners=owners)
     entry, cancel = _cancel_entry(teams, "key-1", sender=sender)
     await entry.lifecycle.post_initial()
 
-    refused = await teams.handle_cancel(_click("key-1", OTHER_AAD_OBJECT_ID))
+    clicker = None if case == "no_entra_id" else OTHER_AAD_OBJECT_ID
+    refused = await teams.handle_cancel(_click("key-1", clicker))
     expected = (
-        app_module._CANCEL_NOT_AUTHOR  # pyright: ignore[reportPrivateUsage]
-        if owners_readable
-        else app_module._CANCEL_ROLE_UNKNOWN  # pyright: ignore[reportPrivateUsage]
+        app_module._CANCEL_ROLE_UNKNOWN  # pyright: ignore[reportPrivateUsage]
+        if case == "owners_unreadable"
+        else app_module._CANCEL_NOT_AUTHOR  # pyright: ignore[reportPrivateUsage]
     )
     assert refused.value == expected, "an outage is not read as 'not an admin'"
     assert not cancel.is_set() and not entry.lifecycle.stopping
+    if case == "no_entra_id":
+        owners.assert_not_awaited()  # a click with no Entra id is never checked as an admin
 
 
 async def test_a_stop_click_after_the_closing_notice_started_is_told_the_reply_finished(

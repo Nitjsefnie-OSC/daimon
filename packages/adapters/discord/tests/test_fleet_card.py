@@ -315,7 +315,7 @@ async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(ad
     ), "only an accepted press is recorded, with who pressed it"
     if not admin:
         click.response.send_message.assert_awaited_once_with(
-            "Only the person who started this fleet, or a server admin, can stop it.",
+            "Only the person who started this fleet, or someone with Manage Server, can stop it.",
             ephemeral=True,
         )
 
@@ -330,6 +330,19 @@ async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(ad
         ),
         ("inactive", "You can't control this fleet from here."),
         ("outage", "Couldn't reach the fleet just now. Try again in a moment."),
+        ("limit", "This fleet has used up its time or turn limit, so it can't be resumed."),
+        (
+            "operation_conflict",
+            "Someone's press on this fleet is still going through. Try again in a moment.",
+        ),
+        (
+            "control_evidence_unavailable",
+            "Someone's press on this fleet is still going through. Try again in a moment.",
+        ),
+        (
+            "control_evidence_invalid",
+            "This fleet changed since the card was drawn. Wait for the card to update, then try again.",
+        ),
     ],
 )
 async def test_a_refused_fleet_click_names_its_real_cause(refusal, text):
@@ -343,11 +356,23 @@ async def test_a_refused_fleet_click_names_its_real_cause(refusal, text):
     elif refusal == "inactive":
         current, policy = loader.return_value
         loader.return_value = (replace(current, fleet=replace(current.fleet, active=False)), policy)
-    else:
+    elif refusal == "outage":
         loader.side_effect = FleetRefused("prerequisites_unavailable")
+    elif refusal == "limit":
+        owner.read_run.return_value = (run(), (worker(deadline_at=NOW),))
+    else:
+        # Refused by the shared owner while writing the press.
+        owner.control.side_effect = FleetRefused(refusal)
+    label = "Resume 1" if refusal == "limit" else "Stop 1"
     click = interaction(card=card)
-    await buttons(send.call_args.kwargs["view"])[0].callback(click)
-    owner.control.assert_not_awaited()
+    view = send.call_args.kwargs["view"]
+    await next(item for item in buttons(view) if item.item.label == label).callback(click)
+    written = refusal in (
+        "operation_conflict",
+        "control_evidence_unavailable",
+        "control_evidence_invalid",
+    )
+    assert owner.control.await_count == (1 if written else 0)
     click.response.send_message.assert_awaited_once_with(text, ephemeral=True)
 
 
