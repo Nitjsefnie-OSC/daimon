@@ -24,8 +24,14 @@ from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.config import BackendConfig
 from mux.contracts.ids import ModelRef, Provider, ResourceRef, Revision
-from mux.contracts.resources import AgentPatch, AgentSpec, SessionSpec
-from pydantic import Field, JsonValue
+from mux.contracts.resources import (
+    AgentPatch,
+    AgentSpec,
+    CapabilityDrop,
+    DeclaredDrop,
+    SessionSpec,
+)
+from pydantic import BaseModel, ConfigDict, Field, JsonValue
 
 if TYPE_CHECKING:
     from daimon.core.neutral_resources import WorkerPermissions
@@ -34,6 +40,19 @@ if TYPE_CHECKING:
 PositiveMoney = Annotated[Decimal, Field(gt=0, allow_inf_nan=False)]
 PositiveCount = Annotated[int, Field(gt=0, strict=True)]
 OperationKey = Annotated[str, Field(min_length=1, max_length=200, pattern=r"^\S+$")]
+
+
+class AgentWorker(BaseModel):
+    """A worker that runs AS this on-server agent, with any losses it declares.
+
+    `declared_drops` only takes capability away (whole capabilities such as
+    "tools" or "skills"); the agent's own accepted losses apply anyway.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    name: str = Field(min_length=1, max_length=200)
+    declared_drops: tuple[CapabilityDrop, ...] = Field(default=(), max_length=8)
 
 
 class FleetToolService(Protocol):
@@ -53,7 +72,7 @@ class FleetToolService(Protocol):
         operation_key: str,
         role: str,
         backend: BackendConfig | None,
-        agent: AgentSpec | str | None,
+        agent: AgentSpec | AgentWorker | str | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
@@ -242,7 +261,7 @@ class HostFleetToolService:
         operation_key: str,
         role: str,
         backend: BackendConfig | None,
-        agent: AgentSpec | str | None,
+        agent: AgentSpec | AgentWorker | str | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
@@ -269,6 +288,9 @@ class HostFleetToolService:
             worker_runtime_ceiling,
         )
 
+        as_agent_drops: tuple[DeclaredDrop, ...] = ()
+        if isinstance(agent, AgentWorker):
+            agent, as_agent_drops = agent.name, agent.declared_drops
         as_agent = agent if isinstance(agent, str) else None
         spec = agent if not isinstance(agent, str) else None
         worker_parent: WorkerPermissions | None = None
@@ -342,6 +364,7 @@ class HostFleetToolService:
             limits=limits,
             fill_token_limits=max_input_tokens is None and max_output_tokens is None,
             as_agent=as_agent,
+            as_agent_drops=as_agent_drops,
             task=task if as_agent is not None else None,
             agent=spec,
             clone=clone,
@@ -466,7 +489,7 @@ def register_fleet_tools(
         operation_key: str,
         role: str,
         backend: BackendConfig | None,
-        agent: AgentSpec | str | None,
+        agent: AgentSpec | AgentWorker | str | None,
         clone: ResourceRef | None,
         clone_revision: Revision | None,
         overrides: AgentPatch | None,
@@ -484,8 +507,9 @@ def register_fleet_tools(
         planned_workers: int | None = None,
         planned_models: list[str] | None = None,
     ) -> dict[str, JsonValue]:
-        if isinstance(agent, str):
-            if not agent.strip() or clone is not None or model is not None:
+        if isinstance(agent, (str, AgentWorker)):
+            name = agent if isinstance(agent, str) else agent.name
+            if not name.strip() or clone is not None or model is not None:
                 raise ToolError(
                     "A worker agent is named on its own: give its task, not a model or a clone."
                 )
@@ -544,7 +568,7 @@ def register_fleet_tools(
         max_input_tokens: PositiveCount | None = None,
         max_output_tokens: PositiveCount | None = None,
         run_id: uuid.UUID | None = None,
-        agent: AgentSpec | str | None = None,
+        agent: AgentSpec | AgentWorker | str | None = None,
         clone: ResourceRef | None = None,
         clone_revision: Revision | None = None,
         overrides: AgentPatch | None = None,
@@ -571,6 +595,9 @@ def register_fleet_tools(
         To run a worker AS one of this server's agents (its own configured
         model, tools and skills, under your permissions), pass agent=<its name>
         and its task, with no model; fleet_agents lists the agents you can use.
+        To have it run without some of its capabilities, pass
+        agent={"name": <its name>, "declared_drops": ["tools", ...]}. Its spawn
+        reply lists every loss it runs with.
         Advanced: an agent spec or an authorized clone with sparse overrides
         instead of task. Retries reuse operation_key.
         """

@@ -644,7 +644,10 @@ async def test_waiting_collect_ends_the_turn_card_without_the_premature_answer()
     owner.settle_run.assert_not_awaited()
     messages = _texts(send, edit)
     assert not any("premature" in text for text in messages)
-    assert any("Fleet is still working" in text and "pending" in text for text in messages)
+    (notice,) = [text for text in messages if "Fleet is still working" in text]
+    # The answer message is never edited again: it names no worker state that
+    # would read as stuck after the run ends (r14); the card carries progress.
+    assert "pending" not in notice and "fleet card" in notice
     assert lifecycle.was_answered and lifecycle._terminal
 
 
@@ -2244,3 +2247,21 @@ def test_a_worker_running_as_another_agent_shows_that_agents_name():
     # A worker named after its role (a plain task worker) shows no agent name.
     assert "**W2** ·" in text and "(W2)" not in text
     assert "**claude** ·" in text and "(fleet-claude)" not in text
+
+
+def test_an_agent_workers_card_row_says_what_it_runs_without():
+    worker_row = worker(ordinal=1, role="openai")
+    as_openai = replace(
+        worker_row,
+        spec={
+            **worker_row.spec,
+            "name": "fleet-openai",
+            "metadata": {"daimon_name": "fleet-openai"},
+            "declared_drops": ["memory", "tools", "model_controls"],
+        },
+    )
+    view = build_fleet_view(run(), (as_openai,))
+    text = "\n".join(
+        item.content for item in view.walk_children() if isinstance(item, discord.ui.TextDisplay)
+    )
+    assert "**openai** (fleet-openai, without its memory, its tools, its model settings) ·" in text

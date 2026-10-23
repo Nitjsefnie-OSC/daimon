@@ -100,7 +100,7 @@ from daimon.core.usage_recording import record_turn_usage
 from mux.contracts.actions import UserMessage
 from mux.contracts.ids import ResourceRef, Revision, Scope
 from mux.contracts.ports import ManagedAgents
-from mux.contracts.resources import Agent, AgentSpec, SessionSpec
+from mux.contracts.resources import Agent, AgentPatch, AgentSpec, SessionSpec
 from mux.drivers.anthropic import SessionCreateRequest, SessionReads
 from mux.errors import ScopeViolation
 from mux.profiles import get_profile
@@ -307,7 +307,6 @@ class ProviderPreparationRequest:
         from daimon.core.neutral_resources import WorkerSpecRefused, resolve_worker_spec
         from daimon.core.stores.access_policy import load_access_policy
         from mux.contracts.config import BackendConfig
-        from mux.contracts.resources import AgentPatch, AgentSpec
 
         bound = min(self.deadline, parent.limits.deadline, worker.limits.deadline)
         async with asyncio.timeout(remaining_s(bound, now=self.now(), refuse_expired=True)):
@@ -318,11 +317,8 @@ class ProviderPreparationRequest:
             definition = (
                 source.source if worker.source_agent else AgentSpec.model_validate(worker.spec)
             )
-            overrides = (
-                AgentPatch.model_validate(worker.spec.model_dump(mode="json"))
-                if worker.source_agent
-                else None
-            )
+            # The digest check below proves the result is still the admitted worker.
+            overrides = clone_overrides(worker.spec) if worker.source_agent else None
             async with self.deps.sessionmaker.begin() as db:
 
                 async def validate_origin(*_args: object) -> None:
@@ -372,6 +368,15 @@ class ProviderPreparationRequest:
                 scope=worker.permissions.fleet.scope,
                 deadline=bound,
             )
+
+
+def clone_overrides(spec: AgentSpec) -> AgentPatch:
+    """The sparse patch that re-derives an admitted clone worker from its pinned source.
+
+    Its native controls (extensions) come from that source, never from an override,
+    and an AgentPatch keys them by namespace, so the spec's list form is left out.
+    """
+    return AgentPatch.model_validate(spec.model_dump(mode="json", exclude={"extensions"}))
 
 
 ProviderPreparation = Callable[[ProviderPreparationRequest], Awaitable[PreparedTurn]]

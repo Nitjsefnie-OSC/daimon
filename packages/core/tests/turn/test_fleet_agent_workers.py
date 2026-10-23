@@ -24,6 +24,7 @@ from daimon.core.neutral_resources import (
 from daimon.core.sessions import project_session_resources
 from daimon.core.stores import agent_memory_stores
 from daimon.testing.ma_models import ma_agent, ma_environment
+from mux.contracts.ids import ModelRef
 from mux.testing.drivers.anthropic.ma_transport import ScriptedReply, ScriptedTransport
 
 from ..test_agent_backend import owned as owned
@@ -34,7 +35,15 @@ RESEARCHER_SYSTEM = "You are the research agent. Cite sources."
 
 
 async def capture_agent(
-    owned, scope, *, ma_id, name, model="claude-haiku-5-5", tools=(), memory_store=True
+    owned,
+    scope,
+    *,
+    ma_id,
+    name,
+    model="claude-haiku-5-5",
+    tools=(),
+    memory_store=True,
+    cli=False,
 ):
     """Capture another on-server agent the way the root's source is captured."""
     _, identity, actor, sessions = owned
@@ -53,7 +62,9 @@ async def capture_agent(
                 "input_schema": {"type": "object", "properties": {}},
             },
             *tools,
-        ],
+        ]
+        if not cli
+        else list(tools),
     )
     trace = ScriptedTransport()
     trace.queue(
@@ -169,7 +180,6 @@ async def test_a_legacy_grant_never_lets_workers_run_as_another_agent(captured, 
 
 
 async def test_a_worker_agent_runs_on_its_own_configured_model_not_the_grants_list(captured, owned):
-    from mux.contracts.ids import ModelRef
 
     _, admission, grant, fleet, policy, _ = captured
     root = compose(captured)
@@ -255,6 +265,7 @@ def ports_for(worker_root, researcher):
 
     ports = create_autospec(FleetPorts, instance=True)
     ports.agent_worker_parent.return_value = worker_root
+    ports.agent_consented_drops.return_value = ()
     ports.capture_source.return_value = researcher
     ports.read_clone.return_value = researcher.source
     admitted = []
@@ -310,7 +321,6 @@ async def test_spawn_as_agent_admits_that_agent_with_the_task_after_its_own_prom
 
 async def test_spawn_as_a_gemini_configured_agent_runs_on_that_agents_model(captured, owned):
     from daimon.core.fleet_orchestration import FleetOrchestrator
-    from mux.contracts.ids import ModelRef
 
     _, admission, grant, fleet, policy, _ = captured
     root = compose(captured)
@@ -353,7 +363,6 @@ async def test_spawn_as_an_argon_agent_runs_only_on_an_envelope_its_budget_cover
 ):
     from daimon.core.fleet_orchestration import FleetOrchestrator
     from daimon.core.neutral_resources import gemini_worker_cost_usd
-    from mux.contracts.ids import ModelRef
 
     from .test_fleet_source_permissions import _in_argon_window
 
@@ -848,3 +857,244 @@ async def test_no_memory_store_is_created_for_an_agent_the_requester_may_not_use
     assert provisions == []
     # The grant check comes before any admission work; the policy check is the real one's.
     assert len(decided) == (0 if refusal == "grant" else 1)
+
+
+# What `daimon agents create` makes and Managed Agents reads back: the base toolset
+# with resolved controls, and a model object carrying its speed (a native control).
+CLI_TOOLSET = {
+    "type": "agent_toolset_20260401",
+    "configs": [
+        {"name": name, "enabled": True, "permission_policy": {"type": "always_allow"}}
+        for name in ("bash", "read", "edit", "grep", "glob", "write")
+    ],
+    "default_config": {"enabled": False, "permission_policy": {"type": "always_allow"}},
+}
+CLI_MODEL = {"id": "claude-sonnet-5-5", "speed": "standard"}
+
+
+async def test_a_cli_created_agent_worker_rederives_exactly_at_dispatch(captured, owned):
+    """r14: fleet-claude was admitted, then refused at dispatch with a ValidationError."""
+    from daimon.core.fleet_orchestration import FleetOrchestrator
+    from daimon.core.turn.prepare import clone_overrides
+    from mux.contracts.config import BackendConfig
+    from mux.contracts.resources import AgentPatch
+    from mux.profiles import backend_selection
+    from pydantic import ValidationError
+
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    claude, actual = await capture_agent(
+        owned,
+        fleet.scope,
+        ma_id="fleet-claude-source",
+        name="fleet-claude",
+        model=CLI_MODEL,
+        tools=(CLI_TOOLSET,),
+        cli=True,
+    )
+    assert claude.effective_spec is not None and claude.effective_spec.extensions
+    as_claude = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    # Its own model (Sonnet) runs though the grant doesn't list it.
+    worker_root = agent_worker_permissions(
+        root, claude, as_claude, any_agent(grant), policy=policy, now=NOW
+    )
+    ports, admitted, Admitted = ports_for(worker_root, claude)
+    with pytest.raises(Admitted):
+        await FleetOrchestrator(ports).spawn(
+            root,
+            policy,
+            now=NOW,
+            operation_key="C1",
+            role="claude",
+            backend=BackendConfig.model_validate(backend_selection("anthropic").model_dump()),
+            limits=root.limits,
+            as_agent="fleet-claude",
+            task="Pick one database.",
+        )
+    ((parent, resolved),) = admitted
+    assert resolved.spec.extensions  # the agent's own speed travels with it
+    # The old dispatch read passed the spec's list of extensions as a patch: this
+    # is the ValidationError r14 hit.
+    with pytest.raises(ValidationError):
+        AgentPatch.model_validate(resolved.spec.model_dump(mode="json"))
+    # Dispatch re-derives the worker from its pinned source exactly (for_worker).
+    again = resolve_worker_spec(
+        parent,
+        claude.source,
+        overrides=clone_overrides(resolved.spec),
+        policy=policy,
+        now=NOW,
+        backend=BackendConfig.model_validate(
+            resolved.backend.model_dump(include=set(BackendConfig.model_fields))
+        ),
+        resources=resolved.resources,
+        environment=resolved.environment,
+        limits=resolved.limits,
+        captured_source=claude,
+    )
+    assert again.digest == resolved.digest
+
+
+@pytest.mark.parametrize("backend", ["gemini", "openai"])
+async def test_a_foreign_backend_agent_worker_declares_what_it_cannot_carry(
+    captured, owned, backend
+):
+    """r14: fleet-openai and fleet-gemini refused with 'worker tools: unsupported'."""
+    from daimon.core.fleet_orchestration import FleetOrchestrator
+
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    agent, actual = await capture_agent(
+        owned,
+        fleet.scope,
+        ma_id=f"fleet-{backend}-source",
+        name=f"fleet-{backend}",
+        model=CLI_MODEL,
+        tools=(CLI_TOOLSET,),
+        cli=True,
+    )
+    assert agent.effective_spec is not None
+    as_agent = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    on = policy.model_copy(update={"enabled_backends": ("anthropic", "openai", "gemini")})
+    worker_root = agent_worker_permissions(
+        root,
+        agent,
+        as_agent,
+        any_agent(grant),
+        policy=on,
+        now=NOW,
+        backend=agent_worker_backend(agent.effective_spec, backend, None),
+    )
+    ports, admitted, Admitted = ports_for(worker_root, agent)
+    # The losses its owner accepted when switching it to this backend.
+    ports.agent_consented_drops.return_value = ("skills",)
+    with pytest.raises(Admitted):
+        await FleetOrchestrator(ports).spawn(
+            root,
+            on,
+            now=NOW,
+            operation_key="F1",
+            role=backend,
+            backend=None,
+            limits=root.limits,
+            as_agent=f"fleet-{backend}",
+            task="Pick one database.",
+        )
+    ((_, resolved),) = admitted
+    assert resolved.spec.model.provider == backend
+    drops = set(resolved.spec.declared_drops)
+    # Accepted, foreign-provider and model-control losses, plus the native toolset
+    # that this provider's worker can't carry: declared, never silently widened.
+    assert {"skills", "mcp", "memory", "sandbox", "model_controls", "tools"} <= drops
+    assert not resolved.spec.tools or all(t.permission == "auto" for t in resolved.spec.tools)
+    assert RESEARCHER_SYSTEM in resolved.spec.system
+    # Dispatch re-derives exactly this worker, declared losses included (for_worker).
+    from daimon.core.turn.prepare import clone_overrides
+    from mux.contracts.config import BackendConfig
+
+    again = resolve_worker_spec(
+        worker_root,
+        agent.source,
+        overrides=clone_overrides(resolved.spec),
+        policy=on,
+        now=NOW,
+        backend=BackendConfig.model_validate(
+            resolved.backend.model_dump(include=set(BackendConfig.model_fields))
+        ),
+        resources=resolved.resources,
+        environment=resolved.environment,
+        limits=resolved.limits,
+        captured_source=agent,
+    )
+    assert again.digest == resolved.digest
+
+
+@pytest.mark.parametrize("backend", ["gemini", "openai"])
+async def test_an_agent_with_an_ask_tool_is_refused_on_a_foreign_backend_too(
+    captured, owned, backend
+):
+    """Its ask tool is never dropped silently to fit another provider."""
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    gated = {
+        **CLI_TOOLSET,
+        "configs": [
+            {**config, "permission_policy": {"type": "always_ask"}}
+            if config["name"] == "bash"
+            else config
+            for config in CLI_TOOLSET["configs"]
+        ],
+    }
+    agent, actual = await capture_agent(
+        owned,
+        fleet.scope,
+        ma_id=f"gated-{backend}-source",
+        name=f"gated-{backend}",
+        model=CLI_MODEL,
+        tools=(gated,),
+        cli=True,
+    )
+    assert agent.effective_spec is not None
+    as_agent = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    on = policy.model_copy(update={"enabled_backends": ("anthropic", "openai", "gemini")})
+    with pytest.raises(WorkerSpecRefused, match="tools: unsupported"):
+        agent_worker_permissions(
+            root,
+            agent,
+            as_agent,
+            any_agent(grant),
+            policy=on,
+            now=NOW,
+            backend=agent_worker_backend(agent.effective_spec, backend, None),
+        )
+
+
+async def test_the_root_may_declare_more_losses_for_an_agent_worker_but_never_gains(
+    captured, owned
+):
+    from daimon.core.fleet_orchestration import FleetOrchestrator, FleetRefused
+    from mux.contracts.config import BackendConfig
+    from mux.profiles import backend_selection
+
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    researcher, actual = await capture_agent(
+        owned, fleet.scope, ma_id="researcher-source", name="researcher"
+    )
+    as_researcher = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    worker_root = agent_worker_permissions(
+        root, researcher, as_researcher, any_agent(grant), policy=policy, now=NOW
+    )
+    ports, admitted, Admitted = ports_for(worker_root, researcher)
+    spawn = dict(
+        now=NOW,
+        operation_key="D1",
+        role="research",
+        backend=BackendConfig.model_validate(backend_selection("anthropic").model_dump()),
+        limits=root.limits,
+        as_agent="researcher",
+        task="Summarize.",
+    )
+    with pytest.raises(Admitted):
+        await FleetOrchestrator(ports).spawn(root, policy, as_agent_drops=("tools",), **spawn)
+    ((_, resolved),) = admitted
+    assert "tools" in resolved.spec.declared_drops and not resolved.spec.tools
+    # Only whole-capability losses; nothing that names a tool to keep.
+    with pytest.raises(FleetRefused, match="worker_agent_drops_unsupported"):
+        await FleetOrchestrator(ports).spawn(
+            root, policy, as_agent_drops=("mcp_tool:x:y",), **spawn
+        )
+
+
+def test_a_worker_validation_failure_logs_its_fields_never_its_values():
+    from daimon.core.fleet_orchestration import _validation_categories
+    from mux.contracts.resources import AgentPatch
+    from pydantic import ValidationError
+
+    secret = "sk-not-for-logs"
+    with pytest.raises(ValidationError) as failure:
+        AgentPatch.model_validate({"extensions": [{"namespace": secret}], "name": 7})
+    categories = _validation_categories(failure.value)
+    assert categories == ["extensions:dict_type", "name:string_type"]
+    assert secret not in repr(categories)
+    assert _validation_categories(RuntimeError(secret)) is None
