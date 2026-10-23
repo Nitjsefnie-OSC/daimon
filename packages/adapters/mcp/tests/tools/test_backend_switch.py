@@ -863,7 +863,14 @@ def test_a_provider_word_for_another_provider_is_refused():
 
 
 @pytest.mark.parametrize(
-    ("backend", "word"), [("openai", "GPT"), ("openai", "OpenAI"), ("gemini", "Gemini")]
+    ("backend", "word"),
+    [
+        ("openai", "GPT"),
+        ("openai", "OpenAI"),
+        ("openai", "ChatGPT"),
+        ("gemini", "Gemini"),
+        ("gemini", "Google"),
+    ],
 )
 def test_a_provider_word_alone_means_the_provider_default(backend, word):
     from daimon.adapters.mcp.tools.agents import _resolve_agent_model

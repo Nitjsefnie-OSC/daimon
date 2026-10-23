@@ -472,6 +472,9 @@ def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
                     "the agent on a Claude model such as sonnet, then switch it to "
                     f"{provider_name(other.provider)} ({other.id}). Nothing was created yet."
                 ) from exc
+        if "could mean" not in str(exc):
+            # Unknown (not ambiguous): the refusal lists what this deployment offers.
+            _reject_unknown_model(model)
         raise ToolError(str(exc)) from exc
     return resolved if isinstance(model, str) else {**model, "id": resolved}
 
@@ -1235,8 +1238,9 @@ def _provider_words() -> dict[str, Provider]:
     """
     from daimon.core.agent_model_names import agent_catalog
     from daimon.core.turn.notices import provider_name
+    from mux.profiles import PROVIDER_ALIASES
 
-    words: dict[str, Provider] = {}
+    words: dict[str, Provider] = dict(PROVIDER_ALIASES)
     for entry in agent_catalog():
         provider = entry.model.provider
         for word in (provider, provider_name(provider), entry.model.id.split("-")[0]):
