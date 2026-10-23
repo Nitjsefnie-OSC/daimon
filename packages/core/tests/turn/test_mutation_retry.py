@@ -374,7 +374,7 @@ async def test_cancellation_during_the_backoff_wait_stops_without_another_send(
     assert time.monotonic() - started < 2.0
     transport.assert_consumed()
     assert len(transport.requests) == 1
-    assert "retry abandoned: the turn was cancelled" in notes(caught.value)
+    assert "retry abandoned: cancelled" in notes(caught.value)
     assert await statuses(store) == ["failed", "pending", None, None, None, None]
 
 
@@ -706,7 +706,7 @@ async def test_a_cancel_after_the_backoff_but_before_the_send_never_sends_a_tool
     transport.assert_consumed()
     # The approval reached the provider once, as the refused attempt 0, never again.
     assert [request.method for request in transport.requests] == ["POST"]
-    assert "retry abandoned: the turn was cancelled" in notes(caught.value)
+    assert "retry abandoned: cancelled" in notes(caught.value)
     kind = _send_kind(neutral_inputs(DECISIONS))
     assert await statuses(store, kind=kind) == ["failed", retry_status, None, None, None, None]
     if retry_status == "failed":

@@ -471,7 +471,7 @@ class TurnPersistence:
         )
         seen = f"{failure.delivery} ({failure.reason})" if failure is not None else "unclassified"
         if stop == "cancelled":
-            note = f"{kind}: attempt {attempt} {seen}; retry abandoned: the turn was cancelled"
+            note = f"{kind}: attempt {attempt} {seen}; retry abandoned: cancelled"
         else:
             note = (
                 f"{kind}: attempt {attempt} of {self._retry.policy.max_attempts} {seen}; "
