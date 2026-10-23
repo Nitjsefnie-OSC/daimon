@@ -7,6 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- Explain queued mentions once a previous turn has run for three minutes on Discord,
+  Slack and Teams; bound upstream status checks and other non-streaming turn calls.
+
 - Hide saved routine triggers/results from MCP, CLI and Discord controls when
   their source or destination becomes reserved for recruitment, including
   unknown legacy provenance. Restore this bot's `/recruitment` status, refresh,

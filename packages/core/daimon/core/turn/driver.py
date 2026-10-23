@@ -476,7 +476,27 @@ async def _send_decision_batch(
 # connection error — the driver asks MA for the session's status before
 # deciding anything, so it does not consume the bounded 2-attempt retry
 # budget reserved for genuine connection loss.
-_CONNECTION_LOST = (_anthropic.APIConnectionError, httpx.RemoteProtocolError, TurnConnectionLost)
+_CONNECTION_LOST = (
+    _anthropic.APIConnectionError,
+    httpx.RemoteProtocolError,
+    TurnConnectionLost,
+    TimeoutError,
+)
+_STATUS_TIMEOUT_S = 60.0
+
+
+async def _check_status(io: TurnIO) -> str:
+    """A failed liveness probe is not evidence of completion; retry it briefly."""
+    async for check in AsyncRetrying(
+        stop=stop_after_attempt(2),
+        retry=retry_if_exception_type(_CONNECTION_LOST),
+        reraise=True,
+    ):
+        with check:
+            async with asyncio.timeout(_STATUS_TIMEOUT_S):
+                return await io.status()
+    raise AssertionError("status retry loop ended without a result")
+
 
 # Guarded single-render: no-op if `diff(prev, state)` is empty; else calls
 # `lifecycle.on_render(state)` and advances the render anchor. Finalizers
@@ -1119,7 +1139,7 @@ async def _pump(
                             )
                     break  # a terminal event was found — exit the outer loop too
                 except _EventlessCycle as cycle:
-                    status = await io.status()
+                    status = await _check_status(io)
                     if status in {"running", "rescheduling"}:
                         log.info(
                             "turn.eventless_cycle",

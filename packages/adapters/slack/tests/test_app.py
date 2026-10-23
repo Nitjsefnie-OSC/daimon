@@ -7393,3 +7393,32 @@ async def test_a_failed_switch_read_drops_the_typed_bot_name_quietly(
     assert "plain_text_mention.lookup_failed" in [entry["event"] for entry in logs], (
         "the failure must be logged"
     )
+
+
+async def test_long_turn_queue_notice_posts_once() -> None:
+    from daimon.core.turn.thread_queue import QUEUE_NOTICE, QUEUE_NOTICE_AFTER_S, HeldThreads
+
+    app = _make_app()
+    now = [0.0]
+    app._processing = HeldThreads(clock=lambda: now[0])
+    app._processing.add(("T1", "C1", "100"))
+    client = MagicMock()
+    client.reactions_add = AsyncMock()
+    client.chat_postMessage = AsyncMock()
+    with patch("daimon.adapters.slack.app.get_turn_cap", new=AsyncMock(return_value=3)):
+        for ts, elapsed in [("101", 0.0), ("102", QUEUE_NOTICE_AFTER_S), ("103", 999.0)]:
+            now[0] = elapsed
+            await app._orchestrate(
+                {"ts": ts, "thread_ts": "100", "user": "U1", "text": "next"},
+                team_id="T1",
+                channel="C1",
+                event_ts=ts,
+                web_client=client,
+                tenant_id=uuid.uuid4(),
+            )
+            if ts == "101":
+                client.chat_postMessage.assert_not_awaited()
+    client.chat_postMessage.assert_awaited_once_with(
+        channel="C1", thread_ts="100", text=QUEUE_NOTICE
+    )
+    assert client.reactions_add.await_count == 3

@@ -515,3 +515,56 @@ async def test_connection_error_regression_still_exhausts_at_two_attempts() -> N
     assert fa.beta.sessions.retrieve_calls == [], (
         "connection-error budget must never consult the status check"
     )
+
+
+@pytest.mark.parametrize("recovers", [True, False])
+async def test_hung_status_is_bounded_and_retried(
+    monkeypatch: pytest.MonkeyPatch, recovers: bool
+) -> None:
+    from daimon.core.turn import driver
+    from daimon.core.turn.io import LegacyTurnIO
+
+    monkeypatch.setattr(driver, "_STATUS_TIMEOUT_S", 0.01)
+    fa = FakeAnthropic()
+    done = make_status_idle(event_id="sevt_done", stop_reason=make_end_turn())
+    fa.beta.sessions.events.stream_scripts = [[], [YieldEvent(done)]]
+    calls = 0
+    cancelled = 0
+
+    async def status(self: LegacyTurnIO) -> str:
+        nonlocal calls, cancelled
+        calls += 1
+        if recovers and calls == 2:
+            return "running"
+        try:
+            await asyncio.Event().wait()
+        finally:
+            cancelled += 1
+        raise AssertionError("the status call must be cancelled")
+
+    monkeypatch.setattr(LegacyTurnIO, "status", status)
+    lc = RecordingLifecycle()
+    final = await asyncio.wait_for(
+        run_turn(
+            privacy=TurnPrivacy("discord", RecruitmentSettings()),
+            anthropic=_cast(fa),
+            session_id="sess_1",
+            user_message="hi",
+            lifecycle=lc,
+            cancel=asyncio.Event(),
+            render_interval_s=0.001,
+            now=_now,
+            billing=_EXEMPT,
+        ),
+        timeout=1,
+    )
+    assert calls == 2
+    assert cancelled == (1 if recovers else 2)
+    if recovers:
+        assert final.error is None
+        assert lc.reconnects == ["clean_close"]
+        assert fa.beta.sessions.events.stream_calls == 2
+    else:
+        assert final.error is not None and final.error.kind == "connection_lost"
+        assert len(lc.terminal_failures) == 1
+        assert fa.beta.sessions.events.stream_calls == 1

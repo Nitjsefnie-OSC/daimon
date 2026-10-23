@@ -309,6 +309,12 @@ generic session records retain their validation. Turn seal stamping uses this
 read and the existing metadata-only update port, with no extra provider request.
 Prepared legacy replay and interruption pass the caller's admitted scope to the
 private transport while preserving SDK traffic and recovery behavior.
+
+The Anthropic legacy turn transport bounds non-streaming calls (status, history,
+send and archive) to 60 seconds including retries and pagination. Its SDK client
+copy uses a 30-second request timeout and at most two retries; claimed mutations still
+use zero retries. Live event streams retain their separate read timeout.
+
 The Anthropic environment driver exposes a scoped create-and-discard edge for legacy environment forks that ignored the SDK reply. It validates the request configuration and tenant authorization without decoding unused response fields; generic Environment records retain their existing validation.
 
 MCP agent chat and session inspection use tenant/account scopes derived from

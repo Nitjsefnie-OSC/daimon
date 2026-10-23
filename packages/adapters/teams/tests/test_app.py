@@ -1168,3 +1168,28 @@ async def test_a_failed_switch_read_leaves_a_typed_bot_name_unaddressed(
     events = [entry["event"] for entry in logs]
     assert "plain_text_mention.lookup_failed" in events, "the failure must be logged"
     assert "teams.task_failed" not in events, "the failure must not escape the task"
+
+
+async def test_long_turn_queue_notice_posts_once(
+    db_session_factory: async_sessionmaker[AsyncSession],
+) -> None:
+    from daimon.core.turn.thread_queue import QUEUE_NOTICE, QUEUE_NOTICE_AFTER_S, HeldThreads
+
+    teams = _app(db_session_factory, FakeSender())
+    now = [0.0]
+    teams._processing = HeldThreads(clock=lambda: now[0])
+    inbound = make_inbound("next")
+    teams._processing.add(inbound.conversation_id)
+    with (
+        patch.object(teams, "_turn_cap", new=AsyncMock(return_value=3)),
+        patch.object(teams, "_may_start_turn", new=AsyncMock(return_value=True)),
+        patch.object(teams, "_say", new=AsyncMock()) as say,
+        patch.object(teams._reactions, "mark_queued") as reaction,
+    ):
+        await teams._orchestrate(inbound, TENANT)
+        say.assert_not_awaited()
+        now[0] = QUEUE_NOTICE_AFTER_S
+        await teams._orchestrate(inbound, TENANT)
+        await teams._orchestrate(inbound, TENANT)
+        say.assert_awaited_once_with(inbound, QUEUE_NOTICE)
+        assert reaction.call_count == 3
