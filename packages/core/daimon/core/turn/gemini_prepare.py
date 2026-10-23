@@ -63,6 +63,17 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
         raise UnsupportedCapability(("daimon_tool_rules",), PROFILE)
     from daimon.core.turn.runtime_manifest import keeps_memory_through_tools
 
+    def memory_through_tools() -> bool:
+        # Only a template plan's turns carry a memory grant, as the deployment requires.
+        from daimon.core.turn.gemini_deployment import load_gemini_deployment
+
+        return (
+            target is not None
+            and admission.backend_revision_origin == "agent"
+            and keeps_memory_through_tools(target)
+            and load_gemini_deployment(request).template_capabilities == "mcp"
+        )
+
     target = request.worker.spec if request.worker is not None else request.target_spec
     # Shared ownership, seals, mounts and transfer require a separate complete
     # deployment adapter. Never silently drop those obligations in this slice.
@@ -77,9 +88,7 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
             admission.memory_read_only
             and (
                 target is None
-                or (
-                    "memory" not in target.declared_drops and not keeps_memory_through_tools(target)
-                )
+                or ("memory" not in target.declared_drops and not memory_through_tools())
             )
         )
         or admission.asks_before_publishing

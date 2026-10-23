@@ -37,7 +37,7 @@ class MemoryContent:
 
 async def _grant(runtime: McpRuntime, auth: AuthIdentity) -> TurnMemoryGrantRow:
     if not auth.no_confirmation_surface or auth.token_jti is None:
-        raise ToolError("Memory tools are only for a provider turn's own credential.")
+        raise ToolError("Memory isn't available in this conversation.")
     try:
         return await memory_tools.turn_grant(
             runtime.session_factory,

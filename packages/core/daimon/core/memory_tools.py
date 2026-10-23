@@ -298,7 +298,11 @@ async def write_memory_at(
             try:
                 await write_memory(anthropic, store_id, native, previous, scope=_scope(grant))
             except Exception:
-                _log.warning("memory_tools.restore_failed", path=native)
+                # Never the model-chosen path itself: a digest identifies it.
+                _log.warning(
+                    "memory_tools.restore_failed",
+                    path_sha256=hashlib.sha256(native.encode()).hexdigest()[:16],
+                )
         if isinstance(error, APIStatusError) and error.status_code in (409, 412):
             raise MemoryRefused("Another writer saved that memory first. Read it again.") from error
         raise
