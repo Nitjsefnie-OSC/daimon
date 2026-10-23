@@ -1497,23 +1497,21 @@ async def capture_backend_source(
 
     try:
         async with asyncio.timeout(30):
-            if (
-                context.tenant_id != source.tenant_id
-                or context.account_id is None
-                or source.source is None
-            ):
-                raise channel_backend.AgentBackendRefused("source_unavailable")
+            if context.tenant_id != source.tenant_id or context.account_id is None:
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
+            if source.source is None:
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="source")
             async with deps.sessionmaker() as db:
                 account = await get_account_with_tenant(db, account_id=context.account_id)
                 policy = await load_access_policy(db, tenant_id=context.tenant_id)
                 config = await resolve_config(db, context=context, default=deps.deployment_default)
             if account is None or account.tenant_id != context.tenant_id:
-                raise channel_backend.AgentBackendRefused("source_unavailable")
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
             if (
                 subject.platform_user_id is not None
                 and subject.platform_user_id != account.platform_user_id
             ):
-                raise channel_backend.AgentBackendRefused("source_unavailable")
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
             if explicit_target_name is not None:
                 if (
                     context.platform != "cli"
@@ -1522,7 +1520,9 @@ async def capture_backend_source(
                     or is_dm
                     or source.name != explicit_target_name
                 ):
-                    raise channel_backend.AgentBackendRefused("source_unavailable")
+                    raise channel_backend.AgentBackendRefused(
+                        "source_unavailable", detail="identity"
+                    )
                 config = config.model_copy(
                     update={
                         "configuration_target_name": explicit_target_name,
@@ -1543,11 +1543,20 @@ async def capture_backend_source(
                         source.source.ref.id,
                     )
                 )
+            if not target_matches and explicit_target_name is None:
+                # An agent-level setting (provider, model) names any agent the requester
+                # may edit, e.g. a copy that isn't this place's responder: read that
+                # agent's own source rather than refusing every place but its home.
+                return await capture_agent_source(
+                    deps, source, account_id=context.account_id, subject=subject
+                )
             if not target_matches or config.environment_name is None:
-                raise channel_backend.AgentBackendRefused("source_unavailable")
+                raise channel_backend.AgentBackendRefused(
+                    "source_unavailable", detail="environment"
+                )
             label = external_user_id or account.platform_user_id
             if not label:
-                raise channel_backend.AgentBackendRefused("source_unavailable")
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
             scope = resource_scope(
                 tenant_id=str(context.tenant_id),
                 account_id=str(context.account_id),
@@ -1568,7 +1577,9 @@ async def capture_backend_source(
                 name=config.environment_name,
             )
             if environment is None or environment.archived_at is not None:
-                raise channel_backend.AgentBackendRefused("source_unavailable")
+                raise channel_backend.AgentBackendRefused(
+                    "source_unavailable", detail="environment"
+                )
             grant = AdmissionGrant(
                 tenant_id=context.tenant_id,
                 subject=subject,
@@ -1589,7 +1600,7 @@ async def capture_backend_source(
                     != (context.thread_id or context.channel_id, context.channel_id)
                 )
             ):
-                raise channel_backend.AgentBackendRefused("source_unavailable")
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="place")
             seals = limiting_ids_at(policy, channel_id=grant.channel_id, thread_id=grant.thread_id)
             skills = (
                 await turn_channel_skills(
@@ -1649,10 +1660,12 @@ async def capture_backend_source(
                 request, fresh=True, capability_preview=True
             )
             if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
-                raise channel_backend.AgentBackendRefused("source_unavailable")
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="source")
             return captured
-    except (APIError, TimeoutError, ScopeViolation) as error:
+    except (APIError, TimeoutError) as error:
         raise channel_backend.AgentBackendRefused("source_unavailable") from error
+    except ScopeViolation as error:
+        raise channel_backend.AgentBackendRefused("source_unavailable", detail="place") from error
 
 
 async def prepare_worker_agent(
@@ -1746,6 +1759,31 @@ async def prepare_worker_agent(
     if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
         raise channel_backend.AgentBackendRefused("source_unavailable")
     return replace(request, source=captured)
+
+
+async def capture_agent_source(
+    deps: TurnDeps,
+    source: BackendAgent,
+    *,
+    account_id: uuid.UUID,
+    subject: Subject,
+) -> BackendAgent:
+    """Capture the named agent's own source: the requester's tenant and account, no channel.
+
+    The agent-scoped form of `capture_backend_source`, for settings that belong to the
+    agent wherever it answers (fleet config, provider and model).
+    """
+    return await capture_backend_source(
+        deps,
+        source,
+        context=ScopeContext(tenant_id=source.tenant_id, account_id=account_id, platform="cli"),
+        subject=subject,
+        place=Place(),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
+        explicit_target_name=source.name,
+    )
 
 
 async def capture_admitted_backend_source(

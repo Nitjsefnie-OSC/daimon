@@ -168,7 +168,7 @@ async def test_clear_removes_consent_and_revert_reproves_the_original(switching)
 async def test_unknown_or_required_publishing_approval_is_never_dropped(switching, publishing):
     service, agent, actor, _, captured, _ = switching
     captured[0] = captured[0].model_copy(update={"asks_before_publishing": publishing})
-    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+    with pytest.raises(AgentBackendRefused, match="source unsupported"):
         await service.preview(agent, "openai")
     assert await service.current(agent) is None
     assert [row.operation for row in await service.audit(agent.tenant_id)] == ["allowlist"]

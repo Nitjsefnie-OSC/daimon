@@ -97,7 +97,7 @@ from daimon.core.stores.domain import BackendAgent, TurnOriginRow
 from daimon.core.stores.scoped_config_read import is_agent_reachable_in_tenant
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
-from mux.contracts.config import ThreadMode
+from mux.contracts.config import DEFAULT_BACKEND, ThreadMode
 from mux.contracts.ids import Provider
 from mux.contracts.profile import Capability
 from mux.profiles import selectable_models
@@ -451,9 +451,10 @@ def _reject_unknown_model(model: ModelSelection) -> None:
 def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
     """Native agent edits share the alias resolver without changing model controls."""
     choice = model_choice_id(model)
-    if choice in ALLOWED_MODEL_IDS or choice.startswith("claude-"):
+    if choice in ALLOWED_MODEL_IDS:
         return model
-    from daimon.core.agent_model_names import agent_catalog, resolve_model
+    from daimon.core.agent_model_names import agent_catalog, model_name, resolve_model
+    from daimon.core.turn.notices import provider_name
     from mux.profiles import MANAGED_AGENTS
 
     choices = tuple(
@@ -462,6 +463,18 @@ def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
     try:
         resolved = resolve_model(choice, available=choices).id
     except ValueError as exc:
+        # Another provider's model: say how to get there instead of a dead end.
+        with contextlib.suppress(ValueError):
+            other = resolve_model(choice)
+            if other.provider != MANAGED_AGENTS.provider:
+                raise ToolError(
+                    f"{model_name(other)} is a {provider_name(other.provider)} model. Create "
+                    "the agent on a Claude model such as sonnet, then switch it to "
+                    f"{provider_name(other.provider)} ({other.id}). Nothing was created yet."
+                ) from exc
+        if "could mean" not in str(exc):
+            # Unknown (not ambiguous): the refusal lists what this deployment offers.
+            _reject_unknown_model(model)
         raise ToolError(str(exc)) from exc
     return resolved if isinstance(model, str) else {**model, "id": resolved}
 
@@ -1054,7 +1067,7 @@ async def _capture_backend_source(
         )
         is not None
     ):
-        raise channel_backend.AgentBackendRefused("source_unavailable")
+        raise channel_backend.AgentBackendRefused("source_context_unavailable")
     deps = build_turn_deps(
         runtime.settings,
         runtime.client,
@@ -1081,7 +1094,176 @@ async def _capture_backend_source(
     )
 
 
+#: What a target provider can't carry, in plain words (closed obligation labels).
+_MISSING_WORDS: Final[Mapping[str, str]] = {
+    "credentials": "a saved key that one of its kept connections needs",
+    "instructions": "instructions that can't be carried over unchanged",
+    "source_definition": "a setting or attachment that provider can't represent",
+    "source_context": "setup that couldn't be read completely",
+    "source_representation": "a saved version for that provider that is out of date",
+    "tools": "tools that must ask before publishing",
+    "model_options": "model options that provider doesn't take",
+}
+
+#: Why a source read failed for a reason that a retry won't fix.
+_SOURCE_DETAIL_WORDS: Final[Mapping[str, str]] = {
+    "identity": "this request doesn't come from the account that can change it here",
+    "source": "its saved setup doesn't match the agent that's live now. Ask its owner to "
+    "check it still exists",
+    "environment": "its working environment is missing or archived",
+    "place": "this conversation's channel couldn't be verified",
+}
+
+
+def _backend_switch_refusal(
+    exc: DaimonError | ValidationError,
+    agent_name: str,
+    target: Provider | None,
+    auth: AuthIdentity,
+    *,
+    with_code: bool = False,
+    current: Provider | None = None,
+) -> ToolError:
+    """The real reason a provider change was refused, and what the requester can do.
+
+    ``with_code`` appends the stable reason for direct API and coding-tool callers.
+    Never shows an exception type or an internal string.
+    """
+    from daimon.core.turn.notices import provider_name
+
+    refused = exc if isinstance(exc, channel_backend.AgentBackendRefused) else None
+    reason = (
+        refused.reason
+        if refused is not None
+        else "invalid_request"
+        if isinstance(exc, ValidationError)
+        else "backend_unsupported"
+        if isinstance(exc, channel_backend.BackendUnsupported)
+        else "internal"
+    )
+    log.warning(
+        "agent_backend_switch_refused",
+        agent=agent_name,
+        target=target,
+        reason=reason,
+        error_type=type(exc).__name__,
+        missing=list(getattr(refused, "missing", ())),
+        detail=getattr(refused, "detail", None),
+    )
+    provider = provider_name(target or getattr(refused, "provider", None))
+    admin = admin_noun(auth.platform)
+    space = space_noun(auth.platform)
+    if reason == "backend_unsupported":
+        # Only the copy written for people passes through; internal labels never do.
+        said = str(exc)
+        text = (
+            said
+            if said.endswith(".") and " " in said and "_" not in said
+            else f"{provider} can't run here right now. Pick another, or ask whoever runs Daimon."
+        )
+    elif reason == "source_unsupported":
+        missing: tuple[str, ...] = getattr(refused, "missing", ())
+        things = [_MISSING_WORDS[item] for item in missing if item in _MISSING_WORDS]
+        text = (
+            f"'{agent_name}' can't move to {provider}: it has "
+            + ("; ".join(things) if things else "something that provider can't carry")
+            + ". Its owner can remove that from the agent, or keep it on "
+            + (provider_name(current) if current is not None else "its current provider")
+            + "."
+        )
+    elif reason == "source_unavailable":
+        detail: str | None = getattr(refused, "detail", None)
+        text = (
+            f"I can't change '{agent_name}' from here: {_SOURCE_DETAIL_WORDS[detail]}."
+            if detail in _SOURCE_DETAIL_WORDS
+            else f"I couldn't read '{agent_name}''s current setup (the provider didn't "
+            "answer in time). Try again in a minute."
+        )
+    else:
+        text = {
+            "agent_not_found": f"There's no agent named '{agent_name}' here. Ask me to list them.",
+            "tenant_mismatch": (
+                f"'{agent_name}' belongs to another {space} and can't be changed here."
+            ),
+            "owner_or_admin_required": f"Changing '{agent_name}' needs its owner or {admin}.",
+            "admin_required": f"This change needs {admin}.",
+            "actor_not_found": (
+                "I couldn't match you to an account here. Send a message first, then retry."
+            ),
+            "admin_required_for_shared_threads": f"Sharing threads in every channel needs {admin}.",
+            "feature_disabled": f"Choosing a model provider is turned off. Ask {admin}.",
+            "backend_not_allowed": (
+                f"{provider} isn't allowed in this {space}. Ask {admin} to allow it."
+            ),
+            "model_not_selectable": f"That model isn't available on {provider}. Pick another.",
+            "profile_not_selectable": f"That model isn't available on {provider}. Pick another.",
+            "source_context_unavailable": (
+                "I can't confirm a change from this conversation. "
+                "Ask in a public channel or thread where I answer."
+            ),
+            "selfhosted_requires_channel_configuration": (
+                f"A self-hosted model is set per channel, not per agent. Ask {admin}."
+            ),
+            "stale_preview": f"'{agent_name}' changed since the preview. Ask me to preview again.",
+            "stale_revision": (
+                f"'{agent_name}''s provider changed since the preview. Ask me to preview again."
+            ),
+            "re_confirm": "This change needs a fresh confirmation. Ask me to preview again.",
+            "drops_required": "The confirmation didn't accept what this switch drops. "
+            "Ask me to preview again.",
+            "drops_mismatch": "What this switch drops changed. Ask me to preview again.",
+            "revision_busy": "Another change to this agent is in progress. Retry in a moment.",
+            "invalid_request": "That request didn't match the preview. Ask me to preview again.",
+        }.get(
+            reason,
+            "Something on Daimon's side refused this change. "
+            "If it repeats, tell whoever runs Daimon.",
+        )
+    return ToolError(f"{text} Nothing changed." + (f" [{reason}]" if with_code else ""))
+
+
+async def _provider_now(
+    service: channel_backend.AgentBackendService, agent: BackendAgent
+) -> Provider:
+    """The provider the agent runs on now: its setting, else the default."""
+    setting = await service.current(agent)
+    return (setting.backend if setting is not None else None) or DEFAULT_BACKEND
+
+
+def _provider_words() -> dict[str, Provider]:
+    """A provider word alone ("switch to GPT") means that provider's default model.
+
+    From the model catalog: each provider's id, display name and model family
+    ("claude", "gpt", "gemini"), so no provider is written out here.
+    """
+    from daimon.core.agent_model_names import agent_catalog
+    from daimon.core.turn.notices import provider_name
+    from mux.profiles import PROVIDER_ALIASES
+
+    words: dict[str, Provider] = dict(PROVIDER_ALIASES)
+    for entry in agent_catalog():
+        provider = entry.model.provider
+        for word in (provider, provider_name(provider), entry.model.id.split("-")[0]):
+            words[word.lower()] = provider
+    return words
+
+
 def _resolve_agent_model(backend: Provider | None, model: str | None) -> str | None:
+    word = model.strip().lower() if model is not None else None
+    if word == "default":
+        return None
+    named = _provider_words().get(word or "")
+    if named is not None:
+        # No provider means clearing to the default provider.
+        meant = backend or DEFAULT_BACKEND
+        if named != meant:
+            from daimon.core.turn.notices import provider_name
+
+            raise ToolError(
+                f"'{model}' is {provider_name(named)}, but this switch names "
+                f"{provider_name(meant)}. Nothing changed. Say which one you want."
+            )
+        return None
     if model is None or backend is None or model in selectable_models(backend):
         return model
     from daimon.core.agent_model_names import agent_catalog, resolve_model
@@ -1149,6 +1331,7 @@ async def _set_agent_backend_impl(
         account_id=auth.account_id,
         subject=mcp_subject(auth, is_admin=auth.is_admin),
     )
+    on_now: Provider | None = None
     try:
         agent = await channel_backend.load_backend_agent(
             runtime.client,
@@ -1157,6 +1340,7 @@ async def _set_agent_backend_impl(
             agent_name=name,
         )
         await _require_agent_editor(service, agent, actor, auth)
+        on_now = await _provider_now(service, agent)
         preview = await service.preview(agent, backend, model)
         if preview_only:
             return {
@@ -1183,8 +1367,10 @@ async def _set_agent_backend_impl(
             revision = await service.set_backend(
                 current, backend, local, actor, expected_preview_digest=preview.digest, model=model
             )
-    except channel_backend.AgentBackendRefused as exc:
-        raise ToolError(str(exc)) from exc
+    except (channel_backend.AgentBackendRefused, channel_backend.BackendUnsupported) as exc:
+        raise _backend_switch_refusal(
+            exc, name, backend, auth, with_code=True, current=on_now
+        ) from exc
     return {
         "agent": name,
         "backend": revision.backend,
@@ -1275,6 +1461,7 @@ async def _request_agent_backend_switch_impl(
     )
     from pydantic import ValidationError
 
+    on_now: Provider | None = None
     try:
         service = make_backend_service(
             runtime.session_factory,
@@ -1306,6 +1493,7 @@ async def _request_agent_backend_switch_impl(
             ),
             auth,
         )
+        on_now = await _provider_now(service, agent)
         if thread_mode == "shared" and not (auth.is_admin and auth.agent_id is None):
             # The service refuses it too; say so before a card is posted.
             raise ToolError(
@@ -1390,8 +1578,8 @@ async def _request_agent_backend_switch_impl(
             channel_pin=channel_pin,
         )
     except (DaimonError, ValidationError) as exc:
-        raise ToolError(
-            "The preview is unavailable or changed. Preview again; nothing changed."
+        raise _backend_switch_refusal(
+            exc, agent_name, target_backend, auth, current=on_now
         ) from exc
 
 
@@ -1653,8 +1841,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             "switch Researcher to luna". For an Anthropic model change such as
             "set Writer to opus 5.5", use update_agent with that natural model name.
             ``model`` accepts natural names or one of
-            the returned ``models``; omit it for the provider's default. Never ask
-            the person for a model id. Ambiguous names return the choices.
+            the returned ``models``; omit it for the provider's default. A provider
+            alone ("switch to GPT", "to Gemini") means its default: omit ``model`` and
+            preview; never ask which model. Never ask the person for a model id.
+            Ambiguous model names return the choices.
             The switch applies to
             new conversations wherever the agent answers; switching the default agent
             applies to every channel on this server. For "fork agent to gemini", copy the

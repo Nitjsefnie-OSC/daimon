@@ -164,6 +164,7 @@ def accounting_mode_for(provider: Provider) -> AccountingMode:
 
 __all__ = [
     "CONVERSATION_ONLY",
+    "PROVIDER_ALIASES",
     "INLINE_REUSE",
     "MANAGED_AGENTS",
     "LOOP",
@@ -191,6 +192,9 @@ class BackendSelection:
     # Allowed models only a bounded fleet worker runs; an agent or channel never picks them.
     worker_only_models: tuple[str, ...] = ()
 
+
+#: Everyday names for a provider beyond its id, display name and model family.
+PROVIDER_ALIASES: Mapping[str, Provider] = {"chatgpt": "openai", "google": "gemini"}
 
 _BACKEND_SELECTIONS: Mapping[Provider, BackendSelection] = {
     "anthropic": BackendSelection(BackendConfig(), ("per_caller", "shared")),

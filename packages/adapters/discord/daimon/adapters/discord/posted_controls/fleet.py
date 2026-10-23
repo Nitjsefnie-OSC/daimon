@@ -234,6 +234,7 @@ _DROP_WORDS = {
     "model_controls": "its model settings",
     "files": "its files",
     "repository": "its repository",
+    "credentials": "its saved keys",
 }
 
 

@@ -678,7 +678,7 @@ async def test_direct_surfaces_persist_set_clear_and_atomic_audit(persisted, sur
             # chat Confirm card is for), so a target that needs declared drops
             # always refuses here -- never a silent drop, never a guessed
             # accept.
-            with pytest.raises(ToolError, match="drops required"):
+            with pytest.raises(ToolError, match="drops_required"):
                 await mcp_agents._set_agent_backend_impl(
                     rt, auth, "analyst", backend=backend, expected_revision=0
                 )
@@ -802,7 +802,7 @@ async def test_changed_actual_sdk_agent_refuses_direct_write_without_audit(persi
         # Anthropic (same profile as the source): no drops are declared, so
         # this exercises the digest-staleness refusal alone, independent of
         # the drop-consent gate exercised elsewhere.
-        with pytest.raises(ToolError, match="stale preview"):
+        with pytest.raises(ToolError, match="stale_preview"):
             await mcp_agents._set_agent_backend_impl(
                 runtime(persisted, client), auth, "analyst", backend="anthropic"
             )
@@ -911,7 +911,7 @@ async def test_missing_actual_sdk_agent_is_a_typed_mcp_refusal(persisted):
             role=Role.ADMIN,
             is_admin=True,
         )
-        with pytest.raises(ToolError, match="agent not found"):
+        with pytest.raises(ToolError, match="agent_not_found"):
             await mcp_agents._set_agent_backend_impl(
                 runtime(persisted, client), auth, "missing", backend="openai"
             )

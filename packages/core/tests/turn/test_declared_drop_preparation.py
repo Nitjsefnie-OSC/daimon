@@ -413,7 +413,7 @@ async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(consen
     before = await service.audit(source.tenant_id)
     with pytest.raises(AgentBackendRefused) as preview:
         await service.preview(source, "openai")
-    assert preview.value.reason == "source_unavailable"
+    assert preview.value.reason == "source_unsupported"
     with pytest.raises(AgentBackendRefused) as commit:
         await service.set_backend(
             source,
@@ -423,7 +423,7 @@ async def test_unclassified_sdk_source_refuses_preview_commit_and_handoff(consen
             accepted_drops=accepted.declared_drops,
             expected_preview_digest=accepted.preview_digest,
         )
-    assert commit.value.reason == "source_unavailable"
+    assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     with pytest.raises(AdmissionDenied) as refused:
@@ -463,7 +463,7 @@ async def test_unclassified_sdk_environment_refuses_consent_and_handoff(consent_
     before = await service.audit(source.tenant_id)
     with pytest.raises(AgentBackendRefused) as quote:
         await service.preview(source, "openai")
-    assert quote.value.reason == "source_unavailable"
+    assert quote.value.reason == "source_unsupported"
     with pytest.raises(AgentBackendRefused) as commit:
         await service.set_backend(
             source,
@@ -473,7 +473,7 @@ async def test_unclassified_sdk_environment_refuses_consent_and_handoff(consent_
             accepted_drops=accepted.declared_drops,
             expected_preview_digest=accepted.preview_digest,
         )
-    assert commit.value.reason == "source_unavailable"
+    assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     with pytest.raises(AdmissionDenied) as refused:
@@ -845,7 +845,7 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
             )
     with pytest.raises(AgentBackendRefused) as preview:
         await service.preview(source, "openai")
-    assert preview.value.reason == "source_unavailable"
+    assert preview.value.reason == "source_unsupported"
     with pytest.raises(AgentBackendRefused) as commit:
         await service.set_backend(
             source,
@@ -855,7 +855,7 @@ async def test_unknown_source_surface_cannot_be_confirmed_or_prepared(consent_re
             accepted_drops=accepted.declared_drops,
             expected_preview_digest=accepted.preview_digest,
         )
-    assert commit.value.reason == "source_unavailable"
+    assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     with pytest.raises(AdmissionDenied) as handoff:
@@ -1007,7 +1007,7 @@ async def test_raw_source_pipeline_discriminators_keep_public_consent_closed(
     else:
         with pytest.raises(AgentBackendRefused) as preview:
             await service.preview(source, "openai")
-        assert preview.value.reason == "source_unavailable"
+        assert preview.value.reason == "source_unsupported"
         with pytest.raises(AgentBackendRefused) as commit:
             await service.set_backend(
                 source,
@@ -1017,7 +1017,7 @@ async def test_raw_source_pipeline_discriminators_keep_public_consent_closed(
                 accepted_drops=accepted.declared_drops,
                 expected_preview_digest=accepted.preview_digest,
             )
-        assert commit.value.reason == "source_unavailable"
+        assert commit.value.reason == "source_unsupported"
         with pytest.raises(AdmissionDenied) as handoff:
             await read_preparation_counterpart(request)
         assert isinstance(handoff.value.__cause__, AgentBackendRefused)
@@ -1137,7 +1137,7 @@ async def test_unclassified_daimon_mcp_entry_refuses_as_source_definition(consen
     for backend in ("openai", "gemini"):
         with pytest.raises(AgentBackendRefused) as preview:
             await service.preview(source, backend)
-        assert preview.value.reason == "source_unavailable"
+        assert preview.value.reason == "source_unsupported"
     with pytest.raises(AgentBackendRefused) as commit:
         await service.set_backend(
             source,
@@ -1147,7 +1147,7 @@ async def test_unclassified_daimon_mcp_entry_refuses_as_source_definition(consen
             accepted_drops=("mcp", "memory", "sandbox", "tools"),
             expected_preview_digest=accepted.preview_digest,
         )
-    assert commit.value.reason == "source_unavailable"
+    assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     assert constructions == targets == []
@@ -1271,7 +1271,7 @@ async def test_unknown_channel_skill_refuses_even_with_all_losses_declared(
     before = await service.audit(source.tenant_id)
     with pytest.raises(AgentBackendRefused) as preview:
         await service.preview(source, provider)
-    assert preview.value.reason == "source_unavailable"
+    assert preview.value.reason == "source_unsupported"
     with pytest.raises(AgentBackendRefused) as commit:
         await service.set_backend(
             source,
@@ -1281,7 +1281,7 @@ async def test_unknown_channel_skill_refuses_even_with_all_losses_declared(
             accepted_drops=target.declared_drops,
             expected_preview_digest=accepted.preview_digest,
         )
-    assert commit.value.reason == "source_unavailable"
+    assert commit.value.reason == "source_unsupported"
     assert await service.current(source) == accepted
     assert await service.audit(source.tenant_id) == before
     with pytest.raises(AdmissionDenied):

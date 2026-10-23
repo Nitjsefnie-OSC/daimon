@@ -579,9 +579,12 @@ async def test_confirming_the_previewed_losses_applies_once_with_revision_and_au
     data = tool_call(target, preview, list(preview.declared_drops))
 
     text = await card.post(prompt_for(chat, data))
-    losses = f"Won't be available on {target}: " + ", ".join(DROPS)
+    from daimon.core.confirmation import drop_words
+    from daimon.core.turn.notices import provider_name
+
+    losses = f"On {provider_name(target)} it won't have {drop_words(DROPS)}"
     assert losses in text, text
-    assert "Revert any time; nothing is deleted." in text
+    assert "Nothing is deleted; switch back any time." in text
 
     assert await card.click(REQUESTER[chat.platform]) is None
     assert isinstance(await card.answer(), ApprovedConfirmation)
@@ -596,9 +599,39 @@ async def test_confirming_the_previewed_losses_applies_once_with_revision_and_au
     assert events[0].account_id == chat.auth.account_id
     assert "declared_drops=" in events[0].reason
     # The confirmed call cannot apply twice.
-    with pytest.raises(Exception, match="Preview again"):
+    with pytest.raises(Exception, match="(?i)preview again"):
         await apply(chat, data)
     assert len(await chat.audit()) == 1
+
+
+@pytest.mark.parametrize("target", TARGETS)
+async def test_an_agent_that_isnt_this_channels_target_previews_and_confirms_on_the_card(
+    chat: Chat, card: Card, target: str
+) -> None:
+    """A copy's case: the channel answers with another agent, so both the tool's
+    preview and the card's own capture read the named agent's own source, and
+    agree on the digest."""
+    from daimon.core.scope import ChannelScopeRef
+    from daimon.core.stores.scoped_config_write import set_fields
+
+    async with chat.runtime.session_factory.begin() as db:
+        await set_fields(
+            db,
+            scope=ChannelScopeRef(tenant_id=chat.auth.tenant_id, channel_id="channel"),
+            tenant_id=chat.auth.tenant_id,
+            agent_name="someone-else",
+            set_by_admin=True,
+        )
+    preview = await chat.tool(target)
+    assert preview.status == "preview" and preview.declared_drops == DROPS
+    data = tool_call(target, preview, list(preview.declared_drops))
+    await card.post(prompt_for(chat, data))
+    # The card recomputes the preview; a different digest would refuse the click.
+    assert await card.click(REQUESTER[chat.platform]) is None
+    changed = await apply(chat, data)
+    assert changed.status == "changed"
+    _, current = await chat.current()
+    assert current.backend == target
 
 
 @pytest.mark.parametrize("accepted", ["missing", "partial", "extra", "empty"])
@@ -618,7 +651,7 @@ async def test_accepted_drops_other_than_the_preview_never_post_or_apply(
     with pytest.raises(ValueError, match="Preview and confirm again"):
         await card.post(prompt_for(chat, data))
     assert not card._posted()  # pyright: ignore[reportPrivateUsage]
-    with pytest.raises(Exception, match="Preview again"):
+    with pytest.raises(Exception, match="(?i)preview again"):
         await apply(chat, data)
     _, current = await chat.current()
     assert current is None and await chat.audit() == []
@@ -631,7 +664,7 @@ async def test_a_card_changed_after_prepare_is_refused_on_click(
     target = TARGET
     preview = await chat.tool(target)
     data = tool_call(target, preview, list(preview.declared_drops))
-    assert "Won't be available" in await card.post(prompt_for(chat, data))
+    assert "it won't have" in await card.post(prompt_for(chat, data))
     if change == "drop_list":
         card.tamper(accepted_drops=DROPS[:1])
     elif change == "digest":
@@ -643,7 +676,7 @@ async def test_a_card_changed_after_prepare_is_refused_on_click(
     assert refusal is not None and "Preview and confirm again" in refusal
     assert await card.still_pending()
     if change == "source":
-        with pytest.raises(Exception, match="Preview again"):
+        with pytest.raises(Exception, match="(?i)preview again"):
             await apply(chat, data)
     _, current = await chat.current()
     assert current is None and await chat.audit() == []
