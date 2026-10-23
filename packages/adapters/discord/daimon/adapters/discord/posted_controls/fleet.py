@@ -577,7 +577,7 @@ _ALREADY_ENDED = "This fleet has already stopped."
 _WORKER_ENDED = "This worker has already finished."
 _UNREACHABLE = "Couldn't reach the fleet just now. Try again in a moment."
 _NOT_HERE = "You can't control this fleet from here."
-_LIMIT_USED = "This fleet has used up its time or turn limit, so it can't be resumed."
+_LIMIT_USED = "This fleet has run out of the time or steps it was given, so it can't be resumed."
 _IN_FLIGHT = "Someone's press on this fleet is still going through. Try again in a moment."
 # Refusals a newer card would not offer: the card is behind the run.
 _CARD_BEHIND = frozenset(

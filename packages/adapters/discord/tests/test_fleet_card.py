@@ -330,7 +330,10 @@ async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(ad
         ),
         ("inactive", "You can't control this fleet from here."),
         ("outage", "Couldn't reach the fleet just now. Try again in a moment."),
-        ("limit", "This fleet has used up its time or turn limit, so it can't be resumed."),
+        (
+            "limit",
+            "This fleet has run out of the time or steps it was given, so it can't be resumed.",
+        ),
         (
             "operation_conflict",
             "Someone's press on this fleet is still going through. Try again in a moment.",
