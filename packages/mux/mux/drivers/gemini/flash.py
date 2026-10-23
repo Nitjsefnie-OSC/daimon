@@ -1,6 +1,7 @@
 """Explicit host Flash policy; no client creation, retry or implicit selection."""
 
 from collections.abc import AsyncIterator, Mapping
+from collections.abc import Set as AbstractSet
 from copy import deepcopy
 from dataclasses import dataclass
 from typing import Literal, Protocol
@@ -169,6 +170,15 @@ class FlashTransport:
             )
             return reply
         raise ProviderError("upstream", retryable=False, native_code="flash_chain_exhausted")
+
+    def mount_echo_digests(self, interaction_id: str) -> frozenset[str]:
+        digests = getattr(self.source, "mount_echo_digests", None)
+        return frozenset() if digests is None else digests(interaction_id)
+
+    def bind_mount_echo(self, interaction_id: str, digests: AbstractSet[str]) -> None:
+        bind = getattr(self.source, "bind_mount_echo", None)
+        if bind is not None:
+            bind(interaction_id, digests)
 
     async def get(self, interaction_id: str) -> Object:
         return await self.source.get(interaction_id)

@@ -1143,6 +1143,14 @@ async def test_private_gcs_mount_auth_is_fresh_exact_and_memory_only(
         assert f"Bearer offline-private-storage-{index}" in post.content.decode()
     assert "offline-private-storage" not in caplog.text
     assert "offline-private-storage" not in repr(wire.saved)
+    # The accepted interaction records a digest of exactly the header sent last,
+    # through the Flash wrapper too, so a resumed turn can clear its echo.
+    from mux.drivers.gemini.transport import mount_header_digest
+
+    accepted = f"interaction-{wire.counter}"
+    sent = f"Bearer offline-private-storage-{len(calls)}"
+    assert dispatch.mount_echo_digests(accepted) == {mount_header_digest(sent)}
+    assert "offline-private-storage" not in repr(dispatch.mount_echo_digests(accepted))
     # A later read must recognize the actual freshly dispatched token even if
     # the provider echoes it under another field, without a network transform.
     identity = f"interaction-{wire.counter}"

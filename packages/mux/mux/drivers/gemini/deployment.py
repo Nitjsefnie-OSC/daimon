@@ -6,6 +6,7 @@ import os
 import posixpath
 import re
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping, Sequence
+from collections.abc import Set as AbstractSet
 from contextlib import asynccontextmanager
 from datetime import UTC, datetime, timedelta
 from typing import TYPE_CHECKING, Protocol, cast
@@ -17,7 +18,7 @@ from pydantic import JsonValue
 from mux.drivers import isolated_ssl_context
 from mux.drivers.gemini.catalog_transport import AgentCatalogTransport, SDKAgentCatalogTransport
 from mux.drivers.gemini.mcp_auth import RedactedCredential
-from mux.drivers.gemini.transport import Object, SDKTransport, Transport
+from mux.drivers.gemini.transport import MountEchoBook, Object, SDKTransport, Transport
 
 if TYPE_CHECKING:
     from google import genai
@@ -82,6 +83,14 @@ class _ConfiguredTransport:
         self._api_key = api_key
         self._protect_storage_credentials = protect_storage_credentials
         self._storage_tokens: set[RedactedCredential] = set()
+        # Interaction id -> digests of mount headers sent (never the token).
+        self._mount_echoes = MountEchoBook()
+
+    def mount_echo_digests(self, interaction_id: str) -> frozenset[str]:
+        return self._mount_echoes.get(interaction_id)
+
+    def bind_mount_echo(self, interaction_id: str, digests: AbstractSet[str]) -> None:
+        self._mount_echoes.add(interaction_id, digests)
 
     @asynccontextmanager
     async def _client(self) -> AsyncIterator[genai.Client]:
@@ -139,6 +148,7 @@ class _ConfiguredTransport:
                 client,
                 protect_storage_credentials=self._protect_storage_credentials,
                 storage_tokens=self._storage_tokens,
+                mount_echoes=self._mount_echoes,
             ).count_input_tokens(request)
 
     async def create(self, request: Mapping[str, JsonValue]) -> Object:
@@ -147,6 +157,7 @@ class _ConfiguredTransport:
                 client,
                 protect_storage_credentials=self._protect_storage_credentials,
                 storage_tokens=self._storage_tokens,
+                mount_echoes=self._mount_echoes,
             ).create(request)
 
     async def get(self, interaction_id: str) -> Object:
@@ -155,6 +166,7 @@ class _ConfiguredTransport:
                 client,
                 protect_storage_credentials=self._protect_storage_credentials,
                 storage_tokens=self._storage_tokens,
+                mount_echoes=self._mount_echoes,
             ).get(interaction_id)
 
     async def cancel(self, interaction_id: str) -> Object:
@@ -163,6 +175,7 @@ class _ConfiguredTransport:
                 client,
                 protect_storage_credentials=self._protect_storage_credentials,
                 storage_tokens=self._storage_tokens,
+                mount_echoes=self._mount_echoes,
             ).cancel(interaction_id)
 
     async def download_snapshot(self, environment_id: str) -> bytes:
@@ -171,6 +184,7 @@ class _ConfiguredTransport:
                 client,
                 protect_storage_credentials=self._protect_storage_credentials,
                 storage_tokens=self._storage_tokens,
+                mount_echoes=self._mount_echoes,
             ).download_snapshot(environment_id)
 
     async def open_stream(
@@ -186,6 +200,7 @@ class _ConfiguredTransport:
                 client,
                 protect_storage_credentials=self._protect_storage_credentials,
                 storage_tokens=self._storage_tokens,
+                mount_echoes=self._mount_echoes,
             ).open_stream(interaction_id, after=after)
         except BaseException:
             await lifetime.__aexit__(None, None, None)

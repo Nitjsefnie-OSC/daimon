@@ -50,6 +50,9 @@ class SessionRecord:
     max_input_tokens: int | None = None
     # Native (Gemini-safe) mcp_server name -> declared connection name.
     mcp_server_names: dict[str, str] = field(default_factory=dict[str, str])
+    # Interaction id -> SHA-256 of each storage-mount header sent for it. Lets a
+    # later turn or a restart clear that interaction's echo; never the token.
+    mount_echo_digests: dict[str, list[str]] = field(default_factory=dict[str, list[str]])
 
 
 @dataclass

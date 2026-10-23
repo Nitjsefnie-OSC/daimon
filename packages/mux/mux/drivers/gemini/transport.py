@@ -3,9 +3,13 @@
 from __future__ import annotations
 
 import copy
+import hashlib
+import hmac
 import json
 import logging
+from collections import OrderedDict
 from collections.abc import AsyncIterator, Awaitable, Callable, Mapping
+from collections.abc import Set as AbstractSet
 from typing import Any, NoReturn, Protocol, cast, runtime_checkable
 
 import httpx
@@ -82,6 +86,54 @@ def storage_request_token(request: Mapping[str, JsonValue]) -> RedactedCredentia
     return None
 
 
+MOUNT_ECHO_LIMIT = 1024
+"""Interactions whose mount digests a long-lived transport keeps in memory."""
+
+
+class MountEchoBook:
+    """Interaction id -> digests of the mount headers sent for it, bounded LRU.
+
+    A long-lived deployment transport sees every interaction it serves, so the
+    book keeps only the most recently used ones. Losing an entry is safe: the
+    driver re-binds the session's persisted digests before every read, and an
+    unbound read of a mounted interaction fails closed.
+    """
+
+    def __init__(self, limit: int = MOUNT_ECHO_LIMIT) -> None:
+        if limit < 1:
+            raise ValueError("a positive mount echo limit is required")
+        self._limit = limit
+        self._entries: OrderedDict[str, set[str]] = OrderedDict()
+
+    def __len__(self) -> int:
+        return len(self._entries)
+
+    def add(self, interaction_id: str, digests: AbstractSet[str]) -> None:
+        if not digests:
+            return
+        entry = self._entries.pop(interaction_id, set())
+        entry.update(digests)
+        self._entries[interaction_id] = entry
+        while len(self._entries) > self._limit:
+            self._entries.popitem(last=False)
+
+    def get(self, interaction_id: str) -> frozenset[str]:
+        entry = self._entries.get(interaction_id)
+        if entry is None:
+            return frozenset()
+        self._entries.move_to_end(interaction_id)
+        return frozenset(entry)
+
+
+def mount_header_digest(header: str) -> str:
+    """The persisted fingerprint of a mount Authorization header we sent; never the token."""
+    return hashlib.sha256(header.encode()).hexdigest()
+
+
+def _known_digest(candidate: str, digests: AbstractSet[str]) -> bool:
+    return any(hmac.compare_digest(candidate, digest) for digest in digests)
+
+
 def _refuse_transform(path: str, reason: str) -> NoReturn:
     """Fail closed, logging only where and why (never the value)."""
     log.warning("gemini mount transform echo refused: path=%s reason=%s", path, reason)
@@ -106,17 +158,27 @@ def echoed_mount_header(transform: object) -> str | None:
     return value if set(headers) == {"Authorization"} and isinstance(value, str) else None
 
 
-def scrub_mount_echo(value: Object, tokens: set[RedactedCredential]) -> Object:
+def scrub_mount_echo(
+    value: Object,
+    tokens: AbstractSet[RedactedCredential],
+    *,
+    interaction_id: str | None = None,
+    digests: AbstractSet[str] = frozenset(),
+) -> tuple[Object, set[RedactedCredential]]:
     """Remove the echo of our own storage-mount transform, and nothing else.
 
     A completed interaction echoes the request's environment, including the
     mount rule's Authorization transform. Only that exact location is cleaned:
     `environment.network.allowlist[i].transform` on the interaction itself or
     on a stream event's `interaction`, for the storage domain, carrying a
-    header this transport dispatched. Any other transform refuses.
+    header this transport dispatched (`tokens`) or, for `interaction_id` only,
+    a header matching a recorded digest (a resumed turn or a restart). Any
+    other transform refuses. Returns the scrubbed copy and the tokens matched
+    by digest, so the caller's leak check can look for them elsewhere.
     """
     result = copy.deepcopy(value)
     ours = {"Bearer " + token for token in tokens}
+    matched: set[RedactedCredential] = set()
     nested = result.get("interaction")
     owners = [("$", result)]
     if isinstance(nested, dict):
@@ -135,9 +197,18 @@ def scrub_mount_echo(value: Object, tokens: set[RedactedCredential]) -> Object:
             if header is None:
                 _refuse_transform(path, "unrecognized_shape")
             if header not in ours:
-                _refuse_transform(path, "not_dispatched_by_this_transport")
+                # Otherwise only a digest recorded for this very interaction.
+                if (
+                    interaction_id is None
+                    or owner.get("id") != interaction_id
+                    or not header.startswith("Bearer ")
+                    or len(header) == len("Bearer ")
+                    or not _known_digest(mount_header_digest(header), digests)
+                ):
+                    _refuse_transform(path, "not_dispatched_by_this_transport")
+                matched.add(RedactedCredential(header[len("Bearer ") :]))
             del rule["transform"]
-    return result
+    return result, matched
 
 
 # Diagnostic paths name only these schema keys; any other key (which model
@@ -179,13 +250,20 @@ def transform_paths(value: JsonValue, path: str = "$", *, in_network: bool = Fal
 
 
 def checked_storage_response(
-    value: Object, *, protected: bool, tokens: set[RedactedCredential] | None = None
+    value: Object,
+    *,
+    protected: bool,
+    tokens: AbstractSet[RedactedCredential] | None = None,
+    interaction_id: str | None = None,
+    digests: AbstractSet[str] = frozenset(),
 ) -> Object:
     """Scrub our own echoed mount transform, then fail closed on any other trace."""
     if not protected:
         return value
-    known = tokens or set()
-    value = scrub_mount_echo(value, known)
+    value, matched = scrub_mount_echo(
+        value, tokens or set(), interaction_id=interaction_id, digests=digests
+    )
+    known = {*(tokens or ()), *matched}
     # The token anywhere else (model output, a tool result, another field, a
     # key) is a leak: check decoded keys/values and the re-encoded bytes of the
     # scrubbed payload FIRST, before any diagnostic path is built or logged.
@@ -302,11 +380,14 @@ class SDKTransport:
         *,
         protect_storage_credentials: bool = False,
         storage_tokens: set[RedactedCredential] | None = None,
+        mount_echoes: MountEchoBook | None = None,
     ) -> None:
         self._protect_storage_credentials = protect_storage_credentials
         self._storage_tokens: set[RedactedCredential] = (
             storage_tokens if storage_tokens is not None else set()
         )
+        # Interaction id -> digests of the mount headers sent for it.
+        self._mount_echoes = mount_echoes if mount_echoes is not None else MountEchoBook()
         # google-genai 2.7 forwards attempts as Stainless max_retries, so
         # attempts=1 still retries once. Set the Interactions edge to zero.
         nextgen = client.aio._nextgen_client  # pyright: ignore[reportPrivateUsage]
@@ -314,7 +395,24 @@ class SDKTransport:
         self._files = client.aio.files
         self._models = client.aio.models
 
-    def _protected_interaction(self, response: httpx.Response) -> Object:
+    def mount_echo_digests(self, interaction_id: str) -> frozenset[str]:
+        """Digests of the mount headers this transport sent for `interaction_id`."""
+        return self._mount_echoes.get(interaction_id)
+
+    def bind_mount_echo(self, interaction_id: str, digests: AbstractSet[str]) -> None:
+        """Let reads of `interaction_id` (only) clear echoes of these recorded headers."""
+        self._mount_echoes.add(interaction_id, digests)
+
+    def _protects(self, interaction_id: str) -> bool:
+        return (
+            self._protect_storage_credentials
+            or bool(self._storage_tokens)
+            or bool(self._mount_echoes.get(interaction_id))
+        )
+
+    def _protected_interaction(
+        self, response: httpx.Response, interaction_id: str | None = None
+    ) -> Object:
         """A protected Interaction, scrubbed before the SDK parses or renders it.
 
         Plain JSON decoding renders nothing; SDK models (whose serializer
@@ -328,7 +426,13 @@ class SDKTransport:
             raise ProviderError(
                 "upstream", retryable=False, native_code="malformed_interaction"
             ) from None
-        clean = checked_storage_response(raw, protected=True, tokens=self._storage_tokens)
+        clean = checked_storage_response(
+            raw,
+            protected=True,
+            tokens=self._storage_tokens,
+            interaction_id=interaction_id,
+            digests=self._mount_echoes.get(interaction_id) if interaction_id else frozenset(),
+        )
         # The same loose construction `response.parse()` performs, on clean data.
         parsed = cast(Any, Interaction).construct(**clean)
         return object_value(
@@ -425,9 +529,17 @@ class SDKTransport:
                 )
             )
         if protected:
-            return self._protected_interaction(response.http_response)
-        parsed = await response.parse()
-        return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
+            created = self._protected_interaction(response.http_response)
+        else:
+            parsed = await response.parse()
+            created = object_value(
+                cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True))
+            )
+        identity = created.get("id")
+        if token is not None and isinstance(identity, str) and identity:
+            # Keyed to the accepted interaction, so it can clear only that echo later.
+            self._mount_echoes.add(identity, {mount_header_digest("Bearer " + token)})
+        return created
 
     async def get(self, interaction_id: str) -> Object:
         response = await provider_call(
@@ -436,8 +548,8 @@ class SDKTransport:
                 extra_headers={"Api-Revision": API_REVISION},
             )
         )
-        if self._protect_storage_credentials or self._storage_tokens:
-            return self._protected_interaction(response.http_response)
+        if self._protects(interaction_id):
+            return self._protected_interaction(response.http_response, interaction_id)
         parsed = await response.parse()
         return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
@@ -448,8 +560,8 @@ class SDKTransport:
                 extra_headers={"Api-Revision": API_REVISION},
             )
         )
-        if self._protect_storage_credentials or self._storage_tokens:
-            return self._protected_interaction(response.http_response)
+        if self._protects(interaction_id):
+            return self._protected_interaction(response.http_response, interaction_id)
         parsed = await response.parse()
         return object_value(cast(JsonValue, parsed.model_dump(mode="json", exclude_none=True)))
 
@@ -470,7 +582,7 @@ class SDKTransport:
         async def records() -> AsyncIterator[Object]:
             try:
                 async for event in source:
-                    if self._protect_storage_credentials or self._storage_tokens:
+                    if self._protects(interaction_id):
                         value = object_value(
                             cast(
                                 JsonValue,
@@ -478,7 +590,11 @@ class SDKTransport:
                             )
                         )
                         yield checked_storage_response(
-                            value, protected=True, tokens=self._storage_tokens
+                            value,
+                            protected=True,
+                            tokens=self._storage_tokens,
+                            interaction_id=interaction_id,
+                            digests=self._mount_echoes.get(interaction_id),
                         )
                     else:
                         yield object_value(
