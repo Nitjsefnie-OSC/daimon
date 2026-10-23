@@ -14,11 +14,19 @@ from daimon.core.confirmation import (
     prompt_for_tool_call,
 )
 from daimon.core.posted_controls.confirmation import (
+    EXPIRED_MESSAGE,
+    NO_LONGER_ACTIVE_MESSAGE,
+    NO_LONGER_PENDING_MESSAGE,
+    NOTHING_RAN_FOOTER,
     build_confirmation_blocks,
     build_confirmation_card,
     confirmation_card_text,
     confirmation_custom_id,
     parse_confirmation_custom_id,
+)
+from daimon.core.posted_controls.lifecycle import (
+    PostedConfirmations,
+    settle_local_confirmation,
 )
 from daimon.core.tool_safety import ToolCall
 
@@ -74,6 +82,55 @@ def test_every_state_leads_with_its_mark(state: str, mark: str) -> None:
     card = build_confirmation_card(_prompt(), state=state, token=token)  # type: ignore[arg-type]
     assert card.headline.startswith(mark)
     assert card.detail_lines == (_prompt().detail_lines if state == "pending" else ())
+
+
+@pytest.mark.parametrize("state", ["expired", "stopped"])
+def test_a_card_retired_unanswered_says_nothing_ran(state: str) -> None:
+    card = build_confirmation_card(_prompt(), state=state)  # type: ignore[arg-type]
+    assert card.footer == NOTHING_RAN_FOOTER
+    blocks = build_confirmation_blocks(card, prompt=_prompt())
+    assert blocks[-1]["elements"][0]["text"] == "Nothing ran. Ask again to run it."
+
+
+def test_expiry_says_what_to_do_next() -> None:
+    assert EXPIRED_MESSAGE == "This request expired, so nothing ran. Ask again to run it."
+
+
+def test_slack_admin_card_confirms_like_discord_and_teams() -> None:
+    prompt = _prompt().model_copy(update={"admin": True})
+    blocks = build_confirmation_blocks(
+        build_confirmation_card(prompt, state="pending", token="tok_abcdefgh"), prompt=prompt
+    )
+    labels = [e["text"]["text"] for b in blocks if b["type"] == "actions" for e in b["elements"]]
+    assert labels[:2] == ["Confirm", "Deny"]
+
+
+async def test_only_a_token_settled_here_reads_already_answered() -> None:
+    """After a restart or a stopped turn the token is unknown: nothing ran."""
+    controls: PostedConfirmations[object] = PostedConfirmations()  # type: ignore[type-var]
+    prompt = _prompt().model_copy(update={"expires_at": datetime.now(UTC).replace(year=2099)})
+    token, future = controls.pending.open()
+    controls.cards[token] = type("Card", (), {"prompt": prompt})()
+    assert controls.claim(token, "U1", "approved") is None
+    assert future.result() == "approved"
+    assert controls.claim(token, "U1", "approved") == NO_LONGER_PENDING_MESSAGE
+    assert controls.claim("tok_unknown1", "U1", "approved") == NO_LONGER_ACTIVE_MESSAGE
+
+
+async def test_a_click_on_a_stopped_local_card_says_nothing_ran() -> None:
+    prompt = _prompt().model_copy(update={"expires_at": datetime.now(UTC).replace(year=2099)})
+    future: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    future.cancel()
+    assert (
+        settle_local_confirmation(prompt, future, "U1", "approved")  # type: ignore[arg-type]
+        == NO_LONGER_ACTIVE_MESSAGE
+    )
+    answered: asyncio.Future[str] = asyncio.get_running_loop().create_future()
+    answered.set_result("denied")
+    assert (
+        settle_local_confirmation(prompt, answered, "U1", "approved")  # type: ignore[arg-type]
+        == NO_LONGER_PENDING_MESSAGE
+    )
 
 
 def test_only_a_pending_card_carries_a_token() -> None:

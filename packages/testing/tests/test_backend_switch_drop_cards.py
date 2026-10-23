@@ -640,7 +640,9 @@ async def test_a_card_changed_after_prepare_is_refused_on_click(
         # The agent itself changed after the card was drawn: a fresh preview differs.
         chat.payload["system"] = "Changed after the card was drawn."
     refusal = await card.click(REQUESTER[chat.platform])
-    assert refusal is not None and "Preview and confirm again" in refusal
+    assert refusal == "This preview changed. Preview and confirm again.", (
+        "the click names the cause it found, not a guess between preview and permission"
+    )
     assert await card.still_pending()
     if change == "source":
         with pytest.raises(Exception, match="Preview again"):

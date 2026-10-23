@@ -26,6 +26,8 @@ __all__ = [
     "NOT_YOURS_MESSAGE",
     "NO_LONGER_PENDING_MESSAGE",
     "EXPIRED_MESSAGE",
+    "NO_LONGER_ACTIVE_MESSAGE",
+    "NOTHING_RAN_FOOTER",
     "build_confirmation_blocks",
     "build_confirmation_card",
     "confirmation_card_text",
@@ -43,7 +45,13 @@ CONFIRMATION_ACTION_PATTERN: Final[re.Pattern[str]] = re.compile(
 )
 NOT_YOURS_MESSAGE: Final[str] = "Only {requester} can approve or deny this request."
 NO_LONGER_PENDING_MESSAGE: Final[str] = "This request was already answered."
-EXPIRED_MESSAGE: Final[str] = "This request expired."
+EXPIRED_MESSAGE: Final[str] = "This request expired, so nothing ran. Ask again to run it."
+#: A click on a card this process never settled: a restart or a stopped turn.
+NO_LONGER_ACTIVE_MESSAGE: Final[str] = (
+    "This request is no longer active, so nothing ran. Ask again to run it."
+)
+#: Footer of a card retired without an answer (expired or stopped).
+NOTHING_RAN_FOOTER: Final[str] = "Nothing ran. Ask again to run it."
 
 
 class ConfirmationCard(BaseModel):
@@ -121,7 +129,7 @@ def build_confirmation_card(
             else prompt.denied_action or f"{prompt.title.removesuffix('?')} not completed"
         )
         if how is None:
-            footer = "by {requester}" if state in {"approved", "denied"} else None
+            footer = "by {requester}" if state in {"approved", "denied"} else NOTHING_RAN_FOOTER
         elif state == "denied":
             footer = "Denied by {actor}"
         elif how == "always":
@@ -169,7 +177,7 @@ def build_confirmation_blocks(
         buttons = [
             {
                 "type": "button",
-                "text": {"type": "plain_text", "text": "Approve"},
+                "text": {"type": "plain_text", "text": "Confirm" if prompt.admin else "Approve"},
                 "style": "primary",
                 "action_id": confirmation_custom_id(card.token, "approve"),
                 "value": card.token,

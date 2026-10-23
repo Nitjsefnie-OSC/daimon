@@ -30,7 +30,7 @@ from daimon.core.confirmation import (
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
-    NO_LONGER_PENDING_MESSAGE,
+    NO_LONGER_ACTIVE_MESSAGE,
     NOT_YOURS_MESSAGE,
     ConfirmationCardState,
     build_confirmation_card,
@@ -469,8 +469,9 @@ async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> No
         await waiting
 
     assert sender.activities[-1].id == "m-1" and "Stopped" in _json(sender, -1)
+    assert "Nothing ran. Ask again to run it." in _json(sender, -1)
     late = await cards.on_action(_click(token, "approve", AAD_OBJECT_ID))
-    assert late.value == NO_LONGER_PENDING_MESSAGE
+    assert late.value == NO_LONGER_ACTIVE_MESSAGE, "a stopped card was never answered"
     assert len(sender.sent) == 2, "a late click changes nothing"
 
 

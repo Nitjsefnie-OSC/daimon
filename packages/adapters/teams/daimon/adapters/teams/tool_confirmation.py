@@ -132,7 +132,7 @@ def _footer(
         if prompt.tool_rules_enabled and card.footer is not None:
             return (card.footer.format(actor=answered_by or card.answered_by_platform_user_id),)
         return (f"by {answered_by or name}",)
-    return ()
+    return (card.footer,) if card.footer is not None else ()
 
 
 def _detail_blocks(lines: tuple[str, ...]) -> list[CardElement]:

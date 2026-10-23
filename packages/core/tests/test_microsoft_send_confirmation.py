@@ -10,6 +10,7 @@ from unittest.mock import AsyncMock
 from daimon.core.confirmation import (
     SEND_BODY_LIMIT,
     ConfirmationPrompt,
+    ConfirmationRefused,
     confirmed_tools_for_turn,
     prompt_for_tool_call,
 )
@@ -280,3 +281,22 @@ async def test_a_card_that_cannot_be_shown_is_not_reported_as_a_refusal() -> Non
     assert "approval card" in message and "could not be shown" in message
     assert "did not run" in message and "denied" not in message
     assert "did not refuse" in message, "the person must not be blamed for the failure"
+
+
+async def test_a_refused_card_passes_its_reason_on() -> None:
+    """A card its own check refused says why, so asking again doesn't hit the same wall."""
+    reason = "This change needs the agent's owner or a current workspace admin."
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=AsyncMock(side_effect=ConfirmationRefused(reason)),
+        trusted_servers=_TRUSTED,
+        confirmed_tools=microsoft_send_tools(enabled=True),
+    )
+    assert isinstance(posture, PolicyApproval)
+    result = await posture.decide(_call())
+    assert result.allow is False
+    message = result.deny_message or ""
+    assert reason in message, "the real reason reaches the model, and so the person"
+    assert "did not run" in message and "did not refuse" in message
+    assert "ask again" not in message, "asking again would hit the same wall"

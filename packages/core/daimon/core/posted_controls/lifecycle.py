@@ -16,6 +16,7 @@ import structlog
 from daimon.core.confirmation import ConfirmationAnswer, ConfirmationPrompt, PendingConfirmations
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
+    NO_LONGER_ACTIVE_MESSAGE,
     NO_LONGER_PENDING_MESSAGE,
     NOT_YOURS_MESSAGE,
     ConfirmationCardState,
@@ -179,6 +180,8 @@ class PostedConfirmations[Card: PromptCard]:
         self.pending = PendingConfirmations()
         self.cards: dict[str, Card] = {}
         self.expired_tokens: deque[str] = deque(maxlen=512)
+        #: Tokens a click settled here, the only ones "already answered" is true for.
+        self.answered_tokens: deque[str] = deque(maxlen=512)
 
     async def confirm(
         self,
@@ -211,7 +214,20 @@ class PostedConfirmations[Card: PromptCard]:
         return answer
 
     def missing_message(self, token: str) -> str:
-        return EXPIRED_MESSAGE if token in self.expired_tokens else NO_LONGER_PENDING_MESSAGE
+        """Why a click found no live card. A token this process never settled
+        is from before a restart or a stopped turn, so nothing ran."""
+        if token in self.expired_tokens:
+            return EXPIRED_MESSAGE
+        if token in self.answered_tokens:
+            return NO_LONGER_PENDING_MESSAGE
+        return NO_LONGER_ACTIVE_MESSAGE
+
+    def _resolve(self, token: str, value: ConfirmationAnswer) -> bool:
+        self.cards.pop(token, None)
+        if not self.pending.resolve(token, value):
+            return False
+        self.answered_tokens.append(token)
+        return True
 
     def claim(self, token: str, clicker: str | None, answer: ConfirmationAnswer) -> str | None:
         """Keep the card until its requester presses; pop before resolving."""
@@ -221,11 +237,9 @@ class PostedConfirmations[Card: PromptCard]:
         if datetime.now(UTC) >= posted.prompt.expires_at:
             return EXPIRED_MESSAGE
 
-        def resolve(value: ConfirmationAnswer) -> bool:
-            self.cards.pop(token, None)
-            return self.pending.resolve(token, value)
-
-        return settle_confirmation(posted.prompt, clicker, answer, resolve)
+        return settle_confirmation(
+            posted.prompt, clicker, answer, lambda value: self._resolve(token, value)
+        )
 
     def claim_admin(self, token: str) -> str | None:
         """Only call after a fresh admin check; pop before resolving."""
@@ -233,11 +247,7 @@ class PostedConfirmations[Card: PromptCard]:
         if posted is None:
             return self.missing_message(token)
 
-        def resolve(value: ConfirmationAnswer) -> bool:
-            self.cards.pop(token, None)
-            return self.pending.resolve(token, value)
-
-        return settle_admin_confirmation(posted.prompt, resolve)
+        return settle_admin_confirmation(posted.prompt, lambda value: self._resolve(token, value))
 
 
 def settle_local_confirmation(
@@ -254,7 +264,16 @@ def settle_local_confirmation(
         future.set_result(value)
         return True
 
-    return settle_confirmation(prompt, clicker, answer, resolve)
+    return _stopped_message(settle_confirmation(prompt, clicker, answer, resolve), future)
+
+
+def _stopped_message(
+    refusal: str | None, future: asyncio.Future[ConfirmationAnswer] | None
+) -> str | None:
+    """A cancelled future is a stopped turn, not an answer: nothing ran."""
+    if refusal == NO_LONGER_PENDING_MESSAGE and future is not None and future.cancelled():
+        return NO_LONGER_ACTIVE_MESSAGE
+    return refusal
 
 
 def settle_local_admin_confirmation(
@@ -268,7 +287,7 @@ def settle_local_admin_confirmation(
         future.set_result(value)
         return True
 
-    return settle_admin_confirmation(prompt, resolve)
+    return _stopped_message(settle_admin_confirmation(prompt, resolve), future)
 
 
 async def wait_local_confirmation(

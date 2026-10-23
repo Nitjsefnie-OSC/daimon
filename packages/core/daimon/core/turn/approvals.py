@@ -30,6 +30,7 @@ from anthropic.types.beta.sessions.beta_managed_agents_session_status_idle_event
 from daimon.core.confirmation import (
     ApprovedConfirmation,
     ConfirmationHook,
+    ConfirmationRefused,
     ToolRuleCardReference,
     no_confirmation_surface,
     prompt_for_tool_call,
@@ -384,6 +385,14 @@ def _card_failed_message(call: ToolCall) -> str:
     )
 
 
+def _card_refused_message(call: ToolCall, reason: str) -> str:
+    return (
+        f"{call.key} did not run and no approval card was shown: {reason} Nothing was "
+        "changed and the person did not refuse it. Do not retry it until that changes. "
+        "Tell the person in one line why it could not run, in plain words."
+    )
+
+
 def _answer_message(call: ToolCall, answer: str) -> str:
     if answer == "expired":
         return (
@@ -515,6 +524,12 @@ def interactive_decider(
             ):
                 prompt = prompt.model_copy(update={"tool_rule": rule_card_for(call)})
             response = await confirm(prompt)
+        except ConfirmationRefused as err:
+            # The card's own check said why it can't be shown; pass that on.
+            log.info("tool_safety.confirm_refused", tool=call.key, reason=str(err))
+            return ToolConfirmationResult(
+                allow=False, deny_message=_card_refused_message(call, str(err))
+            )
         except Exception as err:
             # Named boundary: prompt validation and the adapter's card must
             # both succeed before the write may run.
