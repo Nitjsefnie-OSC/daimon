@@ -121,7 +121,8 @@ def resolve_model(value: str, *, available: Sequence[ModelRef] | None = None) ->
     ):
         if "lite" not in family:
             matches = [model for model in matches if "lite" not in _key(model.id).split()]
-        # "opus" never means the pricier fast variant; "opus fast" names it.
+        # Defensive: agent_catalog() excludes the fast preset, but a caller-supplied
+        # `available` may carry it; "opus" must never mean that pricier variant.
         matches = [model for model in matches if "fast" not in _key(model.id).split()]
         if matches:
             return max(matches, key=lambda model: tuple(map(int, re.findall(r"\d+", model.id))))

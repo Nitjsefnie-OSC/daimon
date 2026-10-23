@@ -55,6 +55,12 @@ def _allowed_line(models: Sequence[ModelRef]) -> str:
     return ", ".join(f"{model_name(model)} ({model.id})" for model in models) or "none"
 
 
+def _without_fast(models: Sequence[ModelRef]) -> tuple[ModelRef, ...]:
+    from daimon.core.model_presets import OPUS_FAST
+
+    return tuple(model for model in _allowed_models(models) if model.id != OPUS_FAST)
+
+
 def fleet_model(value: str, models: Sequence[ModelRef]) -> str:
     """The granted model id a worker model name means ("astra" -> gpt-6-astra), or a plain refusal.
 
@@ -62,10 +68,17 @@ def fleet_model(value: str, models: Sequence[ModelRef]) -> str:
     model the fleet can't use; an ambiguous name lists what it could mean. The
     local Opus fast preset is never a worker model: only the legacy path expands it.
     """
-    from daimon.core.agent_model_names import AmbiguousModel, resolve_model
-    from daimon.core.model_presets import OPUS_FAST
+    import re
 
-    allowed = tuple(model for model in _allowed_models(models) if model.id != OPUS_FAST)
+    from daimon.core.agent_model_names import AmbiguousModel, resolve_model
+
+    allowed = _without_fast(models)
+    if "fast" in re.findall(r"[a-z]+", value.casefold()):
+        # Refuse before resolving: close-match spelling would turn it into standard Opus.
+        raise ToolError(
+            f'"{value}" can\'t run as a fleet worker (the fast setting only applies to an '
+            f"agent's own model); allowed: {_allowed_line(allowed)}."
+        )
     try:
         return resolve_model(value, available=allowed).id
     except AmbiguousModel as error:
@@ -111,7 +124,9 @@ async def _refusals_logged(
             field=error.field,
             reason=error.reason,
         )
-        what = "model or backend" if error.field == "backend" else error.field.replace("_", " ")
+        what = (
+            "model or model provider" if error.field == "backend" else error.field.replace("_", " ")
+        )
         raise ToolError(
             f"The worker's {what} {_REASONS.get(error.reason, error.reason.replace('_', ' '))}."
         ) from None
@@ -550,7 +565,7 @@ class HostFleetToolService:
         from daimon.core.agent_model_names import model_name
 
         parent, policy = await self._parent(caller, origin_context_id=origin_context_id)
-        models = _allowed_models((*parent.models, parent.spec.model))
+        models = _without_fast((*parent.models, parent.spec.model))
         return {
             "agents": list(await self._orchestrator.worker_agents(parent, policy)),
             # The models a task worker (a copy of you) may run on, by plain name.

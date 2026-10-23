@@ -1499,7 +1499,7 @@ async def test_core_refusals_reach_the_root_as_plain_text_and_are_logged_by_cate
     cases = [
         (
             WorkerSpecRefused("backend", "not_subset"),
-            "The worker's model or backend is outside",
+            "The worker's model or model provider is outside",
             "worker_spec",
         ),
         (
@@ -1544,13 +1544,18 @@ async def test_the_local_opus_fast_preset_is_never_a_fleet_worker_model() -> Non
     fast = ModelRef(provider="anthropic", id="claude-opus-5-5-fast")
     bridge, orchestrator = plain_bridge(replace(root, models=(*root.models, fast)))
     async with Client(registered(bridge)) as client:
-        with pytest.raises(ToolError) as refused:
-            await client.call_tool(
-                "fleet_spawn",
-                {"operation_key": "W1", "role": "W1", "task": "Go.", "model": "opus fast"},
-            )
-        assert "isn't allowed in this fleet" in str(refused.value)
-        assert "claude-opus-5-5-fast" not in str(refused.value)
+        # Every spelling of the preset, including the long forms close-matching would
+        # otherwise turn into standard Opus, is refused before resolution.
+        for name in ("opus fast", "claude-opus-5-5-fast", "Claude Opus 5.5 fast"):
+            with pytest.raises(ToolError) as refused:
+                await client.call_tool(
+                    "fleet_spawn",
+                    {"operation_key": "W1", "role": "W1", "task": "Go.", "model": name},
+                )
+            assert "can't run as a fleet worker" in str(refused.value)
+            assert "(claude-opus-5-5-fast)" not in str(refused.value)
+        listed = await client.call_tool("fleet_agents", {})
+        assert "claude-opus-5-5-fast" not in {m["id"] for m in listed.structured_content["models"]}
         await client.call_tool(
             "fleet_spawn", {"operation_key": "W2", "role": "W2", "task": "Go.", "model": "opus"}
         )
