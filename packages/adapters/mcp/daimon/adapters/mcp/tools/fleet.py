@@ -59,16 +59,18 @@ def fleet_model(value: str, models: Sequence[ModelRef]) -> str:
     """The granted model id a worker model name means ("astra" -> gpt-6-astra), or a plain refusal.
 
     Only this run's allowed models are candidates, so a name never resolves to a
-    model the fleet can't use; an ambiguous name lists what it could mean.
+    model the fleet can't use; an ambiguous name lists what it could mean. The
+    local Opus fast preset is never a worker model: only the legacy path expands it.
     """
-    from daimon.core.agent_model_names import resolve_model
+    from daimon.core.agent_model_names import AmbiguousModel, resolve_model
+    from daimon.core.model_presets import OPUS_FAST
 
-    allowed = _allowed_models(models)
+    allowed = tuple(model for model in _allowed_models(models) if model.id != OPUS_FAST)
     try:
         return resolve_model(value, available=allowed).id
-    except ValueError as error:
-        if "could mean" in str(error):
-            raise ToolError(f"{error} Allowed in this fleet: {_allowed_line(allowed)}.") from None
+    except AmbiguousModel as error:
+        raise ToolError(f"{error} Allowed in this fleet: {_allowed_line(allowed)}.") from None
+    except ValueError:
         raise ToolError(
             f'"{value}" isn\'t allowed in this fleet; allowed: {_allowed_line(allowed)}.'
         ) from None
@@ -109,7 +111,7 @@ async def _refusals_logged(
             field=error.field,
             reason=error.reason,
         )
-        what = "model" if error.field == "backend" else error.field.replace("_", " ")
+        what = "model or backend" if error.field == "backend" else error.field.replace("_", " ")
         raise ToolError(
             f"The worker's {what} {_REASONS.get(error.reason, error.reason.replace('_', ' '))}."
         ) from None
@@ -396,12 +398,14 @@ class HostFleetToolService:
                     if isinstance(backend_id, str) and isinstance(model_id, str):
                         models.append(ModelRef(provider=cast(Provider, backend_id), id=model_id))
                 plan_parent = replace(parent, models=tuple(models))
-            # Every planned entry resolves first: one bad name must not refuse every worker.
+            # Names resolve to granted ids first, so "astra" no longer refuses the plan;
+            # a name that resolves to nothing still refuses it, in plain words.
             planned_models = [
                 fleet_model(name, (*plan_parent.models, plan_parent.spec.model))
                 for name in planned_models
             ]
             granted = {model.id for model in (*plan_parent.models, plan_parent.spec.model)}
+            # Safety net: fleet_model only returns allowed ids, so this should never fire.
             unknown = sorted(set(planned_models) - granted)
             if unknown:
                 raise ToolError(

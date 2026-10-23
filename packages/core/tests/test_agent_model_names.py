@@ -83,13 +83,15 @@ def test_typo_in_an_explicit_version_never_chooses_another_version():
         resolve_model("opuss 4.9")
 
 
-def test_opus_fast_is_chosen_only_by_name_never_by_family_shorthand():
-    # Friction #80: "Opus 5.5 fast" was not in the catalog at all.
-    assert resolve_model("opus 5.5 fast").id == "claude-opus-5-5-fast"
-    assert resolve_model("Opus fast").id == "claude-opus-5-5-fast"
-    # Plain "opus" / "Opus 5.5" still mean the standard, cheaper model.
-    assert resolve_model("opus").id == "claude-opus-5-5"
-    assert resolve_model("Opus 5.5").id == "claude-opus-5-5"
+def test_family_shorthand_never_means_the_pricier_fast_preset():
+    fast = ModelRef(provider="anthropic", id="claude-opus-5-5-fast")
+    standard = ModelRef(provider="anthropic", id="claude-opus-5-5")
+    # The preset is a local key, not a catalog model: it never resolves by default.
+    with pytest.raises(ValueError):
+        resolve_model("opus 5.5 fast")
+    # Even where a list carries it, "opus" means the standard model.
+    assert resolve_model("opus", available=(fast, standard)) == standard
+    assert resolve_model("opus", available=(standard, fast)) == standard
 
 
 @pytest.mark.parametrize(
@@ -97,6 +99,7 @@ def test_opus_fast_is_chosen_only_by_name_never_by_family_shorthand():
     [
         ("anthropic", "claude-opus-5-5", "Claude Opus 5.5"),
         ("anthropic", "claude-opus-5-5-fast", "Claude Opus 5.5 fast"),
+        ("anthropic", "claude-opus-9-1", "Claude Opus 9.1"),
         ("openai", "gpt-6-astra", "GPT-6 Astra"),
         ("openai", "gpt-6-luna", "GPT-6 Luna"),
         ("gemini", "gemini-4-argon", "Gemini 4 Argon"),

@@ -257,11 +257,11 @@ Register connect_microsoft and the Microsoft Graph tools (Teams only).
 
 ## `models`
 
-``list_models``: the models an agent can be set to, by name, with list prices.
+``list_models``: the models an agent here can be set to, by name, with list prices.
 
 | Tool | Who can call it | Purpose |
 | --- | --- | --- |
-| `list_models` | all callers | List the models an agent can run on: plain name, id, provider and list price. |
+| `list_models` | all callers | List the models an agent here can run on: plain name, id, provider and list price. |
 
 ## `notebook`
 
