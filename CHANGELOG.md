@@ -7,6 +7,7 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
+- On the opt-in mux turn path, a message to a conversation that has moved now gets the same "This conversation moved" answer as on legacy, rather than a scope error. A caller outside the conversation's tenant or thread still gets the scope error.
 - Fleet: a worker running as an agent created with `daimon agents create` (with model controls such as speed) no longer fails at dispatch. An agent on OpenAI or Gemini can be a worker: what that provider's worker can't carry (its native tools, skills, MCP, memory, sandbox, model controls) becomes a declared loss, together with the losses its owner accepted for that backend. The root may declare more with `agent={"name": …, "declared_drops": […]}`, and the spawn reply lists every loss. The "Fleet is still working" answer no longer lists worker states that went stale; the fleet card shows progress and ends in the run's final state.
 
 - Admins can clear a channel's model-provider pin from chat: "clear this channel's pin" shows what the channel pins and clears it after the admin confirms on the card, so each agent answers there on its own provider again. Refusals and provider switches that mention a channel pin now give those words.
