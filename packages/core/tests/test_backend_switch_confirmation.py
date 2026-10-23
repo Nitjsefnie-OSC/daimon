@@ -914,6 +914,77 @@ async def test_card_names_the_model_and_where_the_switch_applies(
     assert await service.current(agent) is None
 
 
+@pytest.mark.parametrize("case", ["not_owner", "stale", "allowlist_not_admin"])
+async def test_a_refused_prepare_reaches_the_model_with_its_reason(owned_preview, case):
+    """prepare raises a typed refusal, and the turn passes its reason on."""
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import ConfirmationRefused, backend_switch_callbacks
+    from daimon.core.fleet_configuration import ConfigurationReference
+    from daimon.core.tool_safety import OPEN_TOOL_SAFETY
+    from daimon.core.turn.approvals import chat_tool_confirmation
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=case == "stale"),
+    )
+
+    def shaped(card):
+        if case != "allowlist_not_admin":
+            return card
+        return card.model_copy(
+            update={
+                "backend_switch": None,
+                "configuration": ConfigurationReference(
+                    operation="provider_allowlist",
+                    providers=("anthropic",),
+                    expected_revision="r1",
+                    preview_digest="0" * 64,
+                ),
+            }
+        )
+
+    reason = {
+        "allowlist_not_admin": "This change needs a current workspace admin.",
+        "stale": "This preview changed. Preview and confirm again.",
+        "not_owner": "This change needs the agent's owner or a current workspace admin.",
+    }[case]
+    if case == "stale":
+        payload["system"] = "Changed after the preview"
+    if case != "allowlist_not_admin":
+        trace.queue(reply())
+    with pytest.raises(ConfirmationRefused, match=reason) as refused:
+        await prepare(shaped(prompt))
+    assert refused.value.stale is (case == "stale")
+
+    async def confirm(card):
+        return await prepare(shaped(card))
+
+    posture = chat_tool_confirmation(
+        OPEN_TOOL_SAFETY,
+        requester_platform_user_id="requester",
+        confirm=confirm,
+        trusted_servers=frozenset({DAIMON_SERVER_NAME}),
+        confirmed_tools=frozenset({"request_agent_backend_switch"}),
+    )
+    if case != "allowlist_not_admin":
+        trace.queue(reply())
+    reference = prompt.backend_switch
+    result = await posture.decide(
+        _call(
+            expected_revision=reference.expected_revision,
+            preview_digest=reference.preview_digest,
+        )
+    )
+    assert result.allow is False
+    assert reason in (result.deny_message or ""), "the real reason, not 'could not be shown'"
+
+
 async def test_the_agents_owner_may_confirm_without_being_an_admin(owned_preview):
     from unittest.mock import AsyncMock
 

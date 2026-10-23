@@ -35,6 +35,7 @@ from daimon.core.confirmation import (
     no_confirmation_surface,
     prompt_for_tool_call,
 )
+from daimon.core.posted_controls.confirmation import refused_after_approval
 from daimon.core.stores import agent_tool_rules
 from daimon.core.stores.agent_tool_rules import DaimonRuleSet
 from daimon.core.tool_safety import (
@@ -385,11 +386,19 @@ def _card_failed_message(call: ToolCall) -> str:
     )
 
 
-def _card_refused_message(call: ToolCall, reason: str) -> str:
-    return (
-        f"{call.key} did not run and no approval card was shown: {reason} Nothing was "
-        "changed and the person did not refuse it. Do not retry it until that changes. "
-        "Tell the person in one line why it could not run, in plain words."
+def _card_refused_message(call: ToolCall, refusal: ConfirmationRefused) -> str:
+    shown = (
+        f"{call.key} did not run and no approval card was shown: {refusal} Nothing was "
+        "changed and the person did not refuse it. "
+    )
+    if refusal.stale:
+        return shown + (
+            "The preview it was based on changed. Run the preview again, then call this "
+            "again with the new preview; don't repeat the same call."
+        )
+    return shown + (
+        "Do not retry it until that changes. Tell the person in one line why it could not "
+        "run, in plain words."
     )
 
 
@@ -526,9 +535,9 @@ def interactive_decider(
             response = await confirm(prompt)
         except ConfirmationRefused as err:
             # The card's own check said why it can't be shown; pass that on.
-            log.info("tool_safety.confirm_refused", tool=call.key, reason=str(err))
+            log.info("tool_safety.confirm_refused", tool=call.key, reason=str(err), stale=err.stale)
             return ToolConfirmationResult(
-                allow=False, deny_message=_card_refused_message(call, str(err))
+                allow=False, deny_message=_card_refused_message(call, err)
             )
         except Exception as err:
             # Named boundary: prompt validation and the adapter's card must
@@ -547,7 +556,8 @@ def interactive_decider(
                 )
                 if read_failed or (latest is not None and latest.rule == "deny"):
                     if isinstance(response, ApprovedConfirmation):
-                        await response.retire_unsent()
+                        with refused_after_approval():
+                            await response.retire_unsent()
                     return ToolConfirmationResult(
                         allow=False,
                         deny_message=(

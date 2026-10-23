@@ -164,8 +164,8 @@ async def test_approved_click_without_save_has_no_rule_to_replay(
     assert future.result() == "approved"
     restarted: PostedConfirmations[object] = PostedConfirmations()  # type: ignore[type-var]
     assert restarted.claim_admin(token) == (
-        "This request is no longer active, so nothing ran. Ask again to run it."
-    ), "a restarted process never settled this token, so it must not claim it was answered"
+        "This request is no longer active. Ask again if it still needs doing."
+    ), "a restarted process never saw this token: it claims neither an answer nor a non-run"
     async with db_session_factory() as session:
         assert (
             await store.get_rule(

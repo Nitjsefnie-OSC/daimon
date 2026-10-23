@@ -30,8 +30,8 @@ from daimon.core.confirmation import (
 from daimon.core.native_admins import GroupMembersCache
 from daimon.core.posted_controls.confirmation import (
     EXPIRED_MESSAGE,
-    NO_LONGER_ACTIVE_MESSAGE,
     NOT_YOURS_MESSAGE,
+    STOPPED_MESSAGE,
     ConfirmationCardState,
     build_confirmation_card,
 )
@@ -440,6 +440,7 @@ async def test_an_unanswered_card_expires_and_is_retired() -> None:
     assert answer == "expired"
     assert sender.activities[-1].id == "m-1", "the posted card is edited in place"
     assert "Expired" in _json(sender, -1) and "Action.Execute" not in _json(sender, -1)
+    assert "Nothing ran. Ask again to run it." in _json(sender, -1)
     token = re.search(r'"token":"([^"]+)"', _json(sender, 0))
     assert token is not None
     assert cards._controls.missing_message(token.group(1)) == EXPIRED_MESSAGE
@@ -471,7 +472,7 @@ async def test_a_cancelled_wait_retires_the_card_and_ignores_late_clicks() -> No
     assert sender.activities[-1].id == "m-1" and "Stopped" in _json(sender, -1)
     assert "Nothing ran. Ask again to run it." in _json(sender, -1)
     late = await cards.on_action(_click(token, "approve", AAD_OBJECT_ID))
-    assert late.value == NO_LONGER_ACTIVE_MESSAGE, "a stopped card was never answered"
+    assert late.value == STOPPED_MESSAGE, "a stopped card was never answered"
     assert len(sender.sent) == 2, "a late click changes nothing"
 
 

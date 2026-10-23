@@ -18,11 +18,14 @@ from daimon.core.posted_controls.confirmation import (
     NO_LONGER_ACTIVE_MESSAGE,
     NO_LONGER_PENDING_MESSAGE,
     NOTHING_RAN_FOOTER,
+    RULE_REFUSED_FOOTER,
+    STOPPED_MESSAGE,
     build_confirmation_blocks,
     build_confirmation_card,
     confirmation_card_text,
     confirmation_custom_id,
     parse_confirmation_custom_id,
+    refused_after_approval,
 )
 from daimon.core.posted_controls.lifecycle import (
     PostedConfirmations,
@@ -92,6 +95,13 @@ def test_a_card_retired_unanswered_says_nothing_ran(state: str) -> None:
     assert blocks[-1]["elements"][0]["text"] == "Nothing ran. Ask again to run it."
 
 
+def test_a_card_the_agents_rule_refused_after_approval_does_not_say_ask_again() -> None:
+    with refused_after_approval():
+        card = build_confirmation_card(_prompt(), state="stopped")
+    assert card.footer == RULE_REFUSED_FOOTER and "Ask again" not in card.footer
+    assert build_confirmation_card(_prompt(), state="stopped").footer == NOTHING_RAN_FOOTER
+
+
 def test_expiry_says_what_to_do_next() -> None:
     assert EXPIRED_MESSAGE == "This request expired, so nothing ran. Ask again to run it."
 
@@ -114,7 +124,37 @@ async def test_only_a_token_settled_here_reads_already_answered() -> None:
     assert controls.claim(token, "U1", "approved") is None
     assert future.result() == "approved"
     assert controls.claim(token, "U1", "approved") == NO_LONGER_PENDING_MESSAGE
-    assert controls.claim("tok_unknown1", "U1", "approved") == NO_LONGER_ACTIVE_MESSAGE
+    unknown = controls.claim("tok_unknown1", "U1", "approved")
+    assert unknown == NO_LONGER_ACTIVE_MESSAGE
+    assert "nothing ran" not in unknown, "an unknown token may have run before a restart"
+
+
+async def test_a_click_after_the_turn_stopped_says_stopped_even_if_a_click_won() -> None:
+    controls: PostedConfirmations[object] = PostedConfirmations()  # type: ignore[type-var]
+    prompt = _prompt().model_copy(update={"expires_at": datetime.now(UTC).replace(year=2099)})
+    retired: list[str] = []
+    clicked = asyncio.Event()
+
+    async def post(token: str) -> object:
+        posted = type("Card", (), {"prompt": prompt, "token": token})()
+        clicked.set()
+        return posted
+
+    async def retire(_card: object, state: str) -> None:
+        retired.append(state)
+
+    waiter = asyncio.create_task(
+        controls.confirm(prompt, post=post, retire=retire, post_errors=())  # type: ignore[arg-type]
+    )
+    await clicked.wait()
+    await asyncio.sleep(0)
+    (token,) = list(controls.cards)
+    assert controls.claim(token, "U1", "approved") is None
+    waiter.cancel()
+    with pytest.raises(asyncio.CancelledError):
+        await waiter
+    assert retired == ["stopped"]
+    assert controls.missing_message(token) == STOPPED_MESSAGE
 
 
 async def test_a_click_on_a_stopped_local_card_says_nothing_ran() -> None:
@@ -123,7 +163,7 @@ async def test_a_click_on_a_stopped_local_card_says_nothing_ran() -> None:
     future.cancel()
     assert (
         settle_local_confirmation(prompt, future, "U1", "approved")  # type: ignore[arg-type]
-        == NO_LONGER_ACTIVE_MESSAGE
+        == STOPPED_MESSAGE
     )
     answered: asyncio.Future[str] = asyncio.get_running_loop().create_future()
     answered.set_result("denied")

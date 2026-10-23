@@ -19,6 +19,7 @@ from daimon.core.posted_controls.confirmation import (
     NO_LONGER_ACTIVE_MESSAGE,
     NO_LONGER_PENDING_MESSAGE,
     NOT_YOURS_MESSAGE,
+    STOPPED_MESSAGE,
     ConfirmationCardState,
 )
 
@@ -182,6 +183,8 @@ class PostedConfirmations[Card: PromptCard]:
         self.expired_tokens: deque[str] = deque(maxlen=512)
         #: Tokens a click settled here, the only ones "already answered" is true for.
         self.answered_tokens: deque[str] = deque(maxlen=512)
+        #: Tokens whose turn was stopped while the card waited: nothing ran.
+        self.stopped_tokens: deque[str] = deque(maxlen=512)
 
     async def confirm(
         self,
@@ -203,6 +206,8 @@ class PostedConfirmations[Card: PromptCard]:
             answer = await self.pending.wait(token, future, timeout_s=timeout_s)
         except BaseException:
             self.cards.pop(token, None)
+            # Even a click that won is overridden: the turn never resumed.
+            self.stopped_tokens.append(token)
             # A winning click pops the token before its waiter resumes. The
             # posted card still needs Stopped if the turn is cancelled then.
             await retire(posted, "stopped")
@@ -214,10 +219,15 @@ class PostedConfirmations[Card: PromptCard]:
         return answer
 
     def missing_message(self, token: str) -> str:
-        """Why a click found no live card. A token this process never settled
-        is from before a restart or a stopped turn, so nothing ran."""
+        """Why a click found no live card.
+
+        Only what this process saw is claimed: a token it never saw may have
+        run before a restart, so that reply says nothing about whether it ran.
+        """
         if token in self.expired_tokens:
             return EXPIRED_MESSAGE
+        if token in self.stopped_tokens:
+            return STOPPED_MESSAGE
         if token in self.answered_tokens:
             return NO_LONGER_PENDING_MESSAGE
         return NO_LONGER_ACTIVE_MESSAGE
@@ -272,7 +282,7 @@ def _stopped_message(
 ) -> str | None:
     """A cancelled future is a stopped turn, not an answer: nothing ran."""
     if refusal == NO_LONGER_PENDING_MESSAGE and future is not None and future.cancelled():
-        return NO_LONGER_ACTIVE_MESSAGE
+        return STOPPED_MESSAGE
     return refusal
 
 
