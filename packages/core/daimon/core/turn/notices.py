@@ -218,6 +218,10 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
         "This agent's model provider isn't available here right now.",
         "Ask {who} to check which provider {agent_mid} uses.",
     ),
+    "provider_hold_cap_reached": _Copy(
+        "This model's prepaid spending hold is used up.",
+        "Ask {who} to release or raise it.",
+    ),
 }
 # A provider refusal names its real cause and the chat words that fix it.
 _BACKEND_REFUSALS: dict[BackendRefusalCause, _Copy] = {

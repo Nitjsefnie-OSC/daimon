@@ -29,6 +29,9 @@ AdmissionDenialReason = Literal[
     # The channel's backend configuration (`daimon.core.channel_backend`) names
     # a profile that cannot meet it, or one this release cannot run yet.
     "backend_unsupported",
+    # The operator's prepaid hold for a provider's attempts (Gemini Flash) is used
+    # up. Nothing to do with a channel budget; an admin releases or raises it.
+    "provider_hold_cap_reached",
 ]
 # Why a `backend_unsupported` turn refused, for copy that names the fix: the
 # channel's own backend pin, a provider the tenant's allowlist doesn't turn on,

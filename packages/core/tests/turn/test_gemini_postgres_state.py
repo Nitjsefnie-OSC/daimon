@@ -146,7 +146,7 @@ async def test_postgres_definite_4xx_refusal_releases_its_hold(
         await holds(sessions, scope).before_attempt(model=model, attempt=1)
     else:
         assert row["held_usd"] == "0.49" and "released_usd" not in row
-        with pytest.raises(AdmissionDenied, match="channel_budget_exceeded"):
+        with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
             await holds(sessions, scope).before_attempt(model=model, attempt=1)
 
 
@@ -163,7 +163,7 @@ async def test_postgres_concurrent_holds_and_receipts_survive_restart(postgres_s
     result = await asyncio.gather(attempt(), attempt(), return_exceptions=True)
     assert sum(value is None for value in result) == 1
     assert sum(isinstance(value, AdmissionDenied) for value in result) == 1
-    with pytest.raises(AdmissionDenied, match="channel_budget_exceeded"):
+    with pytest.raises(AdmissionDenied, match="provider_hold_cap_reached"):
         await holds(sessions, scope).before_attempt(model=model, attempt=1)
     async with sessions() as db:
         bodies = (await db.scalars(select(GeminiRuntimeState.body))).all()

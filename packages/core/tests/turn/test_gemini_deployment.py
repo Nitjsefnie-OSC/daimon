@@ -1072,7 +1072,7 @@ async def test_holds_survive_restart_and_refusal_never_releases_budget(
     )
     with pytest.raises(AdmissionDenied) as error:
         await accounting().before_attempt(model=model, attempt=1)
-    assert error.value.reason == "channel_budget_exceeded"
+    assert error.value.reason == "provider_hold_cap_reached"
 
 
 async def test_argon_attempt_holds_and_near_miss_ids_refuse(tmp_path: Path) -> None:

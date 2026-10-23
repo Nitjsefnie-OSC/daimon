@@ -683,6 +683,8 @@ async def create_session(
     )
     resource_agent = agent
     source_channel_skills = channel_skills
+    # A worker that declared its memory dropped mounts no store and never creates one.
+    memoryless = False
     if resource_source is not None or worker is not None:
         from daimon.core.turn.runtime_manifest import worker_source_ceiling
 
@@ -718,8 +720,12 @@ async def create_session(
         )
         # Source authority is refreshed before resource effects and at the existing final fence.
         await before_create()
+        memoryless = "memory" in worker.spec.declared_drops
         if (
-            resource_source.memory_store_id is None
+            (resource_source.memory_store_id is None and not memoryless)
+            # A native session always runs in its environment: a sandbox loss
+            # has no proven native form, so it still refuses here.
+            or "sandbox" in worker.spec.declared_drops
             or worker_source_ceiling(resource_source).resource_requirements
             or resource_source.repository_sources
             or extra_resources
@@ -727,9 +733,18 @@ async def create_session(
             raise UnsupportedCapability(
                 ("native_worker_resource_projection",), worker.backend.profile
             )
+        if len(worker.resources) != (0 if memoryless else 1):
+            raise ScopeViolation(
+                "worker-resources",
+                "a worker that dropped memory mounts nothing"
+                if memoryless
+                else "one granted warm memory mount required",
+            )
+    if worker is not None and resource_source is not None and not memoryless:
+        assert resource_source.memory_store_id is not None
+        scope = resource_source.resource_scope
+        assert scope is not None
         expected = memory_mount(resource_source.memory_store_id, read_only=memory_read_only)
-        if len(worker.resources) != 1:
-            raise ScopeViolation("worker-resources", "one granted warm memory mount required")
         binding = worker.resources[0]
         native, ref = binding.native, binding.resource
         if (
@@ -742,6 +757,7 @@ async def create_session(
             or binding.credential_ref is not None
             or ref.kind != "memory_store"
             or ref.id != resource_source.memory_store_id
+            or resource_source.source is None
             or ref.provider != resource_source.source.ref.provider
             or (ref.tenant_id, ref.account_id) != (scope.tenant_id, scope.account_id)
             or native.value != {"resource": expected}
@@ -904,7 +920,9 @@ async def create_session(
             # persistent memory this turn. The personal store is resolved
             # first because the shared store's instructions depend on it. A fleet
             # worker mounts only its source's captured warm store, never a person's.
-            if memory_hold is not None:
+            if memoryless:
+                pass
+            elif memory_hold is not None:
                 # A held turn mounts only its channel's store, shared with
                 # everyone there, so nothing agent-wide or personal can leak in.
                 try:
@@ -1251,14 +1269,20 @@ async def create_session(
                     observed.get(name) for name in ("agent", "resources")
                 )
                 assert worker is not None and tenant_id is not None and account_id is not None
-                assert resource_source.memory_store_id is not None
+                assert memoryless or resource_source.memory_store_id is not None
                 assert resource_source.memory_read_only is not None
                 assert (
                     agent_uuid is not None
                     and session_factory is not None
                     and before_create is not None
                 )
-                expected = memory_mount(resource_source.memory_store_id, read_only=memory_read_only)
+                readback: dict[str, object] = (
+                    {}
+                    if memoryless or resource_source.memory_store_id is None
+                    else dict(
+                        memory_mount(resource_source.memory_store_id, read_only=memory_read_only)
+                    )
+                )
                 scalars = ("id", "model", "system", "version", "multiagent")
                 fields = {*scalars, "tools", "mcp_servers", "skills"}
                 intent = agent.model_dump(mode="json")
@@ -1332,10 +1356,22 @@ async def create_session(
                 if (
                     not owned_created
                     or observed.get("archived_at") is not None
-                    or not isinstance(native_resources, list)
-                    or len(native_resources) != 1
-                    or not isinstance(native_resources[0], dict)
-                    or any(native_resources[0].get(key) != value for key, value in expected.items())
+                    or (
+                        # A memoryless worker's session reads back with no resources at
+                        # all. The API always returns the list (a required field of
+                        # BetaManagedAgentsSession), so a missing one is malformed too.
+                        native_resources != []
+                        if memoryless
+                        else (
+                            not isinstance(native_resources, list)
+                            or len(native_resources) != 1
+                            or not isinstance(native_resources[0], dict)
+                            or any(
+                                native_resources[0].get(key) != value
+                                for key, value in readback.items()
+                            )
+                        )
+                    )
                     or recaptured != resource_source
                 ):
                     raise ScopeViolation(

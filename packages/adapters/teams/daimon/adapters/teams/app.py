@@ -255,6 +255,7 @@ _DENIALS: dict[AdmissionDenialReason, str] = {
     "own_agents_only": "turn.skipped.own_agents_only",
     "client_requester": "turn.skipped.client_requester",
     "backend_unsupported": "turn.skipped.backend_unsupported",
+    "provider_hold_cap_reached": "turn.skipped.provider_hold_cap_reached",
 }
 
 
