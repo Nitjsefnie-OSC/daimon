@@ -15,7 +15,6 @@ from daimon.adapters.mcp.tools.here import (  # pyright: ignore[reportPrivateUsa
     _setter_display_name,
     _where_am_i_impl,
 )
-from daimon.core.config import RecruitmentSettings
 from daimon.core.stores.domain import Role
 from fastmcp.exceptions import ToolError
 
@@ -34,7 +33,6 @@ def _auth(*, platform: str = "discord") -> AuthIdentity:
 
 def _runtime() -> MagicMock:
     runtime = MagicMock()
-    runtime.settings.recruitment = RecruitmentSettings()
     runtime.settings.github.fallback_pat = None
     runtime.settings.github.app_id = None
     runtime.settings.github.app_private_key = None

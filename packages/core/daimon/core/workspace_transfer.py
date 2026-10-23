@@ -101,7 +101,6 @@ from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.lifecycle import TurnLifecycle
 from daimon.core.turn.outcomes import current_outcome
 from daimon.core.turn.posture import Billed, UsageRecorder
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState, extract_final_response
 from daimon.core.turn.unattended import (
     session_gate,
@@ -425,7 +424,6 @@ async def transfer_workspace(
     client: AsyncAnthropic,
     sessionmaker: async_sessionmaker[AsyncSession],
     *,
-    privacy: TurnPrivacy,
     old_session_id: str,
     old_snapshot: SessionSnapshot,
     tenant_id: uuid.UUID,
@@ -475,7 +473,6 @@ async def transfer_workspace(
     on `events.list`, a DB error), because those are bugs or outages the
     caller's boundary should see, not states to paper over.
     """
-    privacy.check()
     turn_scope = (
         Scope(
             tenant_id=str(tenant_id),
@@ -571,7 +568,6 @@ async def transfer_workspace(
         )
     ):
         state = await run_turn(
-            privacy=privacy,
             anthropic=client,
             session_id=old_session_id,
             scope=turn_scope,
@@ -803,7 +799,6 @@ class WorkspaceTransferRunner:
     site and called at most once per replacement.
     """
 
-    privacy: TurnPrivacy
     anthropic: AsyncAnthropic
     sessionmaker: async_sessionmaker[AsyncSession]
     tenant_id: uuid.UUID
@@ -839,7 +834,6 @@ class WorkspaceTransferRunner:
         outcome = await transfer_workspace(
             self.anthropic,
             self.sessionmaker,
-            privacy=self.privacy,
             old_session_id=old_session_id,
             old_snapshot=old_snapshot,
             tenant_id=self.tenant_id,

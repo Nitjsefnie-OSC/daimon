@@ -9,7 +9,6 @@ from daimon.core.scheduler import RoutineDispatcher, run_one_tick
 from daimon.core.stores.domain import CatchUpPolicy, RoutineRow
 from daimon.core.stores.routines import create_routine, get_routine, update_routine
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.testing.factories import make_tenant
 from sqlalchemy.ext.asyncio import AsyncEngine, AsyncSession, async_sessionmaker
 
@@ -407,7 +406,6 @@ async def test_dispatch_timeout_through_headless_records_ceiling(
 
         async def fire(row: RoutineRow) -> None:
             await run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 agent_id=row.agent_id,
                 environment_id="env",

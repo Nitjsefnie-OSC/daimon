@@ -7,38 +7,9 @@ and this project adheres to [Semantic Versioning](https://semver.org/spec/v2.0.0
 
 ## [Unreleased]
 
-- Hide saved routine triggers/results from MCP, CLI and Discord controls when
-  their source or destination becomes reserved for recruitment, including
-  unknown legacy provenance. Restore this bot's `/recruitment` status, refresh,
-  retry and discard commands inside reserved channels with live recruiter checks.
-- Document the Discord reader registry as a syntax review ratchet with known
-  limits and `TurnPrivacy` as a trusted-caller declaration contract; prepared
-  turns prefer the admitted tenant over a repeated caller argument.
+### Removed
 
-### Changed
-
-- Reserve configured recruitment parent channels and their threads for human
-  staffing. Replace dynamic privacy filters and database configuration with
-  restart-bound tenant settings; reject general classifiers, DM transfers and
-  Discord MCP readers before content access. Fence confirmations with durable
-  event watermarks, including new messages, and exclude own-card echoes.
-
-### Fixed
-
-- Close recruitment boundaries for unresolved Discord channel forms, lead intake
-  and recovery, saved channel routines, persistent wizard controls and channel
-  metadata. Require explicit source authority at the core turn driver and gate
-  controls before SDK dispatch. Record complete bulk-delete events atomically;
-  audit runtime Discord readers with a discovery-based regression registry.
-- Recruitment tracks edits and deletions after raw-data retention, fences source events
-  before enrichment, and preserves backend uncertainty independently of later errors.
-  Empty recruitment settings require no privacy database or HTTP lookups.
-
-### Added
-
-- Opt-in recruiter-reviewed Discord staffing threads with a tenant-scoped encrypted ledger,
-  revision-bound confirmation, durable recruitment API outbox, candidate privacy guards,
-  configurable retention and a synthetic QA backend.
+- Staffing threads removed from Daimon OS; they stay internal-only.
 
 ### Added
 

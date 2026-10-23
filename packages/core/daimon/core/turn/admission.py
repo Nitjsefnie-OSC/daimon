@@ -339,16 +339,6 @@ async def admit(
     category_unresolved: bool = False,
     observer: AdmissionObserver | None = None,
 ) -> Admission:
-    if platform == "discord":
-        from daimon.core.ma_identity import derive_tenant_uuid
-
-        for guild_id in deps.recruitment.tenants:
-            if derive_tenant_uuid(
-                platform="discord", workspace_id=guild_id
-            ) == tenant_id and deps.recruitment.is_recruitment_channel(
-                guild_id, thread_id or channel_id, dm_source_channel_id or channel_id
-            ):
-                raise AdmissionDenied(reason="writers_none")
     observation = current_outcome.get() or TurnObservation(
         deps.sessionmaker, tenant_id, platform, channel_id, thread_id
     )

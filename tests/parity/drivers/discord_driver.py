@@ -59,7 +59,6 @@ from daimon.core.config import (
     DatabaseSettings,
     DiscordSettings,
     McpSettings,
-    RecruitmentSettings,
     Settings,
     ThreadNamingSettings,
 )
@@ -318,7 +317,6 @@ class DiscordDriver:
         billing_config: object | None = None,
     ) -> DiscordRuntime:
         settings = MagicMock()
-        settings.recruitment = RecruitmentSettings()
         settings.agent_identity.enabled = True
         settings.mcp = McpSettings()
         settings.billing.markup = Decimal("1.0")
@@ -573,7 +571,6 @@ class DiscordDriver:
         agent-scoped copy of the token), and a turn needs neither.
         """
         settings = MagicMock()
-        settings.recruitment = RecruitmentSettings()
         settings.agent_identity.enabled = True
         settings.mcp.public_url = _MCP_PUBLIC_URL
         settings.mcp.jwt_secret = SecretStr(_MCP_JWT_SECRET)

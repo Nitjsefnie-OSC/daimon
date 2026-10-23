@@ -89,7 +89,6 @@ from daimon.core.turn.prepare import (
     bind_recorder,
     create_fresh_session,
 )
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.usage_sweep import settle_stamped_session
 from daimon.testing.factories import make_account, make_tenant
 from daimon.testing.ma import (
@@ -827,7 +826,6 @@ async def test_replacement_checkpoint_live_and_recovered_debits_use_old_channel(
 
     monkeypatch.setattr(WorkspaceTransferRunner, "__call__", checkpoint)
     runner = WorkspaceTransferRunner(
-        privacy=TurnPrivacy("test"),
         anthropic=deps.anthropic,
         sessionmaker=db_session_factory,
         tenant_id=tenant.id,

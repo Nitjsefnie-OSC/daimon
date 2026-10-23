@@ -20,7 +20,7 @@ from daimon.adapters.discord.commands.direct_messages import DirectMessageCog
 from daimon.adapters.discord.runtime import DiscordRuntime
 from daimon.core import direct_messages as core_direct_messages
 from daimon.core.access_policy import TenantAccessPolicy
-from daimon.core.config import McpSettings, RecruitmentSettings, TurnQueueSettings
+from daimon.core.config import McpSettings, TurnQueueSettings
 from daimon.core.direct_messages import reply_to_dm, start_dm
 from daimon.core.errors import DaimonError
 from daimon.core.handoff_context import TranscriptTurn
@@ -41,7 +41,6 @@ from daimon.core.stores.thread_sessions import create_thread_session, get_live_t
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
 from daimon.core.turn.admission import AdmissionDenied, admit
 from daimon.core.turn.deps import TurnDeps
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn_queue import TurnQueue
 from daimon.testing import build_turn_router
 from daimon.testing.db import build_test_engine
@@ -421,7 +420,6 @@ async def test_discord_dm_waits_for_a_global_slot_and_releases_on_success_and_er
     tenant, deps, admission, *_ = await _setup(db_session, db_session_factory)
     await _start(tenant, deps, admission)
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
     settings.discord.max_concurrent_turns = 1
     settings.turn_queue = TurnQueueSettings()
     runtime = DiscordRuntime(
@@ -562,7 +560,6 @@ async def test_discord_drain_stops_a_running_dm_and_never_starts_a_queued_one(
     tenant, deps, admission, sent, *_ = await _setup(db_session, db_session_factory)
     route = await _start(tenant, deps, admission)
     settings = MagicMock()
-    settings.recruitment = RecruitmentSettings()
     settings.discord.max_concurrent_turns = 1
     settings.turn_queue = TurnQueueSettings()
     runtime = DiscordRuntime(
@@ -662,7 +659,6 @@ async def test_discord_move_command_seeds_and_runs_a_real_private_turn(
     bot.user.id = 999
     bot.runtime.sessionmaker = db_session_factory
     bot.runtime.turn_deps = deps
-    bot.runtime.settings.recruitment = deps.recruitment
     bot.turn_queue = TurnQueue.from_settings(TurnQueueSettings(), platform="discord")
     guild = MagicMock(spec=discord.Guild)
     guild.id = 123
@@ -1319,7 +1315,6 @@ async def test_signed_dm_execution_cannot_be_borrowed_by_concurrent_headless_or_
         private_tokens.append(token)
         # Run the real headless assembly and driver while the DM context is live.
         await headless_turn(
-            privacy=TurnPrivacy("rehearsal"),
             anthropic=deps.anthropic,
             agent_id=admission.agent.id,
             environment_id=admission.environment.id,
@@ -1662,7 +1657,6 @@ async def test_discord_dm_move_from_thread_under_sealed_parent_refuses_with_real
     interaction.followup.send = AsyncMock()
     bot = MagicMock()
     bot.runtime.turn_deps = deps
-    bot.runtime.settings.recruitment = deps.recruitment
     bot.runtime.sessionmaker = db_session_factory
     cog = DirectMessageCog(bot)
 

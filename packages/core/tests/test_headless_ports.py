@@ -6,7 +6,6 @@ import httpx
 import pytest
 from daimon.core import headless_runner
 from daimon.core.tool_safety import OPEN_TOOL_SAFETY
-from daimon.core.turn.privacy import TurnPrivacy
 from daimon.core.turn.state import TurnState
 from daimon.testing.ma import MARouter
 from daimon.testing.ma_models import ma_agent, ma_environment, ma_session
@@ -54,7 +53,6 @@ async def test_headless_resource_requests_match_direct_sdk(
     async with after.client() as client:
         assert (
             await headless_runner.run_turn(
-                privacy=TurnPrivacy("test"),
                 anthropic=client,
                 agent_id=agent.id,
                 environment_id=environment.id,
