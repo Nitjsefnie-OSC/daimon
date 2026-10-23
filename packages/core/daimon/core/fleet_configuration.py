@@ -176,6 +176,62 @@ def default_fleet_grant(policy: TenantBackendPolicy) -> AgentFleetGrant | None:
     )
 
 
+def _choice_keys(grant: AgentFleetGrant) -> set[str]:
+    return {
+        json.dumps([backend.model_dump(mode="json"), model.model_dump(mode="json")], sort_keys=True)
+        for backend, model in grant.choices
+    }
+
+
+def fleet_grant_within(new: AgentFleetGrant, ceiling: AgentFleetGrant) -> bool:
+    """Whether `new` only tightens `ceiling`, in every dimension (an owner's edit)."""
+
+    def capped(value: Decimal | int | None, limit: Decimal | int | None) -> bool:
+        # An absent limit on the ceiling allows any finite value; a present one bounds it.
+        return limit is None or (value is not None and value <= limit)
+
+    a, b = new.limits, ceiling.limits
+    if b.provider_limits_usd is not None and (
+        a.provider_limits_usd is None
+        or any(
+            value > b.provider_limits_usd.get(provider, Decimal(0))
+            for provider, value in a.provider_limits_usd.items()
+        )
+    ):
+        return False
+    if isinstance(ceiling.worker_agents, tuple):
+        workers_ok = new.worker_agents is None or (
+            isinstance(new.worker_agents, tuple)
+            and set(new.worker_agents) <= set(ceiling.worker_agents)
+        )
+    elif ceiling.worker_agents is None:
+        workers_ok = new.worker_agents is None
+    else:
+        workers_ok = True
+    return (
+        workers_ok
+        and new.max_workers <= ceiling.max_workers
+        and _choice_keys(new) <= _choice_keys(ceiling)
+        and a.budget_usd <= b.budget_usd
+        and a.deadline <= b.deadline
+        and a.max_turns <= b.max_turns
+        and capped(a.max_model_requests, b.max_model_requests)
+        and capped(a.max_input_tokens, b.max_input_tokens)
+        and capped(a.max_output_tokens, b.max_output_tokens)
+        and capped(a.native_budget_usd, b.native_budget_usd)
+        and new.max_run_seconds <= ceiling.max_run_seconds
+        and new.max_worker_seconds <= ceiling.max_worker_seconds
+        and new.max_root_turns <= ceiling.max_root_turns
+        # Root spending controls are an admin's to grant: only within one already granted.
+        and _within_granted(new.native_root_budget_usd, ceiling.native_root_budget_usd)
+        and _within_granted(new.root_cash_budget_usd, ceiling.root_cash_budget_usd)
+    )
+
+
+def _within_granted(value: Decimal | None, limit: Decimal | None) -> bool:
+    return value is None or (limit is not None and value <= limit)
+
+
 def is_default_fleet(grant: AgentFleetGrant) -> bool:
     """A stored grant always has epoch >= 1; only the computed default has 0."""
     return grant.epoch == 0
@@ -547,6 +603,10 @@ def configuration_refusal(reason: str) -> str:
         "fleet_provider_limits_exceed_budget": (
             "The provider caps add up to more than the run budget. "
             "Lower them or raise the run budget before saving."
+        ),
+        "fleet_raise_admin_required": (
+            "Only an admin can raise fleet limits above the default (4 workers, $2 a run) "
+            "or above what an admin set. You can lower them, or turn fleet off."
         ),
         "invalid_fleet_grant": (
             "These fleet limits cannot be used. "

@@ -199,7 +199,9 @@ async def create_run(
         await session.execute(
             insert(FleetRunRow)
             .values(
-                id=uuid.uuid4(),
+                # Derived from the tenant's unique key (a retry hits the same row anyway),
+                # so creating a run draws no random id.
+                id=uuid.uuid5(tenant_id, "fleet-run:" + operation_key),
                 tenant_id=tenant_id,
                 operation_key=operation_key,
                 status="running",

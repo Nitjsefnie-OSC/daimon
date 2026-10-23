@@ -1401,11 +1401,11 @@ async def bind_session_impl(
                 from daimon.core.fleet_configuration import is_default_fleet
                 from daimon.core.turn.runtime_manifest import (
                     capture_preparation_source,
-                    read_agent_fleet_grant,
+                    read_agent_fleet_grant_or_off,
                 )
                 from daimon.core.turn_origin import current_origin_id
 
-                fleet_grant = await read_agent_fleet_grant(deps, result.admission, now=now())
+                fleet_grant = await read_agent_fleet_grant_or_off(deps, result.admission, now=now())
                 if (
                     fleet_grant is not None
                     and is_default_fleet(fleet_grant)

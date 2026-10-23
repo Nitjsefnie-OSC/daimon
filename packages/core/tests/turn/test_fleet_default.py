@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import json
 import uuid
 from dataclasses import replace
 from datetime import UTC, datetime, timedelta
@@ -35,6 +36,7 @@ from sqlalchemy import delete, func, select
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
+from ..test_agent_owner_settings import people as people
 from .test_fleet_source_permissions import NOW as SOURCE_NOW
 from .test_fleet_source_permissions import captured as captured
 from .test_frozen_root import freeze
@@ -511,3 +513,135 @@ async def test_every_default_model_has_its_backend_choice_and_resolves_as_a_work
         limits=limits,
     )
     assert child.spec.model.id == model and child.backend == matching[0]
+
+
+# --- Owners only tighten (LEAD 073727Z) ----------------------------------------------
+
+
+def _raise(grant: AgentFleetGrant, dimension: str) -> AgentFleetGrant:
+    """The default with exactly one dimension raised above it."""
+    data = grant.model_dump(mode="json")
+    limits = data["limits"]
+    if dimension == "workers":
+        data["max_workers"] = grant.max_workers + 1
+    elif dimension == "budget":
+        limits["budget_usd"] = str(grant.limits.budget_usd + 1)
+    elif dimension == "model":
+        lite = "gemini-3.5-flash-lite"
+        data["choices"].append(
+            (
+                backend_selection("gemini")
+                .model_copy(update={"model": lite})
+                .model_dump(mode="json"),
+                {"provider": "gemini", "id": lite},
+            )
+        )
+    elif dimension == "worker_seconds":
+        data["max_worker_seconds"] = grant.max_worker_seconds + 1
+    elif dimension == "run_seconds":
+        data["max_run_seconds"] = grant.max_run_seconds + 1
+    elif dimension == "root_turns":
+        data["max_root_turns"] = grant.max_root_turns + 1
+    elif dimension == "turns":
+        limits["max_turns"] = grant.limits.max_turns + 1
+    elif dimension == "expiry":
+        limits["deadline"] = (grant.expires_at + timedelta(days=1)).isoformat()
+    elif dimension == "root_budget":
+        data["native_root_budget_usd"] = "0.25"
+        data["root_cash_budget_usd"] = "1"
+    return AgentFleetGrant.model_validate_json(json.dumps(data))
+
+
+@pytest.fixture
+async def people_default(people):
+    service, agent, actors, sessions = people
+    default = default_fleet_grant(await service.tenant_policy(agent.tenant_id))
+    assert default is not None
+    return service, agent, actors, sessions, default
+
+
+@pytest.mark.parametrize(
+    "dimension",
+    [
+        "workers",
+        "budget",
+        "model",
+        "worker_seconds",
+        "run_seconds",
+        "root_turns",
+        "turns",
+        "expiry",
+        "root_budget",
+    ],
+)
+async def test_an_owner_can_not_raise_any_default_limit_but_an_admin_can(people_default, dimension):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    service, agent, actors, _, default = people_default
+    raised = _raise(default, dimension)
+    with pytest.raises(AgentBackendRefused, match="admin"):
+        await service.check_owner_fleet_ceiling(agent, raised, actors["owner"], now=NOW)
+    # The write itself (what the Confirm click executes) refuses too.
+    with pytest.raises(AgentBackendRefused) as refused:
+        await put(service, agent, actors["owner"], raised)
+    assert refused.value.reason == "fleet_raise_admin_required"
+    assert (await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)).kind == "default"
+    # An admin may raise it.
+    saved = await put(service, agent, actors["admin"], raised)
+    assert saved.fleet_grant is not None
+
+
+async def test_an_owner_tightens_the_default_and_an_admins_raise(people_default):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    service, agent, actors, _, default = people_default
+    tighter = default.model_copy(update={"max_workers": 2})
+    await put(service, agent, actors["owner"], tighter)
+    # Back up to the default is still within the default.
+    await put(service, agent, actors["owner"], default)
+    # An admin raises to 8; the owner may lower within it, never above it.
+    await put(service, agent, actors["admin"], default.model_copy(update={"max_workers": 8}))
+    await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 6}))
+    with pytest.raises(AgentBackendRefused, match="admin"):
+        await put(service, agent, actors["owner"], default.model_copy(update={"max_workers": 9}))
+    # The owner may still turn it off; a member may do nothing.
+    await put(service, agent, actors["owner"], None)
+    with pytest.raises(AgentBackendRefused):
+        await put(service, agent, actors["member"], tighter)
+
+
+def test_tightening_is_checked_for_worker_agents_provider_and_token_caps():
+    from daimon.core.fleet_configuration import fleet_grant_within
+
+    base = default_fleet_grant(policy(*ALL))
+    assert base is not None and fleet_grant_within(base, base)
+    one, two = uuid.uuid4(), uuid.uuid4()
+    listed = base.model_copy(update={"worker_agents": (one,)})
+    assert fleet_grant_within(listed, base)  # "any" -> a list tightens
+    assert not fleet_grant_within(base, listed)  # a list -> "any" widens
+    assert not fleet_grant_within(listed.model_copy(update={"worker_agents": (one, two)}), listed)
+    assert fleet_grant_within(listed.model_copy(update={"worker_agents": None}), listed)
+    capped = base.model_copy(
+        update={
+            "limits": base.limits.model_copy(
+                update={
+                    "provider_limits_usd": {"anthropic": Decimal("1")},
+                    "max_input_tokens": 4000,
+                }
+            )
+        }
+    )
+    assert fleet_grant_within(capped, base)  # adding caps tightens
+    assert not fleet_grant_within(base, capped)  # removing them widens
+    more = capped.model_copy(
+        update={
+            "limits": capped.limits.model_copy(
+                update={"provider_limits_usd": {"anthropic": Decimal("1"), "openai": Decimal("1")}}
+            )
+        }
+    )
+    assert not fleet_grant_within(more, capped)  # a new provider line widens
+    bigger = capped.model_copy(
+        update={"limits": capped.limits.model_copy(update={"max_input_tokens": 5000})}
+    )
+    assert not fleet_grant_within(bigger, capped)

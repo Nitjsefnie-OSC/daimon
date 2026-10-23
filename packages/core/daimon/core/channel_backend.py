@@ -457,6 +457,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "drops_required",
         "feature_disabled",
         "invalid_fleet_grant",
+        "fleet_raise_admin_required",
         "fleet_provider_limits_exceed_budget",
         "fleet_root_credentials",
         "fleet_root_mcp",
@@ -992,6 +993,10 @@ class AgentBackendService:
             if grant_operation:
                 if now is None:
                     raise AgentBackendRefused("invalid_fleet_grant")
+                if operation == "fleet_grant_set" and not admin:
+                    # An owner only tightens: within the default, or within the
+                    # agent's current custom grant (an admin's raise).
+                    await self._require_owner_ceiling(session, agent, current, fleet_grant, now=now)
                 preview = await self._fleet_preview(session, agent, fleet_grant, now=now)
                 backend = current.backend if current else None
                 model = current.model if current else None
@@ -1091,6 +1096,40 @@ class AgentBackendService:
                 scope=f"agent_backend:{agent.agent_id}:{revision.local}",
             )
             return revision
+
+    async def _require_owner_ceiling(
+        self,
+        session: AsyncSession,
+        agent: BackendAgent,
+        current: AgentBackendRevision | None,
+        value: AgentFleetGrant | None,
+        *,
+        now: datetime,
+    ) -> None:
+        from daimon.core.fleet_configuration import default_fleet_grant, fleet_grant_within
+
+        if value is None:
+            raise AgentBackendRefused("invalid_fleet_grant")
+        ceilings: list[AgentFleetGrant] = []
+        default = default_fleet_grant(await self._policy(session, agent.tenant_id))
+        if default is not None:
+            ceilings.append(default)
+        if current is not None and current.fleet_grant is not None and not current.fleet_off:
+            stored = AgentFleetGrant.model_validate_json(json.dumps(current.fleet_grant))
+            if stored.expires_at > now:
+                ceilings.append(stored)
+        if not any(fleet_grant_within(value, ceiling) for ceiling in ceilings):
+            raise AgentBackendRefused("fleet_raise_admin_required")
+
+    async def check_owner_fleet_ceiling(
+        self, agent: BackendAgent, value: AgentFleetGrant, actor: BackendActor, *, now: datetime
+    ) -> None:
+        """The same rule, read-only, so a preview refuses before showing a card."""
+        async with self._sessions() as session:
+            if await self._authorize_edit(session, agent, actor):
+                return
+            current = await agent_backends.current(session, agent.tenant_id, agent.agent_id)
+            await self._require_owner_ceiling(session, agent, current, value, now=now)
 
     async def read_fleet_grant(
         self, tenant_id: uuid.UUID, agent_id: uuid.UUID, *, now: datetime

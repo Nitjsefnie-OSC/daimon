@@ -34,6 +34,7 @@ from urllib.parse import unquote
 from daimon.core.fleet_configuration import (
     ConfigurationReference,
     complete_fleet_config,
+    configuration_refusal,
     configured_fleet_grant,
     fleet_default_line,
     fleet_detail_lines,
@@ -772,8 +773,7 @@ def backend_switch_callbacks(
                     if reference.config
                     else None
                 )
-                preview = await service.preview_fleet_grant(
-                    agent,
+                value = (
                     await configured_fleet_grant(
                         complete,
                         service,
@@ -783,8 +783,15 @@ def backend_switch_callbacks(
                         now=datetime.now(prompt.expires_at.tzinfo),
                     )
                     if complete
-                    else None,
-                    now=datetime.now(prompt.expires_at.tzinfo),
+                    else None
+                )
+                if value is not None:
+                    # A non-admin owner may only tighten; the write re-checks at the click.
+                    await service.check_owner_fleet_ceiling(
+                        agent, value, actor, now=datetime.now(prompt.expires_at.tzinfo)
+                    )
+                preview = await service.preview_fleet_grant(
+                    agent, value, now=datetime.now(prompt.expires_at.tzinfo)
                 )
                 if (
                     preview.setting_revision != reference.expected_revision
@@ -806,6 +813,8 @@ def backend_switch_callbacks(
                     ),
                 )
         except AgentBackendRefused as exc:
+            if exc.reason == "fleet_raise_admin_required":
+                raise ValueError(configuration_refusal(exc.reason)) from exc
             raise ValueError("This preview changed. Preview and confirm again.") from exc
         async with sessionmaker() as session:
             current = await get_account_with_tenant(session, account_id=account_id)

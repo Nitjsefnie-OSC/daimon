@@ -215,6 +215,9 @@ async def _request_fleet_config_impl(
         frozen = (
             config.model_copy(update={"expires_at": value.expires_at}) if config and value else None
         )
+        if value is not None:
+            # A non-admin owner may only tighten; say so before showing a card.
+            await service.check_owner_fleet_ceiling(agent, value, _actor(auth), now=now)
         preview = await service.preview_fleet_grant(agent, value, now=now, check_root=True)
         status = "preview"
         summary = (
