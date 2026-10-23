@@ -40,6 +40,11 @@ jobs:
       # Silences pyright-python's "newer version available" nag in the log.
       PYRIGHT_PYTHON_IGNORE_WARNINGS: "1"
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -51,11 +56,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: ./.github/actions/setup-daimon
 
       - name: ruff
@@ -149,6 +149,11 @@ jobs:
       # overrun latch spend most of their time waiting on the runner's disk.
       TMPDIR: /dev/shm
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
+          fetch-depth: ${{ matrix.fetch-depth }}  # Some core tests read other commits (origin/integration/neutral-core, pinned base commits), so core fetches full history.
       - name: Provenance
         shell: bash
         run: |
@@ -160,11 +165,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
-          fetch-depth: ${{ matrix.fetch-depth }}  # Some core tests read other commits (origin/integration/neutral-core, pinned base commits), so core fetches full history.
       - uses: ./.github/actions/setup-daimon
         with:
           database: "true"
@@ -252,6 +252,11 @@ jobs:
       DAIMON_TURN__CHANNEL_BACKENDS: "true"
       TMPDIR: /dev/shm
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -263,11 +268,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: ./.github/actions/setup-daimon
         with:
           database: "true"
@@ -320,6 +320,11 @@ jobs:
       # overrun latch spend most of their time waiting on the runner's disk.
       TMPDIR: /dev/shm
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -331,11 +336,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: ./.github/actions/setup-daimon
         with:
           database: "true"
@@ -394,6 +394,11 @@ jobs:
           - { suite: mux, paths: packages/mux }
           - { suite: harness-conformance, paths: tests/harness_conformance }
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -405,11 +410,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: ./.github/actions/setup-daimon
       - name: Install pinned Codex controller (harness)
         if: matrix.suite == 'harness' || matrix.suite == 'harness-conformance'
@@ -441,6 +441,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -452,11 +457,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: astral-sh/setup-uv@1c37ad07a6a961277cf70c0d37d6f313000f5884 # v10.3.0
         with:
           enable-cache: false
@@ -494,6 +494,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -505,11 +510,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: ./.github/actions/setup-daimon
       - name: pytest (notebook-host)
         run: >-
@@ -540,6 +540,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -551,11 +556,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: ./.github/actions/setup-daimon
       - name: shards cover each suite exactly once
         run: uv run python scripts/check_ci_shards.py
@@ -568,6 +568,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -579,11 +584,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
@@ -610,6 +610,11 @@ jobs:
     runs-on: ubuntu-latest
     timeout-minutes: 25
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -621,11 +626,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: docker/setup-buildx-action@8d2750c68a42422c14e847fe6c8ac0403b4cbd6f # v3
         with:
           driver-opts: image=docker.io/moby/buildkit@sha256:cec9f139f45e93c5c69c60f8b07cfad9f43f4ef6b6a6cd917527fea5ff2e3dea
@@ -683,6 +683,11 @@ jobs:
       AR_HOST: ${{ vars.GCP_REGION }}-docker.pkg.dev
       REPO: ${{ vars.GCP_AR_REPO }}
     steps:
+      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
+
+        with:
+          ref: ${{ inputs.target_ref }}
+          persist-credentials: false
       - name: Provenance
         shell: bash
         run: |
@@ -694,11 +699,6 @@ jobs:
             exit 1
           fi
           printf 'checked-out SHA: %s\n' "$checked_out_sha"
-      - uses: actions/checkout@11d5960a326750d5838078e36cf38b85af677262 # v4
-
-        with:
-          ref: ${{ inputs.target_ref }}
-          persist-credentials: false
       - uses: google-github-actions/auth@c200f3691d83b41bf9bbd8638997a462592937ed # v2
         with:
           workload_identity_provider: ${{ vars.GCP_WIF_PROVIDER }}
