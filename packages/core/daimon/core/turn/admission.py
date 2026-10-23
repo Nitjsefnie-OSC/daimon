@@ -1543,6 +1543,13 @@ async def capture_backend_source(
                         source.source.ref.id,
                     )
                 )
+            if not target_matches and explicit_target_name is None:
+                # An agent-level setting (provider, model) names any agent the requester
+                # may edit, e.g. a copy that isn't this place's responder: read that
+                # agent's own source rather than refusing every place but its home.
+                return await capture_agent_source(
+                    deps, source, account_id=context.account_id, subject=subject
+                )
             if not target_matches or config.environment_name is None:
                 raise channel_backend.AgentBackendRefused("source_unavailable")
             label = external_user_id or account.platform_user_id
@@ -1746,6 +1753,31 @@ async def prepare_worker_agent(
     if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
         raise channel_backend.AgentBackendRefused("source_unavailable")
     return replace(request, source=captured)
+
+
+async def capture_agent_source(
+    deps: TurnDeps,
+    source: BackendAgent,
+    *,
+    account_id: uuid.UUID,
+    subject: Subject,
+) -> BackendAgent:
+    """Capture the named agent's own source: the requester's tenant and account, no channel.
+
+    The agent-scoped form of `capture_backend_source`, for settings that belong to the
+    agent wherever it answers (fleet config, provider and model).
+    """
+    return await capture_backend_source(
+        deps,
+        source,
+        context=ScopeContext(tenant_id=source.tenant_id, account_id=account_id, platform="cli"),
+        subject=subject,
+        place=Place(),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
+        explicit_target_name=source.name,
+    )
 
 
 async def capture_admitted_backend_source(

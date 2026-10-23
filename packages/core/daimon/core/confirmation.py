@@ -839,6 +839,13 @@ def backend_switch_callbacks(
             if preview.declared_drops
             else ""
         )
+        if "credentials" in preview.declared_drops:
+            from daimon.core.turn.notices import provider_name
+
+            unavailable += (
+                f". Its saved keys won't be available on {provider_name(preview.target_backend)}"
+                " (they aren't deleted)"
+            )
         reach = (
             f"Affects new conversations in every channel on this {place_word}"
             if default_agent_name is not None and agent.name == default_agent_name

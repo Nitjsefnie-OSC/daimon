@@ -651,11 +651,11 @@ async def test_flag_off_refuses_before_source_or_dependency_construction(operato
     assert not operator[-1]
 
 
-async def test_real_encrypted_key_remains_nondroppable_without_any_secret_read(
+async def test_real_encrypted_key_is_lost_only_when_declared_without_any_secret_read(
     operator, monkeypatch
 ):
+    import click
     from cryptography.fernet import Fernet
-    from daimon.core.channel_backend import AgentBackendRefused
     from daimon.core.ma_identity import derive_agent_uuid
     from daimon.core.stores import agent_files
 
@@ -675,7 +675,8 @@ async def test_real_encrypted_key_remains_nondroppable_without_any_secret_read(
         pytest.fail("A switch preview must not resolve a secret")
 
     monkeypatch.setattr(agent_files, "get_agent_file", forbidden_read)
-    with pytest.raises(AgentBackendRefused, match="source unavailable"):
+    # The saved key is a declared `credentials` loss: accepting less changes nothing.
+    with pytest.raises(click.BadParameter, match="credentials"):
         await run(operator, accept_drops="memory,sandbox")
     assert await revisions(operator) is None
 

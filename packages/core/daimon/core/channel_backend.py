@@ -471,7 +471,9 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "channel_pin_lacks_capability",
         "re_confirm",
         "revision_busy",
+        "source_context_unavailable",
         "source_unavailable",
+        "source_unsupported",
         "stale_preview",
         "stale_revision",
         "tenant_mismatch",
@@ -850,7 +852,7 @@ class AgentBackendService:
                 agent, ModelRef(provider=selection.backend, id=selection.model or agent.model or "")
             )
         except UnsupportedCapability as error:
-            raise AgentBackendRefused("source_unavailable") from error
+            raise AgentBackendRefused("source_unsupported", provider=target) from error
         consent = {
             "declared_drops": proposed.declared_drops,
             "source_pin": source_preservation_pin(agent),

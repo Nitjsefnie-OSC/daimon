@@ -2217,8 +2217,10 @@ def classify_source_obligations(
                 missing.add("credentials")
             elif "mcp" not in drops:
                 missing.add("mcp")
-    if not native_retained and any(
-        repository.credential_ref for repository in source.repository_sources
+    if (
+        not native_retained
+        and "credentials" not in drops
+        and any(repository.credential_ref for repository in source.repository_sources)
     ):
         missing.add("credentials")
     for resource in source.resource_requirements:
@@ -2256,7 +2258,12 @@ def classify_source_obligations(
         ):
             continue
         # No installed materializer proves credentials or opaque private resources.
-        missing.add("credentials" if resource.kind == "credential" else "source_definition")
+        # A declared `credentials` drop discharges a bare credential: the target runs
+        # without it, and nothing carries it there.
+        if resource.kind != "credential":
+            missing.add("source_definition")
+        elif "credentials" not in drops:
+            missing.add("credentials")
     if (
         (source.memory_required is not False or source.memory_store_id is not None)
         and "memory" not in drops

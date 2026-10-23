@@ -451,9 +451,10 @@ def _reject_unknown_model(model: ModelSelection) -> None:
 def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
     """Native agent edits share the alias resolver without changing model controls."""
     choice = model_choice_id(model)
-    if choice in ALLOWED_MODEL_IDS or choice.startswith("claude-"):
+    if choice in ALLOWED_MODEL_IDS:
         return model
-    from daimon.core.agent_model_names import agent_catalog, resolve_model
+    from daimon.core.agent_model_names import agent_catalog, model_name, resolve_model
+    from daimon.core.turn.notices import provider_name
     from mux.profiles import MANAGED_AGENTS
 
     choices = tuple(
@@ -462,6 +463,16 @@ def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
     try:
         resolved = resolve_model(choice, available=choices).id
     except ValueError as exc:
+        # Another provider's model: say how to get there instead of a dead end.
+        with contextlib.suppress(ValueError):
+            other = resolve_model(choice)
+            if other.provider != MANAGED_AGENTS.provider:
+                raise ToolError(
+                    f"{model_name(other)} is a {provider_name(other.provider)} model. Create "
+                    "the agent on a Claude model such as sonnet, then call "
+                    f"request_agent_backend_switch with target_backend='{other.provider}' and "
+                    f"model='{other.id}'. Nothing was created yet."
+                ) from exc
         raise ToolError(str(exc)) from exc
     return resolved if isinstance(model, str) else {**model, "id": resolved}
 
@@ -1054,7 +1065,7 @@ async def _capture_backend_source(
         )
         is not None
     ):
-        raise channel_backend.AgentBackendRefused("source_unavailable")
+        raise channel_backend.AgentBackendRefused("source_context_unavailable")
     deps = build_turn_deps(
         runtime.settings,
         runtime.client,
@@ -1081,7 +1092,88 @@ async def _capture_backend_source(
     )
 
 
+def _backend_switch_refusal(
+    exc: DaimonError | ValidationError,
+    agent_name: str,
+    target: Provider | None,
+    auth: AuthIdentity,
+    *,
+    with_code: bool = False,
+) -> ToolError:
+    """The real reason a provider change was refused, and what the requester can do.
+
+    ``with_code`` appends the stable reason for direct API and coding-tool callers.
+    """
+    from daimon.core.turn.notices import provider_name
+
+    reason = (
+        exc.reason
+        if isinstance(exc, channel_backend.AgentBackendRefused)
+        else "invalid_request"
+        if isinstance(exc, ValidationError)
+        else type(exc).__name__
+    )
+    log.warning("agent_backend_switch_refused", agent=agent_name, target=target, reason=reason)
+    if isinstance(exc, channel_backend.BackendUnsupported):
+        return ToolError(f"{exc} Nothing changed.")
+    provider = provider_name(target or getattr(exc, "provider", None))
+    admin = admin_noun(auth.platform)
+    text = {
+        "agent_not_found": (
+            f"There's no agent named '{agent_name}' here. Check the name with list_agents."
+        ),
+        "tenant_mismatch": (
+            f"'{agent_name}' belongs to another workspace and can't be changed here."
+        ),
+        "owner_or_admin_required": f"Changing '{agent_name}' needs its owner or {admin}.",
+        "admin_required": f"This change needs {admin}.",
+        "actor_not_found": (
+            "I couldn't match you to an account here. Send a message first, then retry."
+        ),
+        "admin_required_for_shared_threads": f"Sharing threads in every channel needs {admin}.",
+        "feature_disabled": f"Choosing a model provider is turned off. Ask {admin} to turn it on.",
+        "backend_not_allowed": (
+            f"{provider} isn't allowed in this workspace. Ask {admin} to allow it."
+        ),
+        "model_not_selectable": f"That model isn't available on {provider}. Pick one it lists.",
+        "profile_not_selectable": f"That model isn't available on {provider}. Pick one it lists.",
+        "source_unsupported": (
+            f"'{agent_name}' uses something {provider} can't carry over. "
+            "Preview again to see what it drops, or pick another provider."
+        ),
+        "source_unavailable": (
+            f"I couldn't read '{agent_name}''s current setup (its agent or environment "
+            "didn't answer). Try again in a minute."
+        ),
+        "source_context_unavailable": (
+            "I can't confirm a change from this conversation. "
+            "Ask in a public channel or thread where I answer."
+        ),
+        "selfhosted_requires_channel_configuration": (
+            f"A self-hosted model is set per channel, not per agent. Ask {admin}."
+        ),
+        "stale_preview": f"'{agent_name}' changed since the preview. Preview again and confirm.",
+        "stale_revision": (
+            f"'{agent_name}''s provider changed since the preview. Preview again and confirm."
+        ),
+        "re_confirm": "This change needs a fresh confirmation. Preview again and confirm.",
+        "drops_required": "Preview again and accept what this switch drops.",
+        "drops_mismatch": "What this switch drops changed. Preview again and accept the new list.",
+        "revision_busy": "Another change to this agent is in progress. Retry in a moment.",
+        "invalid_request": "That request was malformed. Preview again and use its values.",
+    }.get(reason, f"The provider change was refused ({reason.replace('_', ' ')}).")
+    return ToolError(f"{text} Nothing changed." + (f" [{reason}]" if with_code else ""))
+
+
+# A provider word alone ("switch to GPT") means that provider's default model.
+_PROVIDER_WORDS: Final = frozenset(
+    {"anthropic", "claude", "openai", "gpt", "chatgpt", "gemini", "google", "default"}
+)
+
+
 def _resolve_agent_model(backend: Provider | None, model: str | None) -> str | None:
+    if model is not None and model.strip().lower() in _PROVIDER_WORDS:
+        return None
     if model is None or backend is None or model in selectable_models(backend):
         return model
     from daimon.core.agent_model_names import agent_catalog, resolve_model
@@ -1184,7 +1276,7 @@ async def _set_agent_backend_impl(
                 current, backend, local, actor, expected_preview_digest=preview.digest, model=model
             )
     except channel_backend.AgentBackendRefused as exc:
-        raise ToolError(str(exc)) from exc
+        raise _backend_switch_refusal(exc, name, backend, auth, with_code=True) from exc
     return {
         "agent": name,
         "backend": revision.backend,
@@ -1390,9 +1482,7 @@ async def _request_agent_backend_switch_impl(
             channel_pin=channel_pin,
         )
     except (DaimonError, ValidationError) as exc:
-        raise ToolError(
-            "The preview is unavailable or changed. Preview again; nothing changed."
-        ) from exc
+        raise _backend_switch_refusal(exc, agent_name, target_backend, auth) from exc
 
 
 def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
@@ -1653,8 +1743,10 @@ def register_agent_tools(mcp: FastMCP, runtime: McpRuntime) -> None:
             "switch Researcher to luna". For an Anthropic model change such as
             "set Writer to opus 5.5", use update_agent with that natural model name.
             ``model`` accepts natural names or one of
-            the returned ``models``; omit it for the provider's default. Never ask
-            the person for a model id. Ambiguous names return the choices.
+            the returned ``models``; omit it for the provider's default. A provider
+            alone ("switch to GPT", "to Gemini") means its default: omit ``model`` and
+            preview; never ask which model. Never ask the person for a model id.
+            Ambiguous model names return the choices.
             The switch applies to
             new conversations wherever the agent answers; switching the default agent
             applies to every channel on this server. For "fork agent to gemini", copy the

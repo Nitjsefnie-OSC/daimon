@@ -94,10 +94,8 @@ async def _capture_fleet_target(
     The explicit-target form of the backend-switch capture: the requester's tenant
     and account, no channel, the named agent and its pinned native agent.
     """
-    from daimon.core.authz import Place
     from daimon.core.ma_resolver import new_resolver_cache
-    from daimon.core.scope import ScopeContext
-    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.turn.admission import capture_agent_source
     from daimon.core.turn.deps import build_turn_deps
 
     deps = build_turn_deps(
@@ -108,16 +106,8 @@ async def _capture_fleet_target(
         resolver_cache=new_resolver_cache(),
         billing_config=None,
     )
-    return await capture_backend_source(
-        deps,
-        source,
-        context=ScopeContext(tenant_id=auth.tenant_id, account_id=auth.account_id, platform="cli"),
-        subject=mcp_subject(auth, is_admin=auth.is_admin),
-        place=Place(),
-        is_dm=False,
-        slack_turn_context_id=None,
-        private_dm_id=None,
-        explicit_target_name=source.name,
+    return await capture_agent_source(
+        deps, source, account_id=auth.account_id, subject=mcp_subject(auth, is_admin=auth.is_admin)
     )
 
 
