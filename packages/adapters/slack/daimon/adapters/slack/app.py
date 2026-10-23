@@ -2324,7 +2324,9 @@ class SlackApp:
             await web_client.chat_postMessage(  # pyright: ignore[reportUnknownMemberType]
                 channel=channel,
                 thread_ts=thread_id,
-                text=setup_out_of_date_notice(foreign=standing.foreign),
+                text=setup_out_of_date_notice(
+                    foreign=standing.foreign, kind=err.kind, name=err.daimon_tag
+                ),
             )
             return
         except AdmissionDenied as err:
@@ -2405,6 +2407,7 @@ class SlackApp:
                         foreign=standing.foreign,
                         cause=err.cause,
                         provider=err.provider,
+                        channels=err.channels,
                     ),
                 )
             return
