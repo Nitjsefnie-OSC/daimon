@@ -311,7 +311,7 @@ def build_confirmation_view(
 def confirmation_requester(view: object) -> str | None:
     """Who may answer `view`, when it is a live, unanswered confirmation card.
 
-    None for any other view, so the staging test click (`test_click`) can only
+    None for any other view, so the staging confirm click (`confirm_click`) can only
     press Confirm cards that are still waiting.
     """
     return view.pending_requester() if isinstance(view, _ConfirmationView) else None

@@ -1,4 +1,4 @@
-"""Staging-only test click: press a Confirm card's button as the QA bot that asked.
+"""Staging-only confirm click: press a Confirm card's button as the QA bot that asked.
 
 Bots can't press Discord buttons, so an automated evaluator can't finish a
 journey that ends on a Confirm card. This module lets an operator do it, on
@@ -6,26 +6,30 @@ staging only, through the same handler path a real click takes:
 
 - It builds the INTERACTION_CREATE payload Discord would send for a click on
   the named button (the button's custom_id, the requester as member, the real
-  card message) and hands it to discord.py's own gateway handler
-  (`ConnectionState.parse_interaction_create`). The card's callbacks run
-  unchanged, so every real check runs: requester == clicker, the admin/owner
-  re-check, the digest and the expiry.
+  card message) and hands it to the gateway's INTERACTION_CREATE parser, the
+  bot's server allow-list included. The card's callbacks run unchanged, so
+  every real check runs: requester == clicker, the admin/owner re-check, the
+  digest and the expiry.
 - Only the reply transport differs. Interaction replies go through
   discord.py's `async_context` webhook adapter; for this one click it is
   swapped for `_ClickAdapter`, which edits the card with the bot's own token
   and hands ephemeral replies (refusals) back to the operator instead of
   posting them.
 
-Who may use it. The server listens on a Unix socket inside the Discord
-container (0600, same uid) and starts only when `discord.test_click` is on,
-`discord.test_click_token_sha256` is set and the GCE metadata server names a
-project ending in `-staging`. Each request must carry the operator token whose
-SHA-256 matches; the token itself lives outside the container. The clicker is
-never free: it must be one of `discord.qa_bot_user_ids` AND the card's
-requester, so only cards a QA bot asked for can be clicked. Every request,
-allowed or refused, is logged and written to the security audit log.
+Who may use it. A Unix socket inside the Discord container (0600, same uid)
+listens only when the GCE metadata server names a project ending in
+`-staging`, QA bots are allow-listed and DAIMON_TURN__PROVIDER_RUNTIME_FILE
+is set. Each request then re-reads `confirm-click.json` next to that runtime
+file, which the operator swaps on the host: it must say
+``{"enabled": true, "token_sha256": "<64 lowercase hex>"}`` and must not be
+writable from inside the container, or every request is refused. The request
+must carry the operator token whose SHA-256 matches; the token itself lives
+outside the container. The clicker is never free: it must be one of
+`discord.qa_bot_user_ids` AND the card's requester, so only cards a QA bot
+asked for can be clicked. Every request, allowed or refused, is logged and,
+when its server is known, written to the security audit log.
 
-Operator side: ``python -m daimon.adapters.discord.test_click`` (token on stdin).
+Operator side: ``python -m daimon.adapters.discord.confirm_click`` (token on stdin).
 """
 
 from __future__ import annotations
@@ -63,15 +67,19 @@ if TYPE_CHECKING:
 __all__ = [
     "SOCKET_PATH",
     "ClickRequest",
-    "TestClicker",
-    "enablement_refusal",
-    "start_test_click_server",
+    "ConfirmClicker",
+    "control_file_path",
+    "listen_refusal",
+    "load_control",
+    "start_confirm_click_server",
 ]
 
 log = structlog.get_logger(__name__)
 
-SOCKET_PATH = "/tmp/daimon-test-click/test-click.sock"
-AUDIT_TOOL = "discord_test_click"
+SOCKET_PATH = "/tmp/daimon-confirm-click/confirm-click.sock"
+AUDIT_TOOL = "discord_confirm_click"
+RUNTIME_FILE_ENV = "DAIMON_TURN__PROVIDER_RUNTIME_FILE"
+CONTROL_FILE_NAME = "confirm-click.json"
 STAGING_PROJECT_SUFFIX = "-staging"
 METADATA_PROJECT_URL = "http://metadata.google.internal/computeMetadata/v1/project/project-id"
 #: Labels of the Confirm card's answer buttons. "Always allow" is left out: it
@@ -81,6 +89,7 @@ BUTTONS = frozenset({"Confirm", "Approve", "Deny"})
 HANDLER_TIMEOUT_S = 30.0
 REQUEST_LIMIT = 16 * 1024
 _OPERATOR_RE = re.compile(r"^[A-Za-z0-9._@-]{1,64}$")
+_SHA256_RE = re.compile(r"^[0-9a-f]{64}$")
 _DISPATCH_TASK_PREFIX = "discord-ui-view-dispatch-"
 _EPHEMERAL = 64
 _CHANNEL_MESSAGE, _DEFERRED_CHANNEL_MESSAGE, _DEFERRED_UPDATE, _UPDATE = 4, 5, 6, 7
@@ -105,18 +114,47 @@ async def gcp_project_id(timeout_s: float = 2.0) -> str | None:
         return None
 
 
-def enablement_refusal(settings: Settings, project_id: str | None) -> str | None:
-    """Why the test click must stay off here, or None when it may start."""
-    discord_settings = settings.discord
-    if discord_settings is None or not discord_settings.test_click:
-        return "test click is off"
-    if discord_settings.test_click_token_sha256 is None:
-        return "no operator token hash is configured"
-    if not discord_settings.qa_bot_user_ids:
+def control_file_path() -> Path | None:
+    """`confirm-click.json` beside the provider runtime file, or None when that is unset."""
+    runtime_file = os.environ.get(RUNTIME_FILE_ENV)
+    return Path(runtime_file).parent / CONTROL_FILE_NAME if runtime_file else None
+
+
+def listen_refusal(
+    settings: Settings, project_id: str | None, control_file: Path | None
+) -> str | None:
+    """Why the socket must not listen here, or None when it may."""
+    if settings.discord is None or not settings.discord.qa_bot_user_ids:
         return "no QA bot is allow-listed"
+    if control_file is None:
+        return "no provider runtime file, so no control file"
     if project_id is None or not project_id.endswith(STAGING_PROJECT_SUFFIX):
         return "this is not a staging host"
     return None
+
+
+def load_control(path: Path | None) -> str | None:
+    """The operator token hash while the control file switches clicks on, else None.
+
+    Off when the file is missing, unreadable, malformed, writable from inside
+    this container (it must come from the host's read-only mount), not
+    ``"enabled": true``, or its hash is not 64 lowercase hex characters.
+    """
+    if path is None:
+        return None
+    try:
+        if os.access(path, os.W_OK) or os.access(path.parent, os.W_OK):
+            return None
+        data: object = json.loads(path.read_text())
+    except (OSError, ValueError):
+        return None
+    if not isinstance(data, dict):
+        return None
+    body = cast(dict[str, object], data)
+    digest = body.get("token_sha256")
+    if body.get("enabled") is not True or not isinstance(digest, str):
+        return None
+    return digest if _SHA256_RE.fullmatch(digest) else None
 
 
 @dataclass(frozen=True)
@@ -222,7 +260,12 @@ class _ClickAdapter(AsyncWebhookAdapter):
             "channel_id": str(self.channel_id),
             "type": 0,
             "content": data.get("content") or "",
-            "author": {"id": "0", "username": "test-click", "discriminator": "0", "avatar": None},
+            "author": {
+                "id": "0",
+                "username": "confirm-click",
+                "discriminator": "0",
+                "avatar": None,
+            },
             "attachments": [],
             "embeds": [],
             "mentions": [],
@@ -395,49 +438,56 @@ def _peer_uid(writer: asyncio.StreamWriter) -> int | None:
     return uid
 
 
-class TestClicker:
-    """Checks one test-click request and runs the click through the real handler."""
+class ConfirmClicker:
+    """Checks one confirm-click request and runs the click through the real handler."""
 
-    __test__ = False  # not a pytest class
-
-    def __init__(self, bot: DaimonBot, settings: Settings) -> None:
-        if settings.discord is None or settings.discord.test_click_token_sha256 is None:
-            raise ValueError("test click needs discord settings with an operator token hash")
+    def __init__(self, bot: DaimonBot, settings: Settings, control_file: Path) -> None:
+        if settings.discord is None:
+            raise ValueError("confirm click needs Discord settings")
         self._bot = bot
-        self._token_sha256 = settings.discord.test_click_token_sha256
+        self._control_file = control_file
         self._qa_bot_ids = frozenset(settings.discord.qa_bot_user_ids)
         self._lock = asyncio.Lock()
 
     async def handle(self, request: ClickRequest, *, peer_uid: int | None) -> dict[str, Any]:
         async with self._lock:
-            guild_id: int | None = None
+            # Unauthenticated requests reach no Discord API: the cache only.
+            guild_id = self._cached_guild_id(request.channel_id)
             outcome: Outcome = "error"
             reason = "unexpected error"
             result: dict[str, Any] = {}
             try:
-                guild_id = await self._guild_id(request.channel_id)
+                token_sha256 = load_control(self._control_file)
+                if token_sha256 is None:
+                    raise _Refused("confirm click is switched off on this host")
+                supplied = hashlib.sha256(request.token.encode()).hexdigest()
+                if not hmac.compare_digest(supplied, token_sha256):
+                    raise _Refused("operator token rejected")
+                if guild_id is None:
+                    guild_id = await self._fetched_guild_id(request.channel_id)
                 result = await self._click(request)
-                outcome = "allowed" if result["card_updated"] else "denied"
-                reason = "card answered" if result["card_updated"] else "the card's handler refused"
+                outcome = "allowed" if result["answered"] else "denied"
+                reason = "card answered" if result["answered"] else "the card's handler refused"
             except _Refused as refused:
                 outcome, reason = refused.outcome, refused.reason
             except Exception:
-                log.exception("discord.test_click.failed")
+                log.exception("discord.confirm_click.failed")
             await self._audit(request, guild_id, outcome, reason, peer_uid)
             return {"outcome": outcome, "reason": reason, **result}
 
-    async def _guild_id(self, channel_id: int) -> int | None:
-        channel = self._bot.get_channel(channel_id)
-        if channel is None:
-            with contextlib.suppress(discord.HTTPException):
-                channel = await self._bot.fetch_channel(channel_id)
+    def _cached_guild_id(self, channel_id: int) -> int | None:
+        guild = getattr(self._bot.get_channel(channel_id), "guild", None)
+        return guild.id if isinstance(guild, discord.Guild) else None
+
+    async def _fetched_guild_id(self, channel_id: int) -> int | None:
+        try:
+            channel = await self._bot.fetch_channel(channel_id)
+        except discord.HTTPException:
+            return None
         guild = getattr(channel, "guild", None)
         return guild.id if isinstance(guild, discord.Guild) else None
 
     async def _click(self, request: ClickRequest) -> dict[str, Any]:
-        supplied = hashlib.sha256(request.token.encode()).hexdigest()
-        if not hmac.compare_digest(supplied, self._token_sha256):
-            raise _Refused("operator token rejected")
         bot_user = self._bot.user
         if bot_user is None or not self._bot.is_ready():
             raise _Refused("the bot is not connected yet", "error")
@@ -461,12 +511,13 @@ class TestClicker:
         items = cast(dict[tuple[int, str], Any], store._views.get(request.message_id, {}))  # pyright: ignore[reportPrivateUsage]
         custom_id: str | None = None
         requester: str | None = None
+        view: object = None
         for (component_type, item_custom_id), item in items.items():
             if component_type != discord.ComponentType.button.value:
                 continue
             item_requester = confirmation_requester(item.view)
             if item_requester is not None and getattr(item, "label", None) == request.button:
-                custom_id, requester = item_custom_id, item_requester
+                custom_id, requester, view = item_custom_id, item_requester, item.view
                 break
         if custom_id is None or requester is None:
             raise _Refused("no live Confirm card with that button on that message")
@@ -487,7 +538,7 @@ class TestClicker:
         member_obj = discord.Member(data=member, guild=guild, state=state)  # pyright: ignore[reportArgumentType]  # Discord's member payload
         me = cast(discord.Member | None, guild.me)  # None until the guild is chunked
         app_permissions = channel.permissions_for(me).value if me is not None else 0
-        token = f"test-click-{secrets.token_urlsafe(24)}"
+        token = f"confirm-click-{secrets.token_urlsafe(24)}"
         payload: dict[str, Any] = {
             "id": str(discord.utils.time_snowflake(discord.utils.utcnow())),
             "application_id": str(self._bot.application_id or bot_user.id),
@@ -514,9 +565,10 @@ class TestClicker:
         before = asyncio.all_tasks()
         reset = async_context.set(adapter)
         try:
-            # The gateway's own INTERACTION_CREATE handler; tasks it starts
-            # inherit this context, so their replies use `adapter`.
-            state.parse_interaction_create(payload)  # pyright: ignore[reportArgumentType]  # a real gateway payload shape
+            # The gateway's INTERACTION_CREATE parser, the bot's server filter
+            # included; tasks it starts inherit this context, so their replies
+            # use `adapter`.
+            state.parsers["INTERACTION_CREATE"](payload)
         finally:
             async_context.reset(reset)
         handlers = [
@@ -525,11 +577,20 @@ class TestClicker:
             if task.get_name().startswith(_DISPATCH_TASK_PREFIX)
         ]
         if not handlers:
-            raise _Refused("the card no longer answers", "error")
+            raise _Refused("the click was dropped: this server is not served here", "denied")
         _done, pending = await asyncio.wait(handlers, timeout=HANDLER_TIMEOUT_S)
         if pending:
+            for task in pending:
+                task.cancel()
+            await asyncio.gather(*pending, return_exceptions=True)
             raise _Refused("the card's handler timed out", "error")
-        return {"card_updated": adapter.card_updated, "replies": adapter.replies}
+        # Answered means the card's own answer was taken, whether or not its
+        # edit reached Discord (the handler swallows a failed edit).
+        return {
+            "answered": confirmation_requester(view) is None,
+            "card_updated": adapter.card_updated,
+            "replies": adapter.replies,
+        }
 
     async def _audit(
         self,
@@ -550,7 +611,7 @@ class TestClicker:
             "outcome": outcome,
             "reason": reason,
         }
-        log.warning("discord.test_click", **fields)
+        log.warning("discord.confirm_click", **fields)
         if guild_id is None:
             return
         try:
@@ -574,33 +635,41 @@ class TestClicker:
             log.exception("security_audit.write_failed", tool=AUDIT_TOOL)
 
 
-async def start_test_click_server(
-    bot: DaimonBot, settings: Settings, *, path: str = SOCKET_PATH
+async def start_confirm_click_server(
+    bot: DaimonBot,
+    settings: Settings,
+    *,
+    path: str = SOCKET_PATH,
+    control_file: Path | None = None,
 ) -> asyncio.Server | None:
-    """Start the test-click socket when this deployment allows it, else None."""
-    discord_settings = settings.discord
-    if discord_settings is None or not discord_settings.test_click:
+    """Listen for confirm clicks on a staging host, else None.
+
+    Listening is not enabling: each request is refused until the host's
+    control file switches clicks on (`load_control`).
+    """
+    control = control_file if control_file is not None else control_file_path()
+    if settings.discord is None or not settings.discord.qa_bot_user_ids or control is None:
         return None
-    refusal = enablement_refusal(settings, await gcp_project_id())
+    refusal = listen_refusal(settings, await gcp_project_id(), control)
     if refusal is not None:
-        log.warning("discord.test_click.refused_to_start", reason=refusal)
+        log.info("discord.confirm_click.not_listening", reason=refusal)
         return None
-    clicker = TestClicker(bot, settings)
+    clicker = ConfirmClicker(bot, settings, control)
     own_uid = os.getuid()
 
     async def serve(reader: asyncio.StreamReader, writer: asyncio.StreamWriter) -> None:
         try:
             uid = _peer_uid(writer)
-            if uid is not None and uid not in (own_uid, 0):
+            if uid is None or uid not in (own_uid, 0):
                 response: dict[str, Any] = {"outcome": "denied", "reason": "wrong local user"}
-                log.warning("discord.test_click", outcome="denied", reason="wrong local user")
+                log.warning("discord.confirm_click", outcome="denied", reason="wrong local user")
             else:
                 try:
                     raw = await asyncio.wait_for(reader.readline(), timeout=5)
                     request = ClickRequest.parse(raw)
                 except (ValueError, TimeoutError, asyncio.LimitOverrunError) as err:
                     response = {"outcome": "denied", "reason": f"bad request: {err}"}
-                    log.warning("discord.test_click", outcome="denied", reason="bad request")
+                    log.warning("discord.confirm_click", outcome="denied", reason="bad request")
                 else:
                     response = await clicker.handle(request, peer_uid=uid)
             writer.write(json.dumps(response).encode() + b"\n")
@@ -613,7 +682,9 @@ async def start_test_click_server(
         directory.mkdir(mode=0o700, parents=True, exist_ok=True)
         # Never listen in a directory someone else made or redirected.
         if directory.is_symlink() or directory.stat().st_uid != own_uid:
-            log.warning("discord.test_click.refused_to_start", reason="socket directory not ours")
+            log.warning(
+                "discord.confirm_click.refused_to_start", reason="socket directory not ours"
+            )
             return None
         directory.chmod(0o700)
         with contextlib.suppress(FileNotFoundError):
@@ -621,9 +692,9 @@ async def start_test_click_server(
         server = await asyncio.start_unix_server(serve, path=path, limit=REQUEST_LIMIT)
         Path(path).chmod(0o600)
     except OSError:
-        log.exception("discord.test_click.refused_to_start", reason="socket setup failed")
+        log.exception("discord.confirm_click.refused_to_start", reason="socket setup failed")
         return None
-    log.warning("discord.test_click.listening", path=path)
+    log.warning("discord.confirm_click.listening", path=path, control_file=str(control))
     return server
 
 
@@ -640,7 +711,7 @@ async def _send(socket_path: str, request: dict[str, Any]) -> dict[str, Any]:
 
 def main(argv: Sequence[str] | None = None) -> int:
     parser = argparse.ArgumentParser(
-        prog="python -m daimon.adapters.discord.test_click",
+        prog="python -m daimon.adapters.discord.confirm_click",
         description="Press a Confirm card button as the QA bot that asked (staging only). "
         "Reads the operator token from stdin.",
     )
@@ -670,7 +741,7 @@ def main(argv: Sequence[str] | None = None) -> int:
             )
         )
     except (FileNotFoundError, ConnectionRefusedError):
-        print(json.dumps({"outcome": "denied", "reason": "test click is not running here"}))
+        print(json.dumps({"outcome": "denied", "reason": "confirm click is not listening here"}))
         return 2
     print(json.dumps(response))
     return 0 if response.get("outcome") == "allowed" else 1

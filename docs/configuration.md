@@ -632,24 +632,6 @@ refusal paths need one without it. Leave empty outside test deployments -- an al
 listed bot spends real credit. As a tuple field this must be set as a JSON array, e.g.
 '["123","456"]'. Daimon's own id is refused at the gate even if listed.
 
-### `DAIMON_DISCORD__TEST_CLICK`
-
-`bool` · optional · default `False`
-
-Staging test infrastructure only. Lets an operator press a Confirm card's button as the
-QA bot that asked for it, through a Unix socket inside the Discord container, so an
-automated evaluator can finish card-gated journeys. Refused unless
-test_click_token_sha256 is set and the GCE metadata project id ends in '-staging'. Only
-cards whose requester is in qa_bot_user_ids can be clicked. Every use is written to the
-security audit log. Leave false everywhere else.
-
-### `DAIMON_DISCORD__TEST_CLICK_TOKEN_SHA256`
-
-`str | None` · optional · default unset
-
-Lowercase hex SHA-256 of the operator token test_click requires. Keep the token itself
-outside the container (e.g. in Secret Manager); only its hash goes here.
-
 ### `DAIMON_DISCORD__BOT_DISPLAY_NAME`
 
 `str` · optional · default `daimon`
