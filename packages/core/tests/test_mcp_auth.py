@@ -614,3 +614,69 @@ async def test_a_provider_turn_surface_is_registry_only_and_needs_chat_execution
             now=now,
             surface="provider_turn",
         )
+
+
+@pytest.mark.parametrize("minted", ["provider_turn", None])
+async def test_a_provider_turn_resolves_only_a_provider_turn_credential(
+    db_engine, db_session: AsyncSession, tmp_path, monkeypatch, minted
+) -> None:
+    """A pinned OpenAI/Gemini credential without the surface would skip the server gate."""
+    from daimon.core.mcp_auth import resolve_agent_mcp_credential
+    from daimon.core.mcp_oauth import discovery
+    from mux.contracts.ids import Scope
+    from sqlalchemy.ext.asyncio import async_sessionmaker
+
+    sessions = async_sessionmaker(bind=db_engine, expire_on_commit=False)
+    secret = b"a" * 32
+    now = dt.datetime.now(dt.UTC)
+    agent_id = uuid.uuid4()
+    async with sessions.begin() as session:
+        tenant_id, account_id = await _seed_tenant_and_account(session)
+        token = await mint_agent_mcp_token(
+            session,
+            account_id=account_id,
+            tenant_id=tenant_id,
+            agent_id=agent_id,
+            label="F2-owned-session-boundary",
+            secret=secret,
+            now=now,
+            ttl_days=600 / 86400,  # pyright: ignore[reportArgumentType]
+            chat_execution=True,
+            surface=minted,
+        )
+    path = tmp_path / "caller.token"
+    path.write_text(token)
+    path.chmod(0o600)
+
+    async def listed(_url, _token):
+        return frozenset({"search_tools", "call_tool"})
+
+    monkeypatch.setattr(discovery, "list_mcp_tools", listed)
+    scope = Scope(
+        tenant_id=str(tenant_id),
+        account_id=str(account_id),
+        principal_id="caller",
+        authorization_id="admitted",
+    )
+
+    async def resolve(surface):
+        return await resolve_agent_mcp_credential(
+            sessions,
+            path=path,
+            secret=secret,
+            scope=scope,
+            agent_id=agent_id,
+            destination="https://mcp.invalid/mcp",
+            tools=("search_tools", "call_tool"),
+            now=now,
+            chat_execution=True,
+            surface=surface,
+        )
+
+    if minted == "provider_turn":
+        assert await resolve("provider_turn") == token
+    else:
+        with pytest.raises(ValueError, match="invalid scoped agent token"):
+            await resolve("provider_turn")
+        # Callers that require no surface are unchanged.
+        assert await resolve(None) == token

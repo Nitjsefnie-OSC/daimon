@@ -612,6 +612,9 @@ def build_gemini_runtime(request: ProviderPreparationRequest) -> TurnRuntime:
                 destination=destination,
                 tools=plan.source_capabilities.mcp_tools,
                 chat_execution=True,
+                # A pinned OpenAI/Gemini turn has no confirmation card: its credential
+                # must be one the server refuses gated and publishing tools for.
+                surface="provider_turn",
                 now=request.now(),
             )
             await verify_storage()

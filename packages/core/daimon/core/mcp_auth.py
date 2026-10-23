@@ -87,8 +87,12 @@ async def resolve_agent_mcp_credential(
     tools: tuple[str, ...],
     now: dt.datetime,
     chat_execution: bool,
+    surface: McpTokenSurface | None = None,
 ) -> str:
-    """Recheck registered caller authority and its exact remote catalogue before exposure."""
+    """Recheck registered caller authority and its exact remote catalogue before exposure.
+
+    `surface` requires the credential's registry row to carry it (see
+    `validate_agent_mcp_token`); an OpenAI/Gemini turn requires `provider_turn`."""
     from daimon.core.mcp_oauth.discovery import list_mcp_tools
 
     token = read_private_credential(path)
@@ -100,6 +104,7 @@ async def resolve_agent_mcp_credential(
         agent_id=agent_id,
         now=now,
         chat_execution=chat_execution,
+        surface=surface,
     )
     if await list_mcp_tools(destination, token) != frozenset(tools):
         raise ValueError("target MCP catalogue differs from captured source")
@@ -385,8 +390,12 @@ async def validate_agent_mcp_token(
     now: dt.datetime,
     max_ttl_s: int = 900,
     chat_execution: bool = False,
+    surface: McpTokenSurface | None = None,
 ) -> None:
     """Check a minted caller-bound token before exposing it to a remote provider.
+
+    `surface` requires the registry row to carry exactly that surface: a
+    provider turn's credential must be one the server refuses gated tools for.
 
     This checks the mint owner's own claims and registry facts; the MCP server
     still owns tool authorization. No provider id is substituted for the
@@ -430,6 +439,7 @@ async def validate_agent_mcp_token(
             or str(row.tenant_id) != scope.tenant_id
             or row.agent_id != str(agent_id)
             or row.revoked_at is not None
+            or (surface is not None and row.surface != surface)
             or not registered_agent_claims_match(
                 row, claims, now=now, chat_execution=chat_execution, max_ttl_s=max_ttl_s
             )
