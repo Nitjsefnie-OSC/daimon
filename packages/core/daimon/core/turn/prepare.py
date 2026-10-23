@@ -1398,19 +1398,23 @@ async def bind_session_impl(
         result = await run_controlled_preparation(request, preparing)
         try:
             if deps.fleet_enabled and worker is None:
+                from daimon.core.fleet_configuration import is_default_fleet
                 from daimon.core.turn.runtime_manifest import (
                     capture_preparation_source,
                     read_agent_fleet_grant,
                 )
+                from daimon.core.turn_origin import current_origin_id
 
                 fleet_grant = await read_agent_fleet_grant(deps, result.admission, now=now())
+                if (
+                    fleet_grant is not None
+                    and is_default_fleet(fleet_grant)
+                    and (current_origin_id.get() is None or result.admission.hold is not None)
+                ):
+                    # No root can be frozen here (no origin, or a held turn), so under
+                    # the default skip the capture and its API call altogether.
+                    fleet_grant = None
                 if fleet_grant is not None:
-                    from anthropic import APIError
-                    from daimon.core.errors import DaimonError
-                    from daimon.core.fleet_configuration import is_default_fleet
-                    from daimon.core.neutral_resources import WorkerSpecRefused
-                    from mux.errors import ScopeViolation
-
                     root_scope = admitted_session_scope(
                         result.admission,
                         tenant_id=tenant_id,
@@ -1420,7 +1424,7 @@ async def bind_session_impl(
                     root_request = replace(request, admission=result.admission, scope=root_scope)
                     try:
                         source = await capture_preparation_source(root_request)
-                    except (WorkerSpecRefused, ScopeViolation, DaimonError, APIError) as error:
+                    except Exception as error:
                         # The default fleet never fails a chat turn: without a captured
                         # source the root freeze skips fleet and the tools say why.
                         if not is_default_fleet(fleet_grant):

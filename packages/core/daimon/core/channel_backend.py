@@ -1131,9 +1131,18 @@ class AgentBackendService:
         async with self._sessions() as session:
             current = await agent_backends.current(session, tenant_id, agent_id)
             default = default_fleet_grant(await self._policy(session, tenant_id))
+            # Before the explicit "off" marker a revoke stored no grant. A grant only
+            # leaves the current revision by a revoke (other changes carry it), so an
+            # agent whose earlier revision held one was turned off and stays off.
+            legacy_off = (
+                explicit is None
+                and current is not None
+                and current.fleet_grant is None
+                and await agent_backends.ever_had_fleet_grant(session, tenant_id, agent_id)
+            )
         if explicit is not None:
             return FleetSetting("custom", explicit, explicit)
-        if current is not None and current.fleet_grant is not None:
+        if legacy_off or (current is not None and current.fleet_grant is not None):
             # Turned off, or a custom grant that expired.
             return FleetSetting("off", None, default)
         return FleetSetting("default", default, default)

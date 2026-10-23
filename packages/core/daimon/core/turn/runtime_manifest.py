@@ -643,7 +643,9 @@ async def freeze_prepared_root(
         return
     try:
         await _freeze_root(deps, prepared, value, intent_id=intent_id, now=now)
-    except WorkerSpecRefused as error:
+    except Exception as error:
+        # Any failure (a refusal, a conflict, the database) only turns fleet off for this
+        # turn. Cancellation is a BaseException and still propagates.
         source = prepared._source  # pyright: ignore[reportPrivateUsage]
         if prepared.admission.hold is not None:
             obstacle = "held"
@@ -655,8 +657,9 @@ async def freeze_prepared_root(
             )
         log.warning(
             "fleet.default_root_skipped",
-            field=error.field,
-            reason=error.reason,
+            error_type=type(error).__name__,
+            field=getattr(error, "field", None),
+            reason=getattr(error, "reason", None),
             obstacle=obstacle,
         )
         if (origin_id := current_origin_id.get()) is not None:

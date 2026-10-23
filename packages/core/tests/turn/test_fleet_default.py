@@ -35,6 +35,8 @@ from sqlalchemy import delete, func, select
 
 from ..test_agent_backend import enable
 from ..test_agent_backend import owned as owned
+from .test_fleet_source_permissions import NOW as SOURCE_NOW
+from .test_fleet_source_permissions import captured as captured
 from .test_frozen_root import freeze
 from .test_frozen_root import root_turn as root_turn
 
@@ -400,3 +402,107 @@ async def test_a_plan_beyond_the_default_caps_is_refused_with_the_real_limits(ro
         planned_workers=3,
     )
     assert limits.budget_usd <= Decimal("0.67")
+
+
+async def test_an_agent_revoked_before_the_off_marker_stays_off(owned):
+    """Security review #1351: a legacy revoke stored NULL after a grant; it must read off."""
+    from daimon.core.stores import agent_backends
+
+    service, agent, actor, sessions = owned
+    await enable(service, agent, actor)
+    granted = await put(service, agent, actor, custom())
+    async with sessions.begin() as db:
+        # Exactly what the old revoke wrote: the next revision, with no grant at all.
+        await agent_backends.put_revision(
+            db,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            local=granted.local + 1,
+            backend=None,
+            digest="legacy-revoke",
+            previous_local=granted.previous_local,
+            agent_name=agent.name,
+            preview_digest="legacy-revoke",
+            fleet_grant=None,
+        )
+    setting = await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)
+    assert setting.kind == "off" and setting.grant is None
+    # A backend change after it carries "off" on.
+    switched = await service.set_backend(agent, "openai", granted.local + 1, actor)
+    assert switched.fleet_grant is None
+    assert (await service.fleet_setting(agent.tenant_id, agent.agent_id, now=NOW)).kind == "off"
+
+
+async def test_a_default_root_goes_stale_when_the_tenants_providers_change(root_turn):
+    from daimon.core.stores import access_policy
+
+    deps, prepared, _, intent, _, scope, _, _ = root_turn
+    await unconfigured(root_turn)
+    await freeze(root_turn)
+    await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+    async with deps.sessionmaker.begin() as db:
+        current = await access_policy.load_access_policy(db, tenant_id=uuid.UUID(scope.tenant_id))
+        narrower = tuple(p for p in current.enabled_backends if p != "gemini") or ("anthropic",)
+        assert narrower != current.enabled_backends
+        await access_policy.set_access_policy(
+            db,
+            tenant_id=uuid.UUID(scope.tenant_id),
+            policy=current.model_copy(update={"enabled_backends": narrower}),
+        )
+    with pytest.raises(WorkerSpecRefused, match="stale"):
+        await read_frozen_root(deps, scope, intent_id=intent.id, now=datetime.now(UTC))
+
+
+async def test_any_default_freeze_failure_answers_with_fleet_off(root_turn, monkeypatch):
+    from daimon.core import neutral_resources
+
+    deps, prepared, _, intent, origin, scope, _, _ = root_turn
+    await unconfigured(root_turn)
+
+    def broken(*args, **kwargs):
+        raise RuntimeError("database went away")
+
+    monkeypatch.setattr(neutral_resources, "fleet_root_permissions", broken)
+    await freeze(root_turn)  # no raise
+    assert root_refusal(origin.id) == "unavailable"
+
+
+@pytest.mark.parametrize(
+    "model", ["gpt-6-astra", "gemini-4-argon", "gpt-6-luna", "gemini-3.8-flash", "claude-opus-5-5"]
+)
+async def test_every_default_model_has_its_backend_choice_and_resolves_as_a_worker(captured, model):
+    """The default emits one backend choice per catalog model (the resolver's backend gate)."""
+    from daimon.core.neutral_resources import fleet_root_permissions
+
+    source, admission, _, fleet_facts, policy_now, _ = captured
+    assert set(ALL) <= set(policy_now.enabled_backends)
+    grant = default_fleet_grant(policy(*policy_now.enabled_backends))
+    assert grant is not None
+    root = fleet_root_permissions(
+        source, admission, grant, fleet=fleet_facts, policy=policy_now, now=SOURCE_NOW
+    )
+    provider = next(m.provider for m in grant.models if m.id == model)
+    matching = [
+        backend
+        for backend in root.backend_grants
+        if backend.backend == provider and backend.model in (None, model)
+    ]
+    assert len(matching) == 1
+    spec = task_worker_spec(root, role="W", task="Postgres or SQLite?", model=model)
+    limits = default_worker_limits(
+        root.limits, None, (), provider=provider, budget_usd=Decimal("0.5")
+    )
+    if model == "gemini-4-argon":
+        # Argon runs only on the bounded envelope the spawn fills in.
+        limits = limits.model_copy(update={"max_input_tokens": 4096, "max_output_tokens": 1024})
+    child = resolve_worker_spec(
+        root,
+        spec,
+        policy=policy_now,
+        now=SOURCE_NOW,
+        captured_source=source,
+        resources=root.resources if provider == "anthropic" else (),
+        environment=root.environment if provider == "anthropic" else None,
+        limits=limits,
+    )
+    assert child.spec.model.id == model and child.backend == matching[0]
