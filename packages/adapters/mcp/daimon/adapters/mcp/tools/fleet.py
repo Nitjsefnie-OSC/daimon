@@ -51,8 +51,8 @@ class AgentWorker(BaseModel):
 
     model_config = ConfigDict(extra="forbid")
 
-    name: str
-    declared_drops: tuple[CapabilityDrop, ...] = ()
+    name: str = Field(min_length=1, max_length=200)
+    declared_drops: tuple[CapabilityDrop, ...] = Field(default=(), max_length=8)
 
 
 class FleetToolService(Protocol):

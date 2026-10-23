@@ -208,9 +208,33 @@ def _worker_agent(worker: FleetWorker) -> str:
     """
     name, metadata = worker.spec.get("name"), worker.spec.get("metadata")
     agent = metadata.get(MA_METADATA_KEY_NAME) if isinstance(metadata, dict) else None
-    if not isinstance(name, str) or not name.strip() or name != agent or name == worker.role:
+    if not isinstance(name, str) or not name.strip() or name != agent:
         return ""
-    return f" ({_literal(name, 40)})"
+    # What it runs without, so the person who asked sees it, not only the root.
+    drops = worker.spec.get("declared_drops")
+    lost = [
+        _DROP_WORDS.get(item, "some of its setup")
+        for item in (drops if isinstance(drops, list) else [])
+        if isinstance(item, str)
+    ]
+    without = f", without {', '.join(dict.fromkeys(lost))}" if lost else ""
+    label = "" if name == worker.role else _literal(name, 40)
+    if not label and not without:
+        return ""
+    return f" ({label}{without})" if label else f" ({without.removeprefix(', ')})"
+
+
+#: Plain words for what an agent worker runs without (its declared losses).
+_DROP_WORDS = {
+    "tools": "its tools",
+    "skills": "its skills",
+    "mcp": "its connected tools",
+    "memory": "its memory",
+    "sandbox": "its sandbox",
+    "model_controls": "its model settings",
+    "files": "its files",
+    "repository": "its repository",
+}
 
 
 def _worker_status(worker: FleetWorker) -> str:

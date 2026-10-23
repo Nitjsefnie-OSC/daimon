@@ -1356,6 +1356,7 @@ async def test_an_agent_worker_can_declare_its_own_losses() -> None:
         for bad in (
             {"name": "researcher", "declared_drops": ["mcp_tool:a:b"]},
             {"name": "researcher", "tools": []},
+            {"name": "r" * 201},
         ):
             with pytest.raises(ToolError):
                 await client.call_tool(

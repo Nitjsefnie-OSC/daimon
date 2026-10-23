@@ -77,9 +77,10 @@ def _validation_categories(error: BaseException) -> list[str] | None:
 
     if not isinstance(error, ValidationError):
         return None
+    # Only the top-level field: deeper path parts can be keys taken from the input.
     return sorted(
         {
-            ".".join(str(part) for part in item["loc"]) + ":" + item["type"]
+            f"{item['loc'][0] if item['loc'] else ''}:{item['type']}"
             for item in error.errors(include_url=False, include_input=False)
         }
     )[:10]
@@ -1535,6 +1536,7 @@ class HostFleetPorts:
         from daimon.core.turn.admission import prepare_worker_agent
         from daimon.core.turn.errors import AdmissionDenied
         from daimon.core.turn.runtime_manifest import read_agent_fleet_grant
+        from mux.profiles import MANAGED_AGENTS
 
         deps = self._deps
         if deps is None or self._preparation is None:
@@ -1606,7 +1608,7 @@ class HostFleetPorts:
             # Its chat turns on that backend declare these losses; so does its worker.
             self._agent_drops[(parent.fleet.run_id, source.agent_id)] = (
                 cast("tuple[DeclaredDrop, ...]", tuple(setting.declared_drops))
-                if setting is not None and setting.backend not in (None, "anthropic")
+                if setting is not None and setting.backend not in (None, MANAGED_AGENTS.provider)
                 else ()
             )
             return worker_parent

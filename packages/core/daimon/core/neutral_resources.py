@@ -1740,7 +1740,9 @@ def agent_worker_patch(
     `model` is the agent's configured model when it differs from its native one;
     a model on another provider declares the same losses a task worker does. The
     agent's tools are its own: one that asks before running cannot be asked by a
-    worker, so the resolver refuses that agent rather than drop the tool. `drops`
+    worker, so that agent is refused as a worker on every provider (its authority,
+    agent_worker_permissions, refuses before any loss is declared), never dropped
+    silently. `drops`
     adds declared losses: the ones the agent's owner accepted for its backend, and
     any the root declares; a loss only ever takes capability away.
     """

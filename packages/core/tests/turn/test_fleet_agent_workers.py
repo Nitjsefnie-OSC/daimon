@@ -988,6 +988,65 @@ async def test_a_foreign_backend_agent_worker_declares_what_it_cannot_carry(
     assert {"skills", "mcp", "memory", "sandbox", "model_controls", "tools"} <= drops
     assert not resolved.spec.tools or all(t.permission == "auto" for t in resolved.spec.tools)
     assert RESEARCHER_SYSTEM in resolved.spec.system
+    # Dispatch re-derives exactly this worker, declared losses included (for_worker).
+    from daimon.core.turn.prepare import clone_overrides
+    from mux.contracts.config import BackendConfig
+
+    again = resolve_worker_spec(
+        worker_root,
+        agent.source,
+        overrides=clone_overrides(resolved.spec),
+        policy=on,
+        now=NOW,
+        backend=BackendConfig.model_validate(
+            resolved.backend.model_dump(include=set(BackendConfig.model_fields))
+        ),
+        resources=resolved.resources,
+        environment=resolved.environment,
+        limits=resolved.limits,
+        captured_source=agent,
+    )
+    assert again.digest == resolved.digest
+
+
+@pytest.mark.parametrize("backend", ["gemini", "openai"])
+async def test_an_agent_with_an_ask_tool_is_refused_on_a_foreign_backend_too(
+    captured, owned, backend
+):
+    """Its ask tool is never dropped silently to fit another provider."""
+    _, admission, grant, fleet, policy, _ = captured
+    root = compose(captured)
+    gated = {
+        **CLI_TOOLSET,
+        "configs": [
+            {**config, "permission_policy": {"type": "always_ask"}}
+            if config["name"] == "bash"
+            else config
+            for config in CLI_TOOLSET["configs"]
+        ],
+    }
+    agent, actual = await capture_agent(
+        owned,
+        fleet.scope,
+        ma_id=f"gated-{backend}-source",
+        name=f"gated-{backend}",
+        model=CLI_MODEL,
+        tools=(gated,),
+        cli=True,
+    )
+    assert agent.effective_spec is not None
+    as_agent = replace(admission, agent=build_agent_ref(actual.name, actual.metadata or {}))
+    on = policy.model_copy(update={"enabled_backends": ("anthropic", "openai", "gemini")})
+    with pytest.raises(WorkerSpecRefused, match="tools: unsupported"):
+        agent_worker_permissions(
+            root,
+            agent,
+            as_agent,
+            any_agent(grant),
+            policy=on,
+            now=NOW,
+            backend=agent_worker_backend(agent.effective_spec, backend, None),
+        )
 
 
 async def test_the_root_may_declare_more_losses_for_an_agent_worker_but_never_gains(
