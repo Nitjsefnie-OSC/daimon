@@ -524,7 +524,9 @@ async def test_native_clone_inherits_only_the_projected_ceiling(captured):
 @pytest.mark.parametrize(
     "captured", ("haiku55", "haiku55_credentials", "haiku55_effort"), indirect=True
 )
-async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captured, owned):
+async def test_live_manifest_worker_session_build_uses_only_neutral_grants(
+    captured, owned, monkeypatch
+):
     from daimon.core.config import McpSettings
     from daimon.core.mux_compat import sdk_agent
     from daimon.core.sessions import create_session
@@ -534,6 +536,24 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captu
     from pydantic import SecretStr
 
     source, _, _, _, policy, _ = captured
+    from daimon.core import sessions as session_module
+
+    async def no_root_env(*args, **kwargs):
+        # #1357 review: a worker's agent_uuid is its root's; the root's .env never mounts.
+        raise AssertionError("a worker session uploaded the root's stored .env")
+
+    monkeypatch.setattr(session_module, "upload_env_and_mount", no_root_env)
+
+    async def root_in_app_mode(*args, **kwargs):
+        return True
+
+    async def no_root_vault(*args, **kwargs):
+        raise AssertionError("a worker session built the root's GitHub app vault")
+
+    # Even an app-mode root never lends a worker its app vault or mirrored logins.
+    monkeypatch.setattr(session_module, "_session_app_mode", root_in_app_mode)
+    monkeypatch.setattr(session_module, "effective_app_grant_view", no_root_vault)
+    monkeypatch.setattr(session_module, "create_session_vault", no_root_vault)
     permissions = compose(captured)
     worker = resolve_worker_spec(
         permissions,
@@ -663,6 +683,7 @@ async def test_live_manifest_worker_session_build_uses_only_neutral_grants(captu
     assert len(executing.tools) == 1
     assert agent_payload(worker.spec)["tools"][0]["default_config"]["enabled"] is False
     assert not any("vault" in call.path for call in trace.requests)
+    assert not any("/v1/files" in call.path for call in trace.requests)
     trace.assert_consumed()
 
 

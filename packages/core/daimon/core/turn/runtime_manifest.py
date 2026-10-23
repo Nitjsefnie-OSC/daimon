@@ -2264,11 +2264,19 @@ def classify_source_obligations(
     retained_agent: ResourceRef | None = None,
 ) -> frozenset[str]:
     """One source-preservation rule for pre-allocation normalization and preparation."""
+    ceiling_drops: set[str] = set()
     if worker_ceiling:
+        before: set[str] = (
+            set(source.effective_spec.declared_drops) if source.effective_spec else set()
+        )
         try:
             source = worker_source_ceiling(source)
         except ValueError:
             return frozenset({"source_definition", "tools"})
+        if source.effective_spec is not None:
+            # What the ceiling left out (logins, stored secrets, logged-in repos) is
+            # only discharged when the target declares the same loss.
+            ceiling_drops = set(source.effective_spec.declared_drops) - before
     spec = source.effective_spec
     if spec is None:
         return frozenset({"source_definition"})
@@ -2297,7 +2305,7 @@ def classify_source_obligations(
         and environment == source.environment.spec
         and resources == source.resource_requirements
     )
-    missing: set[str] = set()
+    missing: set[str] = ceiling_drops - set(drops)
     if represented is not None:
         missing.update(set(represented.unavailable_mcp_tools) - set(drops))
         missing.update(set(represented.unavailable_builtin_tools) - set(drops))
