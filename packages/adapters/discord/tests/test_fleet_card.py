@@ -11,6 +11,7 @@ from uuid import UUID
 
 import discord
 import pytest
+import structlog
 from daimon.adapters.discord.lifecycle import DiscordTurnLifecycle
 from daimon.adapters.discord.posted_controls.fleet import (
     DiscordFleetCard,
@@ -21,7 +22,7 @@ from daimon.adapters.discord.posted_controls.fleet import (
 from daimon.core.access_policy import TenantAccessPolicy
 from daimon.core.authz import AgentRef, FleetFacts, Place, Subject
 from daimon.core.fleet import FleetRun, FleetWorker, ResultPointer, result_digest
-from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts
+from daimon.core.fleet_orchestration import FleetOrchestrator, FleetPorts, FleetRefused
 from daimon.core.ma_identity import derive_tenant_uuid
 from daimon.core.neutral_resources import WorkerLimits, WorkerPermissions
 from daimon.core.tool_safety import DAIMON_SERVER_NAME
@@ -293,13 +294,61 @@ async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(ad
         policy,
     )
     click = interaction(456, card=card)
-    await buttons(send.call_args.kwargs["view"])[0].callback(click)
+    with structlog.testing.capture_logs() as logs:
+        await buttons(send.call_args.kwargs["view"])[0].callback(click)
     assert owner.control.await_count == (1 if admin else 0)
+    pressed = [entry for entry in logs if entry["event"] == "fleet.control_pressed"]
+    assert pressed == (
+        [
+            {
+                "event": "fleet.control_pressed",
+                "log_level": "info",
+                "run_id": str(RUN),
+                "worker_id": str(worker().id),
+                "action": "kill",
+                "pressed_by": "456",
+                "presser_is_admin": True,
+            }
+        ]
+        if admin
+        else []
+    ), "only an accepted press is recorded, with who pressed it"
     if not admin:
         click.response.send_message.assert_awaited_once_with(
             "Only the person who started this fleet, or a server admin, can stop it.",
             ephemeral=True,
         )
+
+
+@pytest.mark.parametrize(
+    ("refusal", "text"),
+    [
+        ("terminal_worker", "This worker has already finished."),
+        (
+            "stale",
+            "This fleet changed since the card was drawn. Wait for the card to update, then try again.",
+        ),
+        ("inactive", "You can't control this fleet from here."),
+        ("outage", "Couldn't reach the fleet just now. Try again in a moment."),
+    ],
+)
+async def test_a_refused_fleet_click_names_its_real_cause(refusal, text):
+    card, owner, loader, send, _ = setup()
+    await card.refresh()
+    if refusal == "terminal_worker":
+        # The run goes on; only the clicked worker has finished.
+        owner.read_run.return_value = (run(), (worker(status="succeeded"),))
+    elif refusal == "stale":
+        owner.read_run.return_value = (run(), (worker(version=4),))
+    elif refusal == "inactive":
+        current, policy = loader.return_value
+        loader.return_value = (replace(current, fleet=replace(current.fleet, active=False)), policy)
+    else:
+        loader.side_effect = FleetRefused("prerequisites_unavailable")
+    click = interaction(card=card)
+    await buttons(send.call_args.kwargs["view"])[0].callback(click)
+    owner.control.assert_not_awaited()
+    click.response.send_message.assert_awaited_once_with(text, ephemeral=True)
 
 
 async def test_a_click_on_a_fleet_that_already_ended_says_so():

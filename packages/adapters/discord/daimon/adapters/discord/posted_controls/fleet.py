@@ -573,6 +573,11 @@ class DiscordFleetCardFactory:
 
 _NOT_CONTROLLER = "Only the person who started this fleet, or a server admin, can {verb} it."
 _ALREADY_ENDED = "This fleet has already stopped."
+_WORKER_ENDED = "This worker has already finished."
+_UNREACHABLE = "Couldn't reach the fleet just now. Try again in a moment."
+_NOT_HERE = "You can't control this fleet from here."
+# Refusals a newer card would not offer: the card is behind the run.
+_CARD_BEHIND = frozenset({"stale_version", "foreign_worker", "foreign_run", "ambiguous_workers"})
 _CHANGED = (
     "This fleet changed since the card was drawn. Wait for the card to update, then try again."
 )
@@ -584,9 +589,15 @@ def _refusal_text(refused: FleetRefused | WorkerSpecRefused, action: Control) ->
     if reason == "controller_required":
         # The shared owner's live rule: the fleet's starter or a current server admin.
         return _NOT_CONTROLLER.format(verb="stop" if action == "kill" else "resume")
-    if reason in ("terminal_run", "terminal_worker"):
+    if reason == "terminal_run":
         return _ALREADY_ENDED
-    return _CHANGED
+    if reason == "terminal_worker":
+        return _WORKER_ENDED
+    if reason in _CARD_BEHIND:
+        return _CHANGED
+    if reason == "prerequisites_unavailable":
+        return _UNREACHABLE
+    return _NOT_HERE
 
 
 class DiscordFleetCard:
@@ -752,6 +763,11 @@ class DiscordFleetCard:
                     ),
                     now=self._clock(),
                 )
+                if reply.get("accepted") is not True:
+                    await interaction.response.send_message(
+                        "This action is waiting for its dependencies.", ephemeral=True
+                    )
+                    return False
                 log.info(
                     "fleet.control_pressed",
                     run_id=str(run.id),
@@ -760,11 +776,6 @@ class DiscordFleetCard:
                     pressed_by=str(interaction.user.id),
                     presser_is_admin=parent.subject.is_admin,
                 )
-                if reply.get("accepted") is not True:
-                    await interaction.response.send_message(
-                        "This action is waiting for its dependencies.", ephemeral=True
-                    )
-                    return False
                 run, workers = await self._service.read_snapshot(parent, policy, run.id)
                 view = self._render(run, workers)
 

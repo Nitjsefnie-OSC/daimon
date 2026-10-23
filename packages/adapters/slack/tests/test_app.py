@@ -5469,7 +5469,7 @@ async def test_handle_block_action_when_non_author_clicks_cancel_event_unset(
     assert body["channel"] == "C_TEST"
     assert body["user"] == "U_OTHER"
     assert "thread_ts" not in body
-    assert body["text"] == "Only the person who asked, or a server admin, can stop this reply."
+    assert body["text"] == "Only the person who asked, or a workspace admin, can stop this reply."
 
 
 @pytest.mark.parametrize("lookup", ["admin", "failed"])

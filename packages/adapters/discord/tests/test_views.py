@@ -8,6 +8,7 @@ from uuid import UUID
 
 import discord
 import pytest
+import structlog
 from daimon.adapters.discord import views
 from daimon.adapters.discord.views import (
     CancelView,
@@ -191,8 +192,20 @@ class TestCancelView:
             user_id=456, owner=owner, administrator=administrator, manage_guild=manage_guild
         )
         assert await view.interaction_check(interaction) is True
-        await _find_button(view, "Stop").callback(interaction)
+        with structlog.testing.capture_logs() as logs:
+            await _find_button(view, "Stop").callback(interaction)
         assert cancel.is_set(), "an owner, Administrator or Manage Server member stops it"
+        assert [entry for entry in logs if entry["event"] == "turn.stop_pressed"] == [
+            {
+                "event": "turn.stop_pressed",
+                "log_level": "info",
+                "platform": "discord",
+                "turn_id": None,
+                "requester_id": "123",
+                "pressed_by": "456",
+                "by_admin": True,
+            }
+        ], "the stop is recorded with who pressed it"
         interaction.response.send_message.assert_not_called()
 
     @pytest.mark.asyncio

@@ -396,10 +396,11 @@ stale edit is logged and ignored. Stop still interrupts the turn when its
 card has been deleted; restart recovery treats a card deleted between its
 lookup and edit as already resolved. Other edit failures still propagate.
 
-A turn card's Stop is pressed by the person who asked or by anyone who is a
-server admin at the moment they press it: on Discord the owner or a member with
+A turn card's Stop is pressed by the person who asked or by a current admin,
+checked on each click: on Discord the owner or a member with
 Administrator or Manage Server, on Slack a host-workspace admin or owner, on
-Teams an owner of the admin team. When Slack or Teams can't say whether the
+Teams an owner of the admin team (read through the shared owner cache, as
+every Teams admin check is). When Slack or Teams can't say whether the
 clicker is an admin, the click is refused as "try again", not as "not an
 admin". Each accepted Stop logs `turn.stop_pressed` with who pressed it.
 

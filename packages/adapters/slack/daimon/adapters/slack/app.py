@@ -316,7 +316,7 @@ _ORPHAN_RECOVERY_MAX_RETRY_DELAY_S: float = 30.0
 # Marks a request queued behind the thread's active turn.
 _PENDING_REACTION = "hourglass_flowing_sand"
 
-_CANCEL_NOT_AUTHOR = "Only the person who asked, or a server admin, can stop this reply."
+_CANCEL_NOT_AUTHOR = "Only the person who asked, or a workspace admin, can stop this reply."
 _CANCEL_ROLE_UNKNOWN = "I couldn't check your role just now. Try again in a moment."
 _CANCEL_TURN_ENDED = "This reply has already finished — there is nothing left to cancel."
 

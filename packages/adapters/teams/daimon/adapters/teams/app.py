@@ -209,7 +209,7 @@ CONTROLS_WAIT_S = 30.0
 _RECOVERY_MAX_RETRY_DELAY_S = 30.0
 _FAILED = "Sorry, something went wrong handling that. Please try again."
 _SHED = "Too many chats at once right now. Try again in a moment."
-_CANCEL_NOT_AUTHOR = "Only the person who asked, or a server admin, can stop this reply."
+_CANCEL_NOT_AUTHOR = "Only the person who asked, or a Daimon admin, can stop this reply."
 _CANCEL_ROLE_UNKNOWN = "I couldn't check your role just now. Try again in a moment."
 _CANCEL_TURN_ENDED = "This reply has already finished — there is nothing left to cancel."
 
