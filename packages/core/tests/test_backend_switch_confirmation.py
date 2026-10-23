@@ -893,7 +893,7 @@ async def test_card_names_the_model_and_where_the_switch_applies(
     )
     trace.queue(reply())
     prepared = await prepare(prompt)
-    assert prepared.title == "Switch Researcher to gemini (gemini-4-argon)?"
+    assert prepared.title == "Switch Researcher to Gemini (gemini-4-argon)?"
     assert prepared.consequence is not None
     reach = (
         f"Affects new conversations in every channel on this {place}"
@@ -968,3 +968,49 @@ def test_switch_prompt_binds_the_stated_agent_settings() -> None:
         prompt_for_tool_call(
             _call(thread_mode="everyone"), requester_platform_user_id="r", now=datetime.now(UTC)
         )
+
+
+async def test_the_card_says_plainly_that_saved_keys_wont_be_available(owned_preview, monkeypatch):
+    from unittest.mock import AsyncMock
+
+    from daimon.core.confirmation import backend_switch_callbacks
+
+    service, agent, actor, sessions, client, trace, payload, reply, prompt = owned_preview
+    real = await service.preview(agent, "openai")
+    dropping = type(real).model_validate(
+        {
+            **real.model_dump(),
+            "drop_consent": {
+                "declared_drops": ["credentials", "memory", "sandbox"],
+                "source_pin": "a" * 64,
+                "target_digest": "b" * 64,
+            },
+        }
+    )
+    monkeypatch.setattr(service, "preview", AsyncMock(return_value=dropping))
+    prepare, _ = backend_switch_callbacks(
+        service,
+        sessionmaker=sessions,
+        anthropic=client,
+        tenant_id=agent.tenant_id,
+        account_id=actor.account_id,
+        current_admin=AsyncMock(return_value=True),
+    )
+    prompt = prompt_for_tool_call(
+        _call(
+            expected_revision=dropping.setting_revision,
+            preview_digest=dropping.digest,
+            accepted_drops=list(dropping.declared_drops),
+        ),
+        requester_platform_user_id="requester",
+        now=datetime.now(UTC),
+    )
+    trace.queue(reply())
+    prepared = await prepare(prompt)
+    assert prepared.action == "Switch Researcher to OpenAI"
+    assert (
+        "On OpenAI it won't have its saved keys, its memory and its sandbox" in prepared.consequence
+    )
+    assert prepared.consequence.count("saved keys") == 1
+    assert "credentials" not in prepared.action + prepared.consequence
+    assert "Nothing is deleted" in prepared.consequence

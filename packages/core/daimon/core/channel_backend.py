@@ -402,10 +402,21 @@ class BackendResolution:
 
 
 class AgentBackendRefused(DaimonError):
-    def __init__(self, reason: str, *, provider: Provider | None = None) -> None:
+    def __init__(
+        self,
+        reason: str,
+        *,
+        provider: Provider | None = None,
+        missing: tuple[str, ...] = (),
+        detail: str | None = None,
+    ) -> None:
         self.reason = reason
         # The provider a `backend_not_allowed` refusal names, for its copy.
         self.provider = provider
+        # `source_unsupported`: what the target can't carry (closed obligation labels).
+        self.missing = missing
+        # `source_unavailable`: which permanent cause, if not a transient read failure.
+        self.detail = detail
         super().__init__(reason.replace("_", " "))
 
 
@@ -852,7 +863,9 @@ class AgentBackendService:
                 agent, ModelRef(provider=selection.backend, id=selection.model or agent.model or "")
             )
         except UnsupportedCapability as error:
-            raise AgentBackendRefused("source_unsupported", provider=target) from error
+            raise AgentBackendRefused(
+                "source_unsupported", provider=target, missing=tuple(error.missing)
+            ) from error
         consent = {
             "declared_drops": proposed.declared_drops,
             "source_pin": source_preservation_pin(agent),

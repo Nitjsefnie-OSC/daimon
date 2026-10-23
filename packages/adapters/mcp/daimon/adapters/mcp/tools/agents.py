@@ -469,9 +469,8 @@ def _resolve_native_agent_model(model: ModelSelection) -> ModelSelection:
             if other.provider != MANAGED_AGENTS.provider:
                 raise ToolError(
                     f"{model_name(other)} is a {provider_name(other.provider)} model. Create "
-                    "the agent on a Claude model such as sonnet, then call "
-                    f"request_agent_backend_switch with target_backend='{other.provider}' and "
-                    f"model='{other.id}'. Nothing was created yet."
+                    "the agent on a Claude model such as sonnet, then switch it to "
+                    f"{provider_name(other.provider)} ({other.id}). Nothing was created yet."
                 ) from exc
         raise ToolError(str(exc)) from exc
     return resolved if isinstance(model, str) else {**model, "id": resolved}
@@ -1092,6 +1091,25 @@ async def _capture_backend_source(
     )
 
 
+#: What a target provider can't carry, in plain words (closed obligation labels).
+_MISSING_WORDS: Final[Mapping[str, str]] = {
+    "credentials": "a saved key that one of its kept connections needs",
+    "instructions": "instructions that can't be carried over unchanged",
+    "source_definition": "a setting or attachment that provider can't represent",
+    "source_context": "setup that couldn't be read completely",
+    "source_representation": "a saved version for that provider that is out of date",
+    "tools": "tools that must ask before publishing",
+    "model_options": "model options that provider doesn't take",
+}
+
+#: Why a source read failed for a reason that a retry won't fix.
+_SOURCE_DETAIL_WORDS: Final[Mapping[str, str]] = {
+    "identity": "this request doesn't come from the account that can change it here",
+    "environment": "its working environment is missing or archived",
+    "place": "this conversation's channel couldn't be verified",
+}
+
+
 def _backend_switch_refusal(
     exc: DaimonError | ValidationError,
     agent_name: str,
@@ -1103,76 +1121,122 @@ def _backend_switch_refusal(
     """The real reason a provider change was refused, and what the requester can do.
 
     ``with_code`` appends the stable reason for direct API and coding-tool callers.
+    Never shows an exception type or an internal string.
     """
     from daimon.core.turn.notices import provider_name
 
+    refused = exc if isinstance(exc, channel_backend.AgentBackendRefused) else None
     reason = (
-        exc.reason
-        if isinstance(exc, channel_backend.AgentBackendRefused)
+        refused.reason
+        if refused is not None
         else "invalid_request"
         if isinstance(exc, ValidationError)
-        else type(exc).__name__
+        else "backend_unsupported"
+        if isinstance(exc, channel_backend.BackendUnsupported)
+        else "internal"
     )
-    log.warning("agent_backend_switch_refused", agent=agent_name, target=target, reason=reason)
-    if isinstance(exc, channel_backend.BackendUnsupported):
-        return ToolError(f"{exc} Nothing changed.")
-    provider = provider_name(target or getattr(exc, "provider", None))
+    log.warning(
+        "agent_backend_switch_refused",
+        agent=agent_name,
+        target=target,
+        reason=reason,
+        error_type=type(exc).__name__,
+        missing=list(getattr(refused, "missing", ())),
+        detail=getattr(refused, "detail", None),
+    )
+    provider = provider_name(target or getattr(refused, "provider", None))
     admin = admin_noun(auth.platform)
-    text = {
-        "agent_not_found": (
-            f"There's no agent named '{agent_name}' here. Check the name with list_agents."
-        ),
-        "tenant_mismatch": (
-            f"'{agent_name}' belongs to another workspace and can't be changed here."
-        ),
-        "owner_or_admin_required": f"Changing '{agent_name}' needs its owner or {admin}.",
-        "admin_required": f"This change needs {admin}.",
-        "actor_not_found": (
-            "I couldn't match you to an account here. Send a message first, then retry."
-        ),
-        "admin_required_for_shared_threads": f"Sharing threads in every channel needs {admin}.",
-        "feature_disabled": f"Choosing a model provider is turned off. Ask {admin} to turn it on.",
-        "backend_not_allowed": (
-            f"{provider} isn't allowed in this workspace. Ask {admin} to allow it."
-        ),
-        "model_not_selectable": f"That model isn't available on {provider}. Pick one it lists.",
-        "profile_not_selectable": f"That model isn't available on {provider}. Pick one it lists.",
-        "source_unsupported": (
-            f"'{agent_name}' uses something {provider} can't carry over. "
-            "Preview again to see what it drops, or pick another provider."
-        ),
-        "source_unavailable": (
-            f"I couldn't read '{agent_name}''s current setup (its agent or environment "
-            "didn't answer). Try again in a minute."
-        ),
-        "source_context_unavailable": (
-            "I can't confirm a change from this conversation. "
-            "Ask in a public channel or thread where I answer."
-        ),
-        "selfhosted_requires_channel_configuration": (
-            f"A self-hosted model is set per channel, not per agent. Ask {admin}."
-        ),
-        "stale_preview": f"'{agent_name}' changed since the preview. Preview again and confirm.",
-        "stale_revision": (
-            f"'{agent_name}''s provider changed since the preview. Preview again and confirm."
-        ),
-        "re_confirm": "This change needs a fresh confirmation. Preview again and confirm.",
-        "drops_required": "Preview again and accept what this switch drops.",
-        "drops_mismatch": "What this switch drops changed. Preview again and accept the new list.",
-        "revision_busy": "Another change to this agent is in progress. Retry in a moment.",
-        "invalid_request": "That request was malformed. Preview again and use its values.",
-    }.get(reason, f"The provider change was refused ({reason.replace('_', ' ')}).")
+    if reason == "backend_unsupported":
+        # Only the copy written for people passes through; internal labels never do.
+        said = str(exc)
+        text = (
+            said
+            if said.endswith(".") and " " in said and "_" not in said
+            else f"{provider} can't run here right now. Pick another, or ask whoever runs Daimon."
+        )
+    elif reason == "source_unsupported":
+        missing: tuple[str, ...] = getattr(refused, "missing", ())
+        things = [_MISSING_WORDS[item] for item in missing if item in _MISSING_WORDS]
+        text = (
+            f"'{agent_name}' can't move to {provider}: it has "
+            + ("; ".join(things) if things else "something that provider can't carry")
+            + ". Its owner can remove that from the agent, or keep it on Claude."
+        )
+    elif reason == "source_unavailable":
+        detail: str | None = getattr(refused, "detail", None)
+        text = (
+            f"I can't change '{agent_name}' from here: {_SOURCE_DETAIL_WORDS[detail]}."
+            if detail in _SOURCE_DETAIL_WORDS
+            else f"I couldn't read '{agent_name}''s current setup (the provider didn't "
+            "answer in time). Try again in a minute."
+        )
+    else:
+        text = {
+            "agent_not_found": f"There's no agent named '{agent_name}' here. Ask me to list them.",
+            "tenant_mismatch": (
+                f"'{agent_name}' belongs to another workspace and can't be changed here."
+            ),
+            "owner_or_admin_required": f"Changing '{agent_name}' needs its owner or {admin}.",
+            "admin_required": f"This change needs {admin}.",
+            "actor_not_found": (
+                "I couldn't match you to an account here. Send a message first, then retry."
+            ),
+            "admin_required_for_shared_threads": f"Sharing threads in every channel needs {admin}.",
+            "feature_disabled": f"Choosing a model provider is turned off. Ask {admin}.",
+            "backend_not_allowed": (
+                f"{provider} isn't allowed in this workspace. Ask {admin} to allow it."
+            ),
+            "model_not_selectable": f"That model isn't available on {provider}. Pick another.",
+            "profile_not_selectable": f"That model isn't available on {provider}. Pick another.",
+            "source_context_unavailable": (
+                "I can't confirm a change from this conversation. "
+                "Ask in a public channel or thread where I answer."
+            ),
+            "selfhosted_requires_channel_configuration": (
+                f"A self-hosted model is set per channel, not per agent. Ask {admin}."
+            ),
+            "stale_preview": f"'{agent_name}' changed since the preview. Ask me to preview again.",
+            "stale_revision": (
+                f"'{agent_name}''s provider changed since the preview. Ask me to preview again."
+            ),
+            "re_confirm": "This change needs a fresh confirmation. Ask me to preview again.",
+            "drops_required": "The confirmation didn't accept what this switch drops. "
+            "Ask me to preview again.",
+            "drops_mismatch": "What this switch drops changed. Ask me to preview again.",
+            "revision_busy": "Another change to this agent is in progress. Retry in a moment.",
+            "invalid_request": "That request didn't match the preview. Ask me to preview again.",
+        }.get(
+            reason,
+            "Something on Daimon's side refused this change. "
+            "If it repeats, tell whoever runs Daimon.",
+        )
     return ToolError(f"{text} Nothing changed." + (f" [{reason}]" if with_code else ""))
 
 
 # A provider word alone ("switch to GPT") means that provider's default model.
-_PROVIDER_WORDS: Final = frozenset(
-    {"anthropic", "claude", "openai", "gpt", "chatgpt", "gemini", "google", "default"}
-)
+_PROVIDER_WORDS: Final[Mapping[str, Provider | None]] = {
+    "anthropic": "anthropic",
+    "claude": "anthropic",
+    "openai": "openai",
+    "gpt": "openai",
+    "chatgpt": "openai",
+    "gemini": "gemini",
+    "google": "gemini",
+    "default": None,
+}
 
 
 def _resolve_agent_model(backend: Provider | None, model: str | None) -> str | None:
-    if model is not None and model.strip().lower() in _PROVIDER_WORDS:
+    word = model.strip().lower() if model is not None else None
+    if word in _PROVIDER_WORDS:
+        named = _PROVIDER_WORDS[word]
+        if named is not None and backend is not None and named != backend:
+            from daimon.core.turn.notices import provider_name
+
+            raise ToolError(
+                f"'{model}' is {provider_name(named)}, but this switch names "
+                f"{provider_name(backend)}. Nothing changed. Say which one you want."
+            )
         return None
     if model is None or backend is None or model in selectable_models(backend):
         return model

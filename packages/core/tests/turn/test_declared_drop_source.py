@@ -771,3 +771,24 @@ def test_caller_mcp_pairing_requires_the_complete_known_binding(captured, corrup
     target = preview_source_drops(captured, ModelRef(provider="openai", id="gpt-6-luna"))
     target = target.model_copy(update={"declared_drops": ("mcp", "sandbox", "files")})
     assert "credentials" in classify_source_obligations(source, target, environment=None)
+
+
+def test_a_declared_credentials_loss_never_covers_a_credential_its_kept_connection_needs(captured):
+    """Dropping saved keys can't carry a key: a retained MCP server's credential still refuses."""
+    server = MCPConnection(name="kept", url="https://mcp.invalid/mcp", credential_ref="kept-key")
+    source = captured.model_copy(
+        update={
+            "effective_spec": captured.effective_spec.model_copy(update={"mcp_servers": (server,)}),
+            "resource_requirements": (
+                ResourceBinding(id="kept-key", kind="credential", credential_ref="kept-key"),
+            ),
+        }
+    )
+    target = preview_source_drops(source, ModelRef(provider="openai", id="gpt-6-luna"))
+    retained = target.model_copy(
+        update={
+            "mcp_servers": (server,),
+            "declared_drops": tuple(sorted({*target.declared_drops, "credentials"})),
+        }
+    )
+    assert "credentials" in classify_source_obligations(source, retained, environment=None)

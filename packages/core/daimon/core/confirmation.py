@@ -25,7 +25,7 @@ import re
 import secrets
 import unicodedata
 import uuid
-from collections.abc import Awaitable, Callable, Mapping
+from collections.abc import Awaitable, Callable, Mapping, Sequence
 from dataclasses import dataclass
 from datetime import datetime, timedelta
 from typing import TYPE_CHECKING, Final, Literal, cast
@@ -586,6 +586,33 @@ def reference_settings(reference: BackendSwitchReference) -> AgentSettings | Non
     return stated_settings(reference.thread_mode, reference.required_capabilities)
 
 
+#: Plain words for a declared loss on a provider-switch card.
+_DROP_WORDS: Mapping[str, str] = {
+    "credentials": "its saved keys",
+    "memory": "its memory",
+    "sandbox": "its sandbox",
+    "skills": "its skills",
+    "mcp": "its connected tools",
+    "tools": "its tools",
+    "files": "its files",
+    "repository": "its repository",
+    "model_controls": "its model settings",
+    "builtin_tool:web_fetch": "web fetch",
+}
+
+
+def drop_words(drops: Sequence[str]) -> str:
+    """'its saved keys, its memory and its sandbox': saved keys first, as the costliest."""
+    words: list[str] = []
+    for drop in sorted(drops, key=lambda item: (item != "credentials", item)):
+        if drop.startswith("mcp_tool:"):
+            _, server, tool = drop.split(":", 2)
+            words.append(f"the {tool} tool of {server}")
+        else:
+            words.append(_DROP_WORDS.get(drop, drop.replace("_", " ")))
+    return words[0] if len(words) == 1 else ", ".join(words[:-1]) + " and " + words[-1]
+
+
 def settings_line(settings: Mapping[str, object]) -> str:
     """Plain words for the agent's stated settings on a card."""
     parts: list[str] = []
@@ -830,22 +857,16 @@ def backend_switch_callbacks(
             "Shared-thread limits: " + ("; ".join(preview.shared_thread_limits) or "None"),
             preview.cost_line,
         )
-        target = preview.target_backend + (
-            f" ({preview.target_model})" if preview.target_model else ""
-        )
+        from daimon.core.turn.notices import provider_name
+
+        provider = provider_name(preview.target_backend)
+        target = provider + (f" ({preview.target_model})" if preview.target_model else "")
         action = f"Switch {agent.name} to {target}"
         unavailable = (
-            f"Won't be available on {preview.target_backend}: " + ", ".join(preview.declared_drops)
+            f"On {provider} it won't have {drop_words(preview.declared_drops)}"
             if preview.declared_drops
             else ""
         )
-        if "credentials" in preview.declared_drops:
-            from daimon.core.turn.notices import provider_name
-
-            unavailable += (
-                f". Its saved keys won't be available on {provider_name(preview.target_backend)}"
-                " (they aren't deleted)"
-            )
         reach = (
             f"Affects new conversations in every channel on this {place_word}"
             if default_agent_name is not None and agent.name == default_agent_name
@@ -854,14 +875,14 @@ def backend_switch_callbacks(
         return prompt.model_copy(
             update={
                 "title": action + "?",
-                "action": action + (". " + unavailable if unavailable else ""),
+                "action": action,
                 "denied_action": "Model provider unchanged",
                 "detail_lines": details,
                 "consequence": (
                     reach
                     + "; existing threads keep their model."
                     + (
-                        "\n" + unavailable + ". Revert any time; nothing is deleted."
+                        f"\n{unavailable}. Nothing is deleted; switch back any time."
                         if unavailable
                         else ""
                     )

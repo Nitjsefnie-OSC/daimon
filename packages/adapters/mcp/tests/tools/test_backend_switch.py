@@ -265,7 +265,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
         gate()
         agent()
         agent()
-        with pytest.raises(ToolError, match="Preview again"):
+        with pytest.raises(ToolError, match="(?i)preview again"):
             await _request_agent_backend_switch_impl(
                 runtime,
                 auth,
@@ -293,7 +293,7 @@ async def test_chat_preview_then_confirm_applies_real_scoped_cas_once(
     gate()
     agent()
     agent()
-    with pytest.raises(ToolError, match="Preview again"):
+    with pytest.raises(ToolError, match="(?i)preview again"):
         await _request_agent_backend_switch_impl(
             runtime,
             auth,
@@ -625,7 +625,7 @@ async def test_chat_states_the_agents_thread_mode_and_requirements(active_chat):
     gate()
     agent()
     agent()
-    with pytest.raises(ToolError, match="Preview again"):
+    with pytest.raises(ToolError, match="(?i)preview again"):
         await _request_agent_backend_switch_impl(
             runtime,
             auth,
@@ -779,22 +779,8 @@ async def test_a_copy_switches_from_a_thread_another_agent_answers(active_chat, 
     assert not trace.violations
 
 
-@pytest.mark.parametrize(
-    ("reason", "says"),
-    [
-        ("agent_not_found", "no agent named 'X'"),
-        ("backend_not_allowed", "OpenAI isn't allowed in this workspace"),
-        ("source_unsupported", "can't carry over"),
-        ("source_context_unavailable", "public channel or thread"),
-        ("stale_preview", "Preview again"),
-        ("owner_or_admin_required", "needs its owner"),
-    ],
-)
-def test_each_switch_refusal_names_its_cause(reason, says):
-    from daimon.adapters.mcp.tools.agents import _backend_switch_refusal
-    from daimon.core.channel_backend import AgentBackendRefused
-
-    auth = AuthIdentity(
+def _admin_auth():
+    return AuthIdentity(
         tenant_id=uuid4(),
         account_id=uuid4(),
         role=Role.ADMIN,
@@ -802,9 +788,78 @@ def test_each_switch_refusal_names_its_cause(reason, says):
         platform="discord",
         platform_user_id="123",
     )
-    text = str(_backend_switch_refusal(AgentBackendRefused(reason), "X", "openai", auth))
+
+
+@pytest.mark.parametrize(
+    ("refusal", "says"),
+    [
+        ({"reason": "agent_not_found"}, "no agent named 'X'"),
+        ({"reason": "backend_not_allowed"}, "OpenAI isn't allowed in this workspace"),
+        ({"reason": "source_context_unavailable"}, "public channel or thread"),
+        ({"reason": "stale_preview"}, "preview again"),
+        ({"reason": "owner_or_admin_required"}, "needs its owner"),
+        (
+            {"reason": "source_unsupported", "missing": ("credentials",)},
+            "a saved key that one of its kept connections needs",
+        ),
+        (
+            {"reason": "source_unsupported", "missing": ("source_definition",)},
+            "can't represent",
+        ),
+        ({"reason": "source_unavailable", "detail": "environment"}, "missing or archived"),
+        ({"reason": "source_unavailable", "detail": "identity"}, "account that can change it"),
+        ({"reason": "source_unavailable"}, "Try again in a minute"),
+        ({"reason": "some_new_reason"}, "tell whoever runs Daimon"),
+    ],
+)
+def test_each_switch_refusal_names_its_cause(refusal, says):
+    from daimon.adapters.mcp.tools.agents import _backend_switch_refusal
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    reason = refusal.pop("reason")
+    text = str(
+        _backend_switch_refusal(
+            AgentBackendRefused(reason, **refusal), "X", "openai", _admin_auth()
+        )
+    )
     assert says in text and text.endswith("Nothing changed.")
-    assert "unavailable or changed" not in text
+    assert "unavailable or changed" not in text and "_" not in text
+    # A refusal from the preview never sends the requester back to the same preview.
+    if reason in ("source_unsupported", "source_unavailable"):
+        assert "preview again" not in text.lower()
+
+
+@pytest.mark.parametrize(
+    "said",
+    [
+        "selfhosted_admission_disabled",
+        "openai.persistent_workspace is not runnable in this release",
+    ],
+)
+def test_internal_backend_strings_never_reach_the_requester(said):
+    from daimon.adapters.mcp.tools.agents import _backend_switch_refusal
+    from daimon.core.channel_backend import BackendUnsupported
+
+    text = str(_backend_switch_refusal(BackendUnsupported(said), "X", "openai", _admin_auth()))
+    assert said not in text and "OpenAI can't run here right now" in text
+
+
+def test_an_unknown_error_never_shows_its_type():
+    from daimon.adapters.mcp.tools.agents import _backend_switch_refusal
+    from daimon.core.errors import DaimonError
+
+    class SecretInternalError(DaimonError):
+        pass
+
+    text = str(_backend_switch_refusal(SecretInternalError("x"), "X", "openai", _admin_auth()))
+    assert "SecretInternalError" not in text and "whoever runs Daimon" in text
+
+
+def test_a_provider_word_for_another_provider_is_refused():
+    from daimon.adapters.mcp.tools.agents import _resolve_agent_model
+
+    with pytest.raises(ToolError, match="is Gemini, but this switch names OpenAI"):
+        _resolve_agent_model("openai", "gemini")
 
 
 @pytest.mark.parametrize(
@@ -820,7 +875,7 @@ def test_a_provider_word_alone_means_the_provider_default(backend, word):
 def test_creating_on_another_providers_model_says_how(name, provider):
     from daimon.adapters.mcp.tools.agents import _resolve_native_agent_model
 
-    with pytest.raises(ToolError, match=f"target_backend='{provider}'"):
+    with pytest.raises(ToolError, match="then switch it to"):
         _resolve_native_agent_model(name)
 
 
@@ -829,3 +884,53 @@ def test_an_unknown_claude_id_is_not_waved_through():
 
     with pytest.raises(ToolError):
         _resolve_native_agent_model("claude-made-up-9")
+
+
+async def test_a_member_who_doesnt_own_the_copy_is_refused_before_the_fallback(active_chat):
+    import httpx
+    from daimon.core.ma_identity import derive_agent_uuid
+    from daimon.core.stores import agent_owners
+    from mux.testing.drivers.anthropic.ma import list_response
+    from mux.testing.drivers.anthropic.ma_transport import ScriptedReply
+
+    runtime, auth, origin, service, trace, payload, _, gate, _, _ = active_chat
+    _without_own_tools(payload)
+    copy = {**payload, "id": "agent_copy", "name": "Researcher-copy"}
+    copy["metadata"] = {**payload["metadata"], "daimon_name": "Researcher-copy"}
+    trace.router.add("GET", r"/v1/agents/agent_copy", lambda *_: httpx.Response(200, json=copy))
+    member = replace(auth, role=Role.USER, is_admin=False)
+
+    def agent():
+        trace.queue(ScriptedReply("GET", "/v1/agents", list_response([payload, copy])))
+
+    gate()
+    agent()
+    reads = len(trace.requests)
+    with pytest.raises(ToolError, match="needs its owner"):
+        await _request_agent_backend_switch_impl(
+            runtime,
+            member,
+            agent_name="Researcher-copy",
+            target_backend="gemini",
+            origin_context_id=str(origin.id),
+        )
+    # Refused at the editor check: the copy's own source was never captured.
+    assert not any(r.path == "/v1/agents/agent_copy" for r in trace.requests[reads:])
+    async with runtime.session_factory.begin() as session:
+        await agent_owners.set_owner(
+            session,
+            tenant_id=auth.tenant_id,
+            agent_id=derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id="agent_copy"),
+            owner_account_id=auth.account_id,
+            source="admin_assigned",
+        )
+    gate()
+    agent()
+    preview = await _request_agent_backend_switch_impl(
+        runtime,
+        member,
+        agent_name="Researcher-copy",
+        target_backend="gemini",
+        origin_context_id=str(origin.id),
+    )
+    assert preview.status == "preview" and preview.agent_name == "Researcher-copy"
