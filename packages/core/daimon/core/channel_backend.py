@@ -457,6 +457,13 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "feature_disabled",
         "invalid_fleet_grant",
         "fleet_provider_limits_exceed_budget",
+        "fleet_root_credentials",
+        "fleet_root_mcp",
+        "fleet_root_files",
+        "fleet_root_repository",
+        "fleet_root_tools",
+        "fleet_root_memory",
+        "fleet_root_unsupported",
         "no_previous_revision",
         "owner_or_admin_required",
         "admin_required_for_shared_threads",
@@ -1172,9 +1179,42 @@ class AgentBackendService:
         )
 
     async def preview_fleet_grant(
-        self, agent: BackendAgent, value: AgentFleetGrant | None, *, now: datetime
+        self,
+        agent: BackendAgent,
+        value: AgentFleetGrant | None,
+        *,
+        now: datetime,
+        check_root: bool = False,
     ) -> CompatibilityPreview:
+        """Preview a fleet grant; `check_root` first refuses an agent that can't run one.
+
+        That check captures the agent's source the way its turns do and asks the
+        same ceiling and obligations freezing a fleet root asks, so turning fleet on
+        never promises something every turn would then have to refuse.
+        """
         self._require_enabled()
+        if check_root and value is not None and self._capture_source is not None:
+            from daimon.core.neutral_resources import FLEET_ROOT_OBSTACLES, fleet_root_obstacle
+
+            try:
+                captured = await self._capture_source(agent)
+            except AgentBackendRefused as error:
+                # No capture here, so no up-front answer; its turns still refuse
+                # a fleet plainly, with the turn answered (freeze_prepared_root).
+                log.warning("fleet.root_check_skipped", reason=error.reason)
+                captured = None
+            if captured is not None and (captured.tenant_id, captured.agent_id) != (
+                agent.tenant_id,
+                agent.agent_id,
+            ):
+                raise AgentBackendRefused("tenant_mismatch")
+            obstacle = fleet_root_obstacle(captured) if captured is not None else None
+            if obstacle is not None:
+                raise AgentBackendRefused(
+                    f"fleet_root_{obstacle}"
+                    if obstacle in FLEET_ROOT_OBSTACLES
+                    else "fleet_root_unsupported"
+                )
         async with self._sessions() as session:
             return await self._fleet_preview(session, agent, value, now=now)
 
