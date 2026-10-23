@@ -571,6 +571,24 @@ class DiscordFleetCardFactory:
         return card
 
 
+_NOT_CONTROLLER = "Only the person who started this fleet, or a server admin, can {verb} it."
+_ALREADY_ENDED = "This fleet has already stopped."
+_CHANGED = (
+    "This fleet changed since the card was drawn. Wait for the card to update, then try again."
+)
+
+
+def _refusal_text(refused: FleetRefused | WorkerSpecRefused, action: Control) -> str:
+    """Why a fleet card click did nothing, in terms of what the clicker can do."""
+    reason: str = refused.reason
+    if reason == "controller_required":
+        # The shared owner's live rule: the fleet's starter or a current server admin.
+        return _NOT_CONTROLLER.format(verb="stop" if action == "kill" else "resume")
+    if reason in ("terminal_run", "terminal_worker"):
+        return _ALREADY_ENDED
+    return _CHANGED
+
+
 class DiscordFleetCard:
     """One orchestrator card; all reads and controls use the same core owner."""
 
@@ -734,6 +752,14 @@ class DiscordFleetCard:
                     ),
                     now=self._clock(),
                 )
+                log.info(
+                    "fleet.control_pressed",
+                    run_id=str(run.id),
+                    worker_id=str(worker_id) if worker_id is not None else None,
+                    action=action,
+                    pressed_by=str(interaction.user.id),
+                    presser_is_admin=parent.subject.is_admin,
+                )
                 if reply.get("accepted") is not True:
                     await interaction.response.send_message(
                         "This action is waiting for its dependencies.", ephemeral=True
@@ -759,10 +785,9 @@ class DiscordFleetCard:
                     edit=edit_current,
                 )
                 return True
-            except (FleetRefused, WorkerSpecRefused):
+            except (FleetRefused, WorkerSpecRefused) as refused:
                 await interaction.response.send_message(
-                    "This control is no longer available. Refresh the fleet card.",
-                    ephemeral=True,
+                    _refusal_text(refused, action), ephemeral=True
                 )
                 return False
 

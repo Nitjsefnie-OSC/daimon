@@ -292,8 +292,26 @@ async def test_current_nonrequester_subject_is_authorized_by_the_shared_owner(ad
         replace(current, subject=Subject(platform_user_id="456", is_admin=admin)),
         policy,
     )
-    await buttons(send.call_args.kwargs["view"])[0].callback(interaction(456, card=card))
+    click = interaction(456, card=card)
+    await buttons(send.call_args.kwargs["view"])[0].callback(click)
     assert owner.control.await_count == (1 if admin else 0)
+    if not admin:
+        click.response.send_message.assert_awaited_once_with(
+            "Only the person who started this fleet, or a server admin, can stop it.",
+            ephemeral=True,
+        )
+
+
+async def test_a_click_on_a_fleet_that_already_ended_says_so():
+    card, owner, _, send, _ = setup()
+    await card.refresh()
+    owner.read_run.return_value = (replace(run(), status="cancelled"), (worker(),))
+    click = interaction(card=card)
+    await buttons(send.call_args.kwargs["view"])[0].callback(click)
+    owner.control.assert_not_awaited()
+    click.response.send_message.assert_awaited_once_with(
+        "This fleet has already stopped.", ephemeral=True
+    )
 
 
 async def test_restart_dispatch_rebuilds_the_card_through_the_registered_sdk_item(
