@@ -575,6 +575,9 @@ def build_openai_runtime(request: ProviderPreparationRequest) -> OpenAIHostRunti
                 destination=destination,
                 tools=capabilities.mcp_tools,
                 chat_execution=True,
+                # A pinned OpenAI/Gemini turn has no confirmation card: its credential
+                # must be one the server refuses gated and publishing tools for.
+                surface="provider_turn",
                 now=request.now(),
             )
         except (OSError, ValueError):

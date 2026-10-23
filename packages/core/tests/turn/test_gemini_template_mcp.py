@@ -390,8 +390,20 @@ async def test_gated_and_publishing_tools_stay_unavailable_in_a_template(templat
 
 
 @pytest.mark.parametrize("consent_request", [PARAMS], indirect=True)
-@pytest.mark.parametrize("label", ["template", "ordinary"])
-async def test_the_server_refuses_gated_tools_for_a_template_turn_credential(template, label):
+@pytest.mark.parametrize(
+    ("credential", "surface", "refused"),
+    [
+        # #1313's per-turn template credential and a pinned row's F2-bound one.
+        ("gemini-agent-turn", "provider_turn", True),
+        ("F2-owned-session-boundary", "provider_turn", True),
+        # The surface decides, never the label.
+        ("gemini-agent-turn", None, False),
+        ("other-chat-execution", None, False),
+    ],
+)
+async def test_the_server_refuses_gated_tools_for_a_provider_turn_credential(
+    template, credential, surface, refused
+):
     from daimon.adapters.mcp.auth.verifier import DaimonJWTVerifier
     from daimon.adapters.mcp.middleware.mcp_identity import (
         IdentityMiddleware,
@@ -404,7 +416,7 @@ async def test_the_server_refuses_gated_tools_for_a_template_turn_credential(tem
     )
     from daimon.adapters.mcp.search_transform import AgentChatAwareBM25SearchTransform
     from daimon.core.ma_identity import derive_agent_uuid
-    from daimon.core.mcp_auth import NO_CONFIRMATION_LABEL, mint_agent_mcp_token
+    from daimon.core.mcp_auth import mint_agent_mcp_token
     from daimon.testing.asgi import mcp_session
     from fastmcp import FastMCP
 
@@ -445,11 +457,12 @@ async def test_the_server_refuses_gated_tools_for_a_template_turn_credential(tem
             agent_id=derive_agent_uuid(
                 tenant_id=request.tenant_id, ma_agent_id=request.admission.agent.id
             ),
-            label=NO_CONFIRMATION_LABEL if label == "template" else "other-chat-execution",
+            label=credential,
             secret=secret,
             now=datetime.now(UTC),
             ttl_days=600 / 86400,  # pyright: ignore[reportArgumentType]
             chat_execution=True,
+            surface=surface,
         )
     try:
 
@@ -469,7 +482,7 @@ async def test_the_server_refuses_gated_tools_for_a_template_turn_credential(tem
     assert "describe_agent" in ran and "error" not in harmless
     # The proxy never runs a gated tool, for any credential.
     assert '"isError": true' in json.dumps(proxied)
-    if label == "template":
+    if refused:
         assert ran.count("add_skill") == 0, "the server refuses the gated tool by name too"
         assert "confirmation card" in json.dumps(gated)
     else:

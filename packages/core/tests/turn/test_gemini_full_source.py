@@ -27,6 +27,7 @@ from daimon.core.neutral_resources import NeutralResourceHost
 from daimon.core.stores import mux_state
 from daimon.core.stores.mcp_tokens import revoke_mcp_token
 from daimon.core.stores.mux_state import PostgresStateStore
+from daimon.core.tool_safety import confirmation_gated_tools
 from daimon.core.turn.errors import AdmissionDenied
 from daimon.core.turn.gemini_deployment import GeminiPlan, build_gemini_runtime
 from daimon.core.turn.gemini_state import SQLiteGeminiStorage
@@ -757,7 +758,9 @@ async def test_full_default_preparation_and_fresh_followup_turns(full, request):
         assert token in json.dumps(body["tools"])
         remote = next(tool for tool in body["tools"] if tool["type"] == "mcp_server")
         expected_mcp = (
-            set(GATED_CATALOGUE) - {"add_skill"} if gated else {"search_tools", "call_tool"}
+            set(GATED_CATALOGUE) - confirmation_gated_tools()
+            if gated
+            else {"search_tools", "call_tool"}
         )
         assert set(remote["allowed_tools"][0]["tools"]) == expected_mcp
     assert token not in json.dumps(native) and token not in plan.model_dump_json()
@@ -780,18 +783,22 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
     assert isinstance(full, tuple), "gated source lost the whole MCP representation"
     request, plan, canonical, native, _, posts, *_ = full
     target = canonical.target_spec
-    marker = "mcp_tool:daimon-mcp:add_skill"
-    assert target.declared_drops == (marker, "memory", "sandbox")
-    assert marker in target.system
+    # No Gemini turn has a confirmation card: every gated or publishing tool in
+    # the catalogue is a declared loss, pinned row or template alike.
+    gated = sorted(set(GATED_CATALOGUE) & confirmation_gated_tools())
+    markers = tuple(f"mcp_tool:daimon-mcp:{name}" for name in gated)
+    assert {"add_skill", "publish_report"} <= set(gated)
+    assert target.declared_drops == (*markers, "memory", "sandbox")
+    assert all(marker in target.system for marker in markers)
     assert not {"tools", "skills", "mcp"}.intersection(target.declared_drops)
     assert len(target.skills) == len(native["base_environment"]["sources"]) == 11
-    allowed = set(GATED_CATALOGUE) - {"add_skill"}
+    allowed = set(GATED_CATALOGUE) - confirmation_gated_tools()
     assert set(target.mcp_servers[0].tool_policy["allowed_tools"]) == allowed
     remote = next(tool for tool in native["tools"] if tool["type"] == "mcp_server")
     assert remote["allowed_tools"] == [
         {"mode": "auto", "tools": list(target.mcp_servers[0].tool_policy["allowed_tools"])}
     ]
-    assert "add_skill" not in json.dumps(remote)
+    assert not any(name in json.dumps(remote) for name in gated)
     # Catalogue verification still covers the complete original source. The
     # provider execution allowlist is a reduction with its own consent marker.
     assert set(plan.source_capabilities.mcp_tools) == set(GATED_CATALOGUE)
@@ -801,7 +808,7 @@ async def test_gemini_gated_mcp_tool_loss_is_explicit_and_keeps_siblings(full):
         target.model_copy(update={"declared_drops": ("memory", "sandbox")}),
         environment=source.representations[0].environment,
     )
-    assert marker in missing
+    assert set(markers) <= set(missing)
     assert not posts
 
 

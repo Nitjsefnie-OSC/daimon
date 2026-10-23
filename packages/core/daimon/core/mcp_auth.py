@@ -42,7 +42,7 @@ from daimon.core.authz import (
 from daimon.core.mcp_hold import HOLD_CLAIM, hold_claim
 from daimon.core.operator_tokens import OperatorScope
 from daimon.core.permissions import agent_permissions, channel_rule
-from daimon.core.stores.domain import McpTokenRow
+from daimon.core.stores.domain import McpTokenRow, McpTokenSurface
 from daimon.core.turn_hold import TurnHold
 from mux.contracts.ids import Scope
 from sqlalchemy.ext.asyncio import AsyncSession, async_sessionmaker
@@ -87,8 +87,12 @@ async def resolve_agent_mcp_credential(
     tools: tuple[str, ...],
     now: dt.datetime,
     chat_execution: bool,
+    surface: McpTokenSurface | None = None,
 ) -> str:
-    """Recheck registered caller authority and its exact remote catalogue before exposure."""
+    """Recheck registered caller authority and its exact remote catalogue before exposure.
+
+    `surface` requires the credential's registry row to carry it (see
+    `validate_agent_mcp_token`); an OpenAI/Gemini turn requires `provider_turn`."""
     from daimon.core.mcp_oauth.discovery import list_mcp_tools
 
     token = read_private_credential(path)
@@ -100,6 +104,7 @@ async def resolve_agent_mcp_credential(
         agent_id=agent_id,
         now=now,
         chat_execution=chat_execution,
+        surface=surface,
     )
     if await list_mcp_tools(destination, token) != frozenset(tools):
         raise ValueError("target MCP catalogue differs from captured source")
@@ -189,9 +194,9 @@ EPHEMERAL_TOKEN_RETENTION = dt.timedelta(days=1)
 HELD_CHAT_TOKEN_LABEL_PREFIX = "vault-chat-held:"
 
 
-#: Registry label of a per-turn credential minted for a provider turn that has
-#: no confirmation card (a Gemini agent template). The server refuses every
-#: confirmation-gated or publishing tool for it (`no_confirmation_surface`).
+#: Registry label of a per-turn credential minted for a Gemini agent-template
+#: turn. A name for people reading the registry only: what the server refuses
+#: follows the row's `surface` (`provider_turn`), never its label.
 NO_CONFIRMATION_LABEL = "gemini-agent-turn"
 
 
@@ -277,6 +282,7 @@ async def mint_agent_mcp_token(
     platform: str | None = None,
     channel_id: str | None = None,
     chat_execution: bool = False,
+    surface: McpTokenSurface | None = None,
 ) -> str:
     """Mint a long-lived, revocable, agent-scoped MCP JWT.
 
@@ -300,6 +306,11 @@ async def mint_agent_mcp_token(
     `platform` and `channel_id` bind the token to the channel it was minted in
     (`coding_token_channel`). They live on the row only, never in the JWT, so
     the verifier reads the binding from the database like the revocation.
+
+    `surface="provider_turn"` registers a chat-execution credential for an
+    OpenAI or Gemini turn, which has no confirmation card: the server refuses
+    every confirmation-gated or publishing tool for it. Registry-only, never a
+    claim, so the token's exact claim shape is unchanged.
     """
     # Registered chat execution retains the ordinary chat surface. External
     # agent keys keep their existing restricted agent-chat surface. The signed
@@ -308,6 +319,8 @@ async def mint_agent_mcp_token(
 
     if chat_execution and not 0 < ttl_days * 86400 <= 900:
         raise ValueError("registered chat execution requires a TTL of at most 900 seconds")
+    if surface is not None and not chat_execution:
+        raise ValueError("a provider-turn surface is a chat-execution credential")
     assert (platform is None) == (channel_id is None), "a channel binding needs both"
     jti = uuid.uuid4()
     expires_at = now + dt.timedelta(days=ttl_days)
@@ -322,6 +335,7 @@ async def mint_agent_mcp_token(
         expires_at=expires_at,
         platform=platform,
         channel_id=channel_id,
+        surface=surface,
     )
     return pyjwt.encode(
         {
@@ -376,8 +390,12 @@ async def validate_agent_mcp_token(
     now: dt.datetime,
     max_ttl_s: int = 900,
     chat_execution: bool = False,
+    surface: McpTokenSurface | None = None,
 ) -> None:
     """Check a minted caller-bound token before exposing it to a remote provider.
+
+    `surface` requires the registry row to carry exactly that surface: a
+    provider turn's credential must be one the server refuses gated tools for.
 
     This checks the mint owner's own claims and registry facts; the MCP server
     still owns tool authorization. No provider id is substituted for the
@@ -421,6 +439,7 @@ async def validate_agent_mcp_token(
             or str(row.tenant_id) != scope.tenant_id
             or row.agent_id != str(agent_id)
             or row.revoked_at is not None
+            or (surface is not None and row.surface != surface)
             or not registered_agent_claims_match(
                 row, claims, now=now, chat_execution=chat_execution, max_ttl_s=max_ttl_s
             )
