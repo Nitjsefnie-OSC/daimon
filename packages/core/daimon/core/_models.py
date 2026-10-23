@@ -3839,6 +3839,10 @@ class AgentBackendRevisionRecord(Base):
             "thread_mode IS NULL OR thread_mode IN ('per_caller', 'shared')",
             name="ck_agent_backend_thread_mode",
         ),
+        CheckConstraint(
+            "fleet_set_by IS NULL OR fleet_set_by IN ('admin', 'owner')",
+            name="ck_agent_backend_fleet_set_by",
+        ),
     )
     tenant_id: Mapped[uuid.UUID] = _tenant_fk()
     agent_id: Mapped[uuid.UUID] = mapped_column(UUID(as_uuid=True), nullable=False)
@@ -3849,6 +3853,8 @@ class AgentBackendRevisionRecord(Base):
     digest: Mapped[str] = mapped_column(Text, nullable=False)
     previous_local: Mapped[int | None] = mapped_column(Integer)
     fleet_grant: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
+    # Who wrote the fleet grant or "off" marker: "admin" or "owner"; carried forward.
+    fleet_set_by: Mapped[str | None] = mapped_column(Text)
     drop_consent: Mapped[Any | None] = mapped_column(JSONB(none_as_null=True), nullable=True)
     created_at: Mapped[datetime] = mapped_column(
         DateTime(timezone=True), nullable=False, server_default=func.now()

@@ -645,3 +645,94 @@ def test_tightening_is_checked_for_worker_agents_provider_and_token_caps():
         update={"limits": capped.limits.model_copy(update={"max_input_tokens": 5000})}
     )
     assert not fleet_grant_within(bigger, capped)
+
+
+# --- Admin decisions stick (LEAD, follow-up to #1351) --------------------------------
+
+
+async def test_an_admins_off_can_not_be_turned_back_on_by_the_owner(people_default):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    service, agent, actors, _, default = people_default
+    off = await put(service, agent, actors["admin"], None)
+    assert off.fleet_off and off.fleet_set_by == "admin"
+    for value in (default, default.model_copy(update={"max_workers": 1})):
+        with pytest.raises(AgentBackendRefused) as refused:
+            await put(service, agent, actors["owner"], value)
+        assert refused.value.reason == "fleet_admin_decision"
+    # Another change by the owner carries the admin's decision on.
+    switched = await service.set_backend(agent, "openai", off.local, actors["owner"])
+    assert switched.fleet_off and switched.fleet_set_by == "admin"
+    with pytest.raises(AgentBackendRefused, match="admin"):
+        await put(service, agent, actors["owner"], default)
+    # An admin may turn it on again.
+    await put(service, agent, actors["admin"], default)
+
+
+async def test_an_owners_own_off_can_be_turned_back_on_by_the_owner(people_default):
+    service, agent, actors, _, default = people_default
+    off = await put(service, agent, actors["owner"], None)
+    assert off.fleet_off and off.fleet_set_by == "owner"
+    on = await put(service, agent, actors["owner"], default)
+    assert on.fleet_set_by == "owner"
+
+
+async def test_an_admins_tightening_is_the_owners_ceiling_not_the_default(people_default):
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    service, agent, actors, _, default = people_default
+    tight = await put(
+        service, agent, actors["admin"], default.model_copy(update={"max_workers": 2})
+    )
+    assert tight.fleet_set_by == "admin"
+    with pytest.raises(AgentBackendRefused) as refused:
+        await put(service, agent, actors["owner"], default)
+    assert refused.value.reason == "fleet_raise_admin_required"
+    # The owner may tighten further, within the admin's grant.
+    lower = await put(
+        service, agent, actors["owner"], default.model_copy(update={"max_workers": 1})
+    )
+    assert lower.fleet_set_by == "owner"
+
+
+async def test_a_grant_with_no_recorded_writer_counts_as_an_admins(people_default):
+    from daimon.core.channel_backend import AgentBackendRefused
+    from daimon.core.stores import agent_backends
+
+    service, agent, actors, sessions, default = people_default
+    tight = default.model_copy(update={"max_workers": 2, "epoch": 1})
+    async with sessions.begin() as db:
+        # A row from before fleet_set_by existed.
+        await agent_backends.put_revision(
+            db,
+            tenant_id=agent.tenant_id,
+            agent_id=agent.agent_id,
+            local=1,
+            backend=None,
+            digest="legacy",
+            previous_local=None,
+            agent_name=agent.name,
+            preview_digest="legacy",
+            fleet_grant=tight.model_dump(mode="json"),
+        )
+    with pytest.raises(AgentBackendRefused, match="admin"):
+        await put(service, agent, actors["owner"], default)
+
+
+async def test_fleet_set_by_only_names_an_admin_or_an_owner(people_default):
+    from sqlalchemy import text
+    from sqlalchemy.exc import IntegrityError
+
+    service, agent, actors, sessions, default = people_default
+    written = await put(
+        service, agent, actors["owner"], default.model_copy(update={"max_workers": 2})
+    )
+    with pytest.raises(IntegrityError):
+        async with sessions.begin() as db:
+            await db.execute(
+                text(
+                    "UPDATE agent_backend_revision SET fleet_set_by = 'member' "
+                    "WHERE agent_id = :agent AND local = :local"
+                ),
+                {"agent": agent.agent_id, "local": written.local},
+            )

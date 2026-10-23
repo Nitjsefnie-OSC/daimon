@@ -458,6 +458,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "feature_disabled",
         "invalid_fleet_grant",
         "fleet_raise_admin_required",
+        "fleet_admin_decision",
         "fleet_provider_limits_exceed_budget",
         "fleet_root_credentials",
         "fleet_root_mcp",
@@ -1069,6 +1070,10 @@ class AgentBackendService:
                     ),
                     preview_digest=preview.digest,
                     fleet_grant=retained_grant,
+                    # A grant or off is written by this actor; other changes keep its writer.
+                    fleet_set_by=("admin" if admin else "owner")
+                    if grant_operation
+                    else (current.fleet_set_by if current else None),
                     drop_consent=consent_json,
                     model=model,
                     profile=settings.profile,
@@ -1110,14 +1115,25 @@ class AgentBackendService:
 
         if value is None:
             raise AgentBackendRefused("invalid_fleet_grant")
-        ceilings: list[AgentFleetGrant] = []
-        default = default_fleet_grant(await self._policy(session, agent.tenant_id))
-        if default is not None:
-            ceilings.append(default)
+        stored: AgentFleetGrant | None = None
         if current is not None and current.fleet_grant is not None and not current.fleet_off:
             stored = AgentFleetGrant.model_validate_json(json.dumps(current.fleet_grant))
-            if stored.expires_at > now:
-                ceilings.append(stored)
+            if stored.expires_at <= now:
+                stored = None
+        legacy_off = (
+            current is not None
+            and current.fleet_grant is None
+            and await agent_backends.ever_had_fleet_grant(session, agent.tenant_id, agent.agent_id)
+        )
+        if legacy_off or (current is not None and current.fleet_set_by_admin):
+            # An admin's decision sticks for an owner: off (or an expired admin grant)
+            # stays off, and an admin's grant is the ceiling, never the default.
+            if stored is None:
+                raise AgentBackendRefused("fleet_admin_decision")
+            ceilings = [stored]
+        else:
+            default = default_fleet_grant(await self._policy(session, agent.tenant_id))
+            ceilings = [grant for grant in (default, stored) if grant is not None]
         if not any(fleet_grant_within(value, ceiling) for ceiling in ceilings):
             raise AgentBackendRefused("fleet_raise_admin_required")
 

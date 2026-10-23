@@ -1247,6 +1247,10 @@ class AgentBackendRevision(_BackendConsentFacts):
     previous_local: int | None
     created_at: datetime
     fleet_grant: JsonValue | None = Field(default=None, exclude_if=lambda value: value is None)
+    # Who wrote `fleet_grant` (or the off marker): None on rows from before it was kept.
+    fleet_set_by: Literal["admin", "owner"] | None = Field(
+        default=None, exclude_if=lambda value: value is None
+    )
     fleet_grant_invalid: bool = Field(default=False, exclude=True, repr=False)
 
     @model_validator(mode="after")
@@ -1274,6 +1278,11 @@ class AgentBackendRevision(_BackendConsentFacts):
     def fleet_off(self) -> bool:
         """Fleet was turned off explicitly; the default never applies to it."""
         return self.fleet_grant == FLEET_OFF
+
+    @property
+    def fleet_set_by_admin(self) -> bool:
+        """An admin wrote this fleet setting; one with no recorded writer counts as one."""
+        return self.fleet_grant is not None and self.fleet_set_by != "owner"
 
 
 class CompatibilityPreview(_BackendConsentFacts):
