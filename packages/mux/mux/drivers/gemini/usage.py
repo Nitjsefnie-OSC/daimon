@@ -7,6 +7,7 @@ from pydantic import JsonValue
 
 from mux.contracts.ids import ModelRef, ResourceRef
 from mux.contracts.usage import UsageObservation
+from mux.drivers.gemini.normalize import OUTCOMES
 from mux.drivers.gemini.transport import object_value, string
 
 
@@ -60,4 +61,6 @@ def observation_from_interaction(
         if not meter
         else ("measured" if input_tokens is not None and output is not None else "partial"),
         observed_at=observed_at,
+        # Only a terminal interaction status ends its usage; a running one may grow.
+        final=raw.get("status") in OUTCOMES,
     )

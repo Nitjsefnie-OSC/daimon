@@ -237,6 +237,7 @@ def usage(interaction: str, model_id: str, **changes) -> UsageObservation:
         input_tokens=10_000,
         input_cached_tokens=0,
         output_tokens=1_000,
+        final=True,
     )
     return UsageObservation.model_validate(fields | changes)
 
@@ -269,6 +270,8 @@ async def test_measured_usage_settles_at_the_models_token_cost(monkeypatch):
     await _settle_hold(accounting, usage("abc", ARGON_MODEL), argon)
     # 10k input at $2/M + 1k output at $10/M.
     assert accounting.calls == [("abc", ARGON_MODEL, Decimal("0.03"))]
+    # A running snapshot never frees the hold, even with a measured meter.
+    await _settle_hold(accounting, usage("r", ARGON_MODEL, final=False), argon)
     # Partial meters, unpriced models and foreign ids leave the hold for the TTL.
     await _settle_hold(accounting, usage("p", ARGON_MODEL, completeness="partial"), argon)
     await _settle_hold(accounting, usage("u", ARGON_MODEL), None)
@@ -300,3 +303,31 @@ async def test_staging_report_reads_outstanding_holds_without_writing(
     assert (line["project"], line["held_usd"], line["open_holds"]) == ("project", "0.10", 1)
     assert line["attempts_left"] == 3 and line["open_by_outcome"] == {"accepted": 1}
     assert await ledger(sessions) == before
+    # The report's transaction is READ ONLY at the database: a write is rejected.
+    from sqlalchemy import text
+    from sqlalchemy.exc import DBAPIError
+
+    async with db_committing_engine.connect() as connection:
+        with pytest.raises(DBAPIError, match="read-only transaction"):
+            async with module.read_only(connection):
+                await connection.execute(text("UPDATE gemini_runtime_state SET body = '{}'"))
+    assert await ledger(sessions) == before
+
+
+def test_report_never_echoes_an_unparseable_database_url(monkeypatch, capsys):
+    import importlib.util
+    import sys
+    from pathlib import Path
+
+    path = Path(__file__).parents[4] / "scripts" / "gemini_hold_report.py"
+    spec = importlib.util.spec_from_file_location("gemini_hold_report", path)
+    assert spec is not None and spec.loader is not None
+    module = importlib.util.module_from_spec(spec)
+    spec.loader.exec_module(module)
+    secret = "not a url hunter2-secret"
+    monkeypatch.setattr(sys, "argv", ["gemini_hold_report.py", "--database-url", secret])
+    with pytest.raises(SystemExit):
+        module.main()
+    captured = capsys.readouterr()
+    assert "not a valid database URL" in captured.err
+    assert "hunter2" not in captured.err + captured.out

@@ -13,20 +13,30 @@ import asyncio
 import json
 import os
 import sys
+from collections.abc import AsyncIterator
+from contextlib import asynccontextmanager
 from decimal import Decimal
 from typing import cast
 
 from daimon.core.turn.gemini_state import outstanding_holds
 from sqlalchemy import text
+from sqlalchemy.exc import ArgumentError
 from sqlalchemy.ext.asyncio import AsyncConnection, create_async_engine
+
+
+@asynccontextmanager
+async def read_only(connection: AsyncConnection) -> AsyncIterator[AsyncConnection]:
+    """One transaction in which the database itself rejects any write."""
+    async with connection.begin():
+        await connection.execute(text("SET TRANSACTION READ ONLY"))
+        yield connection
 
 
 async def read_holds(
     connection: AsyncConnection, *, hold: Decimal | None = None, cap: Decimal | None = None
 ) -> list[dict[str, object]]:
     """Every hold ledger's outstanding summary, inside one READ ONLY transaction."""
-    async with connection.begin():
-        await connection.execute(text("SET TRANSACTION READ ONLY"))
+    async with read_only(connection):
         rows = (
             await connection.execute(
                 text(
@@ -70,7 +80,12 @@ def main() -> int:
         parser.error("--database-url or DAIMON_DATABASE_URL is required")
     if (args.hold is None) != (args.cap is None) or (args.hold is not None and args.hold <= 0):
         parser.error("--hold and --cap go together, with a positive hold")
-    for line in asyncio.run(report(args.database_url, hold=args.hold, cap=args.cap)):
+    try:
+        lines = asyncio.run(report(args.database_url, hold=args.hold, cap=args.cap))
+    except ArgumentError:
+        # The parse error text would echo the URL, credentials included.
+        parser.error("--database-url is not a valid database URL")
+    for line in lines:
         sys.stdout.write(json.dumps(line, sort_keys=True) + "\n")
     return 0
 

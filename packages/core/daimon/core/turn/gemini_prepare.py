@@ -286,13 +286,19 @@ async def _prepare_gemini_turn(request: ProviderPreparationRequest) -> PreparedT
 async def _settle_hold(
     accounting: object, observation: UsageObservation, price: ProviderPrice | None
 ) -> None:
-    """Release the attempt's cap hold once its interaction's token cost is measured.
+    """Release the attempt's cap hold once its interaction has ended with a measured cost.
 
-    Billing above already recorded the usage; this only frees cap headroom. Without
-    a measured cost (partial meter, unpriced alias) the hold waits for HOLD_TTL.
+    Billing above already recorded the usage; this only frees cap headroom. A running
+    snapshot, a partial meter or an unpriced alias leaves the hold for HOLD_TTL.
     """
     interaction = interaction_of(observation)
-    if not isinstance(accounting, HoldSettlement) or interaction is None or price is None:
+    if (
+        not isinstance(accounting, HoldSettlement)
+        or interaction is None
+        or price is None
+        # A running snapshot may still grow: only the terminal reading frees the hold.
+        or not observation.final
+    ):
         return
     assert observation.model is not None
     actual = provider_cost_of(observation, price, infrastructure_usd=Decimal(0))

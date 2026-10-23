@@ -294,11 +294,12 @@ class _FlashAccounting:
             raise AdmissionDenied(reason="backend_unsupported")
         id_ = str(uuid4())
 
-        now = self._now()
         full = False
 
         def reserve(rows: dict[str, JsonValue]) -> None:
             nonlocal full
+            # Read the clock under the ledger lock, so expiry and stamps are ordered.
+            now = self._now()
             # Expiry and first-sight stamps commit even when this attempt is refused,
             # so a ledger already at its cap still ages out.
             _expire(rows, now)

@@ -1797,7 +1797,8 @@ during provider I/O; its account lineage locks are released beforehand. Records 
 independently, and commits finish before cancellation propagates. Unchanged record
 payloads are not rewritten. Account privacy purge previews and removes conversation
 records; conservative financial holds are deliberately retained as financial
-evidence, contain no conversation/artifact payload, and never replenish a cap.
+evidence and contain no conversation/artifact payload. A purge never releases a
+hold: only settlement, a definite 4xx refusal or expiry do (below).
 
 Known storage limitation: each namespace still stores one complete Records blob,
 including artifact bytes, and the conservative hold map grows with attempts. There
@@ -1813,15 +1814,24 @@ Each Flash or Argon attempt first persists an explicit operator hold (stamped
 `held_at`), then records its accepted/refused/unknown receipt. Holds are
 estimates against the row's `cap_usd`, not actual spend, and leave the cap three
 ways. A definite 4xx refusal releases at once (nothing to bill). An accepted
-attempt settles when its interaction's measured usage is recorded: `held_usd`
-becomes 0, `settled_usd` keeps the hold and `actual_usd` the token cost at the
-model's tariff (a later cumulative revision replaces `actual_usd` only, so nothing
-counts twice). Anything else (a lost response, a 503 fallback, a crash before
-usage, an unpriced alias) expires after `HOLD_TTL` (24 hours), logged as
-`provider_hold_expired`. Expiry and stamps commit even when the attempt that finds
-them is refused, so a full ledger ages out; a hold from before stamping starts
-its clock when first seen. Released rows stay as evidence. Billing follows
-the usage outbox, never holds. While the cap is reached, attempts are refused.
+attempt settles when its interaction's terminal usage is recorded: only a
+`final` observation (status completed, failed, cancelled, incomplete or
+budget_exceeded) settles, never a running snapshot. Then `held_usd` becomes 0,
+`settled_usd` keeps the hold and `actual_usd` the token cost at the model's
+tariff (a later cumulative revision replaces `actual_usd` only, so nothing counts
+twice). Anything else (a lost response, a 503 fallback, a crash before usage, an
+unpriced alias) expires after `HOLD_TTL` (24 hours), logged as
+`provider_hold_expired`. Expiry and stamps commit even when the attempt that
+finds them is refused, so a full ledger ages out; a hold from before stamping
+starts its clock when first seen. Released rows stay as evidence.
+
+`cap_usd` therefore bounds the unsettled exposure in flight per (tenant, account,
+project) ledger, not total spend: a settled or expired attempt no longer counts.
+Total Gemini spend is bounded by the turn gates every backend passes (the
+prepaid balance gate, the per-person monthly cap and channel budgets, plus a
+fleet worker's run budget; see
+[billing](billing.md#the-gates-in-order)) and, outside Daimon, by the Google Cloud project's own
+billing budget or quota. Billing follows the usage outbox, never holds.
 `scripts/gemini_hold_report.py` reports each ledger's outstanding holds from one
 READ ONLY transaction; this runtime is not a live certificate or QA parity claim.
 

@@ -336,9 +336,15 @@ class Base:
                 root_turn=root,
                 model=record.interaction_models.get(interaction, record.model),
             )
-            if prior is not None and prior.native_meter != observation.native_meter:
+            # A meter change, or the interaction ending, is a new revision: the
+            # terminal reading must reach the host even when its meter is unchanged.
+            changed = prior is None or (prior.native_meter, prior.final) != (
+                observation.native_meter,
+                observation.final,
+            )
+            if prior is not None and changed:
                 observation = observation.model_copy(update={"revision": prior.revision + 1})
-            if prior is None or prior.native_meter != observation.native_meter:
+            if changed:
                 record.observations[interaction] = observation
                 record.observation_history[(interaction, observation.revision)] = observation
                 usage_event = event(
