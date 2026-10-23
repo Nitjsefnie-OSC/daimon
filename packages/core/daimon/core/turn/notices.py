@@ -238,7 +238,7 @@ _REFUSALS: dict[AdmissionDenialReason, _Copy] = {
     # The hold frees itself as running attempts settle; nobody needs to act.
     "provider_hold_cap_reached": _Copy(
         "This model is at its spending limit for the moment.",
-        "It's temporary. Try again in a few minutes.",
+        "It's temporary. Try again shortly.",
     ),
 }
 # A provider refusal names its real cause and the chat words that fix it.
