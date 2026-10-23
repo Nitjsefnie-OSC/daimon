@@ -215,7 +215,7 @@ def _checkpoint_instruction(state: FakeSessionsState) -> str:
 async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
     db_session: AsyncSession,
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
+    env_turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     """The happy path end to end: the checkpoint turn runs, its archive is
@@ -237,7 +237,7 @@ async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
         account_id=ACCOUNT_ID,
-        turn_path=turn_path,
+        turn_path=env_turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -265,7 +265,7 @@ async def test_transfer_rehosts_the_bundle_and_enqueues_its_deletion(
     assert [row.file_id for row in due] == [outcome.transfer_file_id], (
         "the re-hosted bundle must be queued for deletion, not left forever"
     )
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran(env_turn_path)
 
 
 async def test_a_checkpoint_without_the_callers_account_runs_on_legacy_and_is_refused_on_mux(
@@ -514,7 +514,7 @@ async def test_transfer_skips_the_billed_turn_when_the_session_never_answered(
 
 async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
+    env_turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     """An archived session still serves its event log but refuses new events
@@ -532,7 +532,7 @@ async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
         account_id=ACCOUNT_ID,
-        turn_path=turn_path,
+        turn_path=env_turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),
@@ -545,7 +545,7 @@ async def test_transfer_degrades_to_transcript_when_the_old_session_is_archived(
     assert isinstance(outcome, TranscriptOnly)
     assert outcome.gap_reason == "session_dead"
     assert "hierarchical model" in outcome.transcript
-    turn_io_used.assert_ran(turn_path)
+    turn_io_used.assert_ran(env_turn_path)
 
 
 async def test_transfer_degrades_to_transcript_when_the_session_vanishes_mid_transfer(
@@ -740,7 +740,7 @@ async def test_transfer_degrades_to_transcript_when_the_re_upload_fails(
 
 async def test_transfer_returns_history_only_when_the_session_log_is_gone(
     db_session_factory: async_sessionmaker[AsyncSession],
-    turn_path: TurnPath,
+    env_turn_path: TurnPath,
     turn_io_used: TurnIOSpy,
 ) -> None:
     """A deleted session 404s on `events.list`, so there is no conversation to
@@ -759,7 +759,7 @@ async def test_transfer_returns_history_only_when_the_session_log_is_gone(
         old_snapshot=_snapshot(),
         tenant_id=TENANT_ID,
         account_id=ACCOUNT_ID,
-        turn_path=turn_path,
+        turn_path=env_turn_path,
         external_user_id="U123",
         transfer_id=TRANSFER_ID,
         markup=Decimal("1.0"),

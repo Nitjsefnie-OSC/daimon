@@ -32,6 +32,20 @@ def turn_path(request: pytest.FixtureRequest, monkeypatch: pytest.MonkeyPatch) -
     return path
 
 
+@pytest.fixture
+def env_turn_path() -> TurnPath:
+    """The turn path the surrounding run selects (`DAIMON_TURN__PATH`), not parametrized.
+
+    For tests the golden oracle replays (`tests/golden/runner.py` `SCENARIOS`):
+    the oracle pins the path per replay and records one transcript per test,
+    so those tests must run once, on that path. The CI legacy and mux legs
+    still cover both paths.
+    """
+    from daimon.core.config import load_turn_settings
+
+    return load_turn_settings().path
+
+
 @dataclass(frozen=True)
 class HeadlessIdentity:
     """A committed tenant and one of its accounts, the identity a mux turn requires."""

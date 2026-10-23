@@ -9,7 +9,7 @@ from typing import Annotated
 import typer
 from daimon.adapters.cli.errors import run_cli
 from daimon.adapters.cli.runtime import build_runtime
-from daimon.core.config import load_settings, load_turn_settings
+from daimon.core.config import load_settings
 from daimon.core.smoke import SMOKE_TIMEOUT_S, run_smoke_check
 from rich.console import Console
 
@@ -69,7 +69,6 @@ def smoke_command(
                 markup=rt.settings.billing.markup,
                 timeout_s=timeout,
                 on_stage=on_stage,
-                turn_path=load_turn_settings().path,
             )
             console.print(
                 "smoke: OK "
