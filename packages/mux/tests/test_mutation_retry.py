@@ -16,7 +16,7 @@ Classification table (evidence in `classify_mutation_failure`'s docstring):
 
 from __future__ import annotations
 
-from datetime import UTC, datetime
+from datetime import UTC, datetime, timedelta
 
 import anthropic
 import httpx
@@ -44,7 +44,12 @@ def status_error(
     return error_type("refused", response=response, body=body)
 
 
-def connection_error(cause: Exception) -> anthropic.APIConnectionError:
+def connection_error(
+    cause: httpx.RequestError, *, failed: httpx.Request | None = REQUEST
+) -> anthropic.APIConnectionError:
+    """The SDK's wrapping of an httpx failure; `failed` is the request httpx was sending."""
+    if failed is not None:
+        cause.request = failed
     try:
         try:
             raise cause
@@ -98,17 +103,26 @@ def test_backoff_grows_exponentially_with_bounded_jitter() -> None:
     assert policy.backoff_s(0, random=lambda: 1.0) == 0.375
 
 
+RETRY_AFTER_7 = MutationFailure("rejected", True, "http_429", retry_after_s=7.0)
+
+
 @pytest.mark.parametrize(
-    ("failure", "attempts", "elapsed", "remaining", "wait", "stop"),
+    ("failure", "attempts", "elapsed", "since", "remaining", "wait", "stop"),
     [
-        (RATE_LIMITED, 1, 0.0, None, 0.5, None),
-        (RATE_LIMITED, 3, 0.0, None, 2.0, None),
+        (RATE_LIMITED, 1, 0.0, 0.0, None, 0.5, None),
+        (RATE_LIMITED, 3, 0.0, 0.0, None, 2.0, None),
         # Never earlier than Retry-After, even when the backoff is shorter.
-        (MutationFailure("rejected", True, "http_429", retry_after_s=7.0), 1, 0.0, None, 7.0, None),
-        (RATE_LIMITED, 5, 0.0, None, 0.0, "attempts_exhausted"),
+        (RETRY_AFTER_7, 1, 0.0, 0.0, None, 7.0, None),
+        # A later invocation waits only for what is left of it...
+        (RETRY_AFTER_7, 1, 0.0, 3.0, None, 4.0, None),
+        (RETRY_AFTER_7, 1, 0.0, 10.0, None, 0.0, None),
+        # ...unless that does not fit its own deadline.
+        (RETRY_AFTER_7, 1, 0.0, 3.0, 2.0, 0.0, "budget_exhausted"),
+        (RATE_LIMITED, 5, 0.0, 0.0, None, 0.0, "attempts_exhausted"),
         (
             MutationFailure("rejected", True, "x", retry_after_s=61.0),
             1,
+            0.0,
             0.0,
             None,
             0.0,
@@ -118,31 +132,52 @@ def test_backoff_grows_exponentially_with_bounded_jitter() -> None:
             MutationFailure("rejected", True, "x", retry_after_s=5.0),
             1,
             0.0,
+            0.0,
             4.0,
             0.0,
             "budget_exhausted",
         ),
-        (RATE_LIMITED, 1, 89.9, None, 0.0, "budget_exhausted"),
-        (MutationFailure("rejected", False, "http_401"), 1, 0.0, None, 0.0, "not_retryable"),
-        (UNCLASSIFIED, 1, 0.0, None, 0.0, "not_retryable"),
+        (RATE_LIMITED, 1, 89.9, 0.0, None, 0.0, "budget_exhausted"),
+        # A later invocation after the elapsed budget is spent.
+        (RATE_LIMITED, 1, 1.0, 95.0, None, 0.0, "budget_exhausted"),
+        (RATE_LIMITED, 1, 0.0, 0.0, 0.0, 0.0, "budget_exhausted"),
+        (MutationFailure("rejected", False, "http_401"), 1, 0.0, 0.0, None, 0.0, "not_retryable"),
+        (UNCLASSIFIED, 1, 0.0, 0.0, None, 0.0, "not_retryable"),
     ],
 )
-def test_policy_decides_within_attempt_time_and_deadline_budgets(
+def test_policy_decides_from_the_recorded_times(
     failure: MutationFailure,
     attempts: int,
     elapsed: float,
+    since: float,
     remaining: float | None,
     wait: float,
     stop: str | None,
 ) -> None:
+    """`elapsed`: attempt 0 to the refusal; `since`: the refusal to now."""
+    refused_at = NOW + timedelta(seconds=elapsed)
     decision = MutationRetryPolicy().decide(
         failure,
         attempts_made=attempts,
-        elapsed_s=elapsed,
+        first_began=NOW,
+        refused_at=refused_at,
+        now=refused_at + timedelta(seconds=since),
         remaining_s=remaining,
         random=lambda: 0.0,
     )
     assert (decision.wait_s, decision.stop) == (wait, stop)
+
+
+@pytest.mark.parametrize(
+    "value",
+    [None, {}, {"delivery": "maybe", "retryable": True, "reason": "x"}, "rejected"],
+)
+def test_a_malformed_persisted_classification_reads_as_absent(value: object) -> None:
+    assert MutationFailure.from_json(value) is None
+
+
+def test_a_persisted_classification_round_trips() -> None:
+    assert MutationFailure.from_json(RETRY_AFTER_7.as_json()) == RETRY_AFTER_7
 
 
 def test_an_unknown_outcome_can_never_be_marked_retryable() -> None:
@@ -223,6 +258,27 @@ def test_anthropic_failures_classify_raw_and_normalized(
             retryable,
             reason,
         )
+
+
+def test_a_redirected_or_foreign_request_failure_is_unknown() -> None:
+    """One SDK attempt may follow a redirect: its failure says nothing about the POST."""
+    redirect = httpx.Response(303, headers={"location": "/elsewhere"}, request=REQUEST)
+    response = httpx.Response(
+        429,
+        headers={"retry-after": "1"},
+        request=httpx.Request("GET", "https://anthropic.invalid/elsewhere"),
+        history=[redirect],
+    )
+    after_redirect = anthropic.RateLimitError("slow down", response=response, body=None)
+    elsewhere = httpx.Request("GET", "https://anthropic.invalid/elsewhere")
+    for error in (
+        after_redirect,
+        connection_error(httpx.ConnectError("refused"), failed=elsewhere),
+        connection_error(httpx.ConnectError("refused"), failed=None),
+        status_error(303, {"location": "/elsewhere"}),
+    ):
+        failure = classify_mutation_failure(error)
+        assert (failure.delivery, failure.retryable) == ("unknown", False)
 
 
 def test_the_date_header_anchors_an_http_date_retry_after() -> None:

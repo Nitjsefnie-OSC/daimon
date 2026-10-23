@@ -12,7 +12,7 @@ from collections.abc import Iterator, Mapping, Sequence
 from contextlib import contextmanager
 from contextvars import ContextVar
 from datetime import UTC, datetime
-from typing import cast
+from typing import TYPE_CHECKING, Any, cast
 
 import httpx
 from anthropic import (
@@ -20,7 +20,9 @@ from anthropic import (
     APIConnectionError,
     APIStatusError,
     AsyncAnthropic,
+    AsyncCallNext,
     AsyncStream,
+    Middleware,
 )
 from anthropic.types.beta.sessions import (
     BetaManagedAgentsEventParams,
@@ -31,6 +33,10 @@ from anthropic.types.beta.sessions import (
 from mux.contracts.ids import Scope
 from mux.errors import ScopeViolation
 from mux.state.mutation_retry import UNCLASSIFIED, MutationFailure, parse_retry_after
+
+if TYPE_CHECKING:
+    from anthropic._request import APIRequest
+    from anthropic._response import AsyncAPIResponse
 
 _CLAIMED_MUTATION: ContextVar[bool] = ContextVar("anthropic_claimed_mutation", default=False)
 
@@ -45,14 +51,38 @@ def single_attempt_mutation() -> Iterator[None]:
         _CLAIMED_MUTATION.reset(token)
 
 
+class _NoRedirects(Middleware):
+    """Send a claimed mutation exactly as built; never follow a redirect.
+
+    The SDK's httpx client follows redirects by default, so one SDK attempt
+    could be an accepted POST answered by a 3xx plus a redirected GET whose
+    429 or connection failure would read as "the POST was refused". With
+    redirects off, a 3xx surfaces as a status error and classifies `unknown`.
+    """
+
+    async def handle_async(
+        self, request: APIRequest, call_next: AsyncCallNext
+    ) -> AsyncAPIResponse[Any]:
+        unredirected = request.copy()
+        unredirected.options.follow_redirects = False
+        return await call_next(unredirected)
+
+
+_NO_REDIRECTS = _NoRedirects()
+
+
 def mutation_client(client: AsyncAnthropic) -> AsyncAnthropic:
     """Do not mutate the shared client or weaken unrelated tasks/read requests.
 
     A claimed mutation gets `max_retries=0`: the SDK would otherwise repeat a
     POST blindly (this SDK sends no idempotency header), and the host's
-    persistence layer owns every retry as a fresh durable attempt.
+    persistence layer owns every retry as a fresh durable attempt. It also
+    never follows a redirect (`_NoRedirects`), so every failure the host
+    classifies belongs to the mutation request itself.
     """
-    return client.with_options(max_retries=0) if _CLAIMED_MUTATION.get() else client
+    if not _CLAIMED_MUTATION.get():
+        return client
+    return client.with_options(max_retries=0).with_middleware(_NO_REDIRECTS)
 
 
 # Statuses that prove an Anthropic mutation was refused before it executed.
@@ -68,7 +98,7 @@ _REFUSED_STATUSES = frozenset({400, 401, 402, 403, 404, 409, 413, 422})
 
 # Transport failures raised before any request byte is written: no TCP/TLS
 # connection was established, or none was handed out by the pool.
-_UNSENT_TRANSPORT_ERRORS: tuple[tuple[type[Exception], str], ...] = (
+_UNSENT_TRANSPORT_ERRORS: tuple[tuple[type[httpx.RequestError], str], ...] = (
     (httpx.ConnectError, "connect_error"),
     (httpx.ConnectTimeout, "connect_timeout"),
     (httpx.PoolTimeout, "pool_timeout"),
@@ -98,18 +128,45 @@ def classify_mutation_failure(error: BaseException) -> MutationFailure:
     - Connection failures are `rejected` and retryable only when httpx failed
       before writing the request (`_UNSENT_TRANSPORT_ERRORS`); a read, write or
       protocol failure may follow acceptance and is `unknown`.
+    - A response or failure that belongs to any request other than the
+      original one (a followed redirect) is `unknown`, whatever its status:
+      the original request may have been accepted.
     - Anything else, including cancellation and host timeouts, is `unknown`.
     """
     cause = _sdk_cause(error)
     if isinstance(cause, APIStatusError):
+        if cause.response.history:
+            return MutationFailure("unknown", retryable=False, reason="redirected")
         return _classify_status(cause)
     if isinstance(cause, APIConnectionError):
-        transport = cause.__cause__
-        for kind, reason in _UNSENT_TRANSPORT_ERRORS:
-            if isinstance(transport, kind):
-                return MutationFailure("rejected", retryable=True, reason=reason)
+        reason = never_written(cause)
+        if reason is not None:
+            return MutationFailure("rejected", retryable=True, reason=reason)
         return MutationFailure("unknown", retryable=False, reason="connection_lost")
     return UNCLASSIFIED
+
+
+def never_written(error: APIConnectionError) -> str | None:
+    """Why the SDK's own request provably never left this process, or None.
+
+    True only for a connection, connect-timeout or pool failure raised for
+    the very request the SDK built (not a redirect it followed).
+    """
+    transport = error.__cause__
+    for kind, reason in _UNSENT_TRANSPORT_ERRORS:
+        if isinstance(transport, kind):
+            try:
+                failed = transport.request
+            except RuntimeError:
+                return None
+            original = error.request
+            if failed is original or (failed.method, failed.url) == (
+                original.method,
+                original.url,
+            ):
+                return reason
+            return None
+    return None
 
 
 def _sdk_cause(error: BaseException) -> AnthropicError | None:

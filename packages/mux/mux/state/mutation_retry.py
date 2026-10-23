@@ -26,8 +26,8 @@ import math
 import random as _random
 from collections.abc import Callable, Mapping
 from dataclasses import dataclass
-from datetime import UTC, datetime
-from typing import Literal
+from datetime import UTC, datetime, timedelta
+from typing import Literal, cast
 
 from pydantic import JsonValue
 
@@ -35,9 +35,11 @@ Delivery = Literal["rejected", "repeatable", "unknown"]
 
 RetryStop = Literal[
     "not_retryable",
+    "unclassified_refusal",
     "attempts_exhausted",
     "retry_after_too_long",
     "budget_exhausted",
+    "cancelled",
 ]
 
 
@@ -65,6 +67,31 @@ class MutationFailure:
             "reason": self.reason,
             "retry_after_s": self.retry_after_s,
         }
+
+    @classmethod
+    def from_json(cls, value: object) -> MutationFailure | None:
+        """A persisted classification, or None when it is absent or malformed."""
+        if not isinstance(value, Mapping):
+            return None
+        fields = cast(Mapping[str, object], value)
+        delivery, retryable = fields.get("delivery"), fields.get("retryable")
+        reason, retry_after = fields.get("reason"), fields.get("retry_after_s")
+        if (
+            delivery not in ("rejected", "repeatable", "unknown")
+            or not isinstance(retryable, bool)
+            or not isinstance(reason, str)
+            or not (retry_after is None or isinstance(retry_after, int | float))
+        ):
+            return None
+        try:
+            return cls(
+                delivery,
+                retryable=retryable,
+                reason=reason,
+                retry_after_s=None if retry_after is None else float(retry_after),
+            )
+        except ValueError:
+            return None
 
 
 UNCLASSIFIED = MutationFailure("unknown", retryable=False, reason="unclassified")
@@ -117,14 +144,20 @@ class MutationRetryPolicy:
         failure: MutationFailure,
         *,
         attempts_made: int,
-        elapsed_s: float,
+        first_began: datetime,
+        refused_at: datetime,
+        now: datetime,
         remaining_s: float | None = None,
         random: Callable[[], float] = _random.random,
     ) -> RetryDecision:
-        """Whether to take another attempt after `failure`, and when.
+        """Whether attempt `attempts_made + 1` may follow `failure`, and how long to wait.
 
-        Never earlier than the provider's Retry-After, and never a wait that
-        ends past the elapsed budget or the host deadline (`remaining_s`).
+        All times come from the durable records, so a fresh invocation decides
+        exactly as the one that saw the refusal: `first_began` is when attempt
+        0 began, `refused_at` when the last refusal was recorded. The retry is
+        never earlier than `refused_at` plus Retry-After (and the backoff), and
+        stops when that moment, or `now`, is past the elapsed budget, or when
+        the wait would not end inside the host deadline (`remaining_s`).
         """
         if not failure.retryable or failure.delivery == "unknown":
             return RetryDecision(stop="not_retryable")
@@ -133,13 +166,14 @@ class MutationRetryPolicy:
         retry_after = failure.retry_after_s
         if retry_after is not None and retry_after > self.max_retry_after_s:
             return RetryDecision(stop="retry_after_too_long")
-        wait = self.backoff_s(attempts_made - 1, random=random)
+        delay = self.backoff_s(attempts_made - 1, random=random)
         if retry_after is not None:
-            wait = max(wait, retry_after)
-        budget = self.max_elapsed_s - elapsed_s
-        if remaining_s is not None:
-            budget = min(budget, remaining_s)
-        if wait >= budget:
+            delay = max(delay, retry_after)
+        not_before = refused_at + timedelta(seconds=delay)
+        if (max(not_before, now) - first_began).total_seconds() >= self.max_elapsed_s:
+            return RetryDecision(stop="budget_exhausted")
+        wait = max((not_before - now).total_seconds(), 0.0)
+        if remaining_s is not None and wait >= remaining_s:
             return RetryDecision(stop="budget_exhausted")
         return RetryDecision(wait_s=wait)
 
