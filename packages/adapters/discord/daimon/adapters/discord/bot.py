@@ -4326,6 +4326,7 @@ class DaimonBot(commands.Bot):
                         tenant_id=tenant_id,
                         account_id=admission.account_id,
                         admission=admission,
+                        client=self,
                     ),
                     active_turn_message_id=marked_message_id,
                     before_send=completion_root if completion_batch is not None else None,
@@ -5702,6 +5703,7 @@ class DaimonBot(commands.Bot):
                         tenant_id=tenant_id,
                         account_id=admission.account_id,
                         admission=admission,
+                        client=self,
                     ),
                     active_turn_message_id=marked_message_id,
                     **provider_action_options(
