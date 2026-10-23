@@ -794,7 +794,7 @@ def _admin_auth():
     ("refusal", "says"),
     [
         ({"reason": "agent_not_found"}, "no agent named 'X'"),
-        ({"reason": "backend_not_allowed"}, "OpenAI isn't allowed in this workspace"),
+        ({"reason": "backend_not_allowed"}, "OpenAI isn't allowed in this server"),
         ({"reason": "source_context_unavailable"}, "public channel or thread"),
         ({"reason": "stale_preview"}, "preview again"),
         ({"reason": "owner_or_admin_required"}, "needs its owner"),
@@ -934,3 +934,20 @@ async def test_a_member_who_doesnt_own_the_copy_is_refused_before_the_fallback(a
         origin_context_id=str(origin.id),
     )
     assert preview.status == "preview" and preview.agent_name == "Researcher-copy"
+
+
+def test_clearing_to_the_default_with_another_providers_word_is_refused():
+    from daimon.adapters.mcp.tools.agents import _resolve_agent_model
+
+    with pytest.raises(ToolError, match="is OpenAI, but this switch names Anthropic"):
+        _resolve_agent_model(None, "gpt")
+    assert _resolve_agent_model(None, "claude") is None
+
+
+def test_an_unsupported_switch_names_the_provider_it_stays_on():
+    from daimon.adapters.mcp.tools.agents import _backend_switch_refusal
+    from daimon.core.channel_backend import AgentBackendRefused
+
+    refused = AgentBackendRefused("source_unsupported", missing=("instructions",))
+    text = str(_backend_switch_refusal(refused, "X", "openai", _admin_auth(), current="gemini"))
+    assert "or keep it on Gemini." in text

@@ -1497,12 +1497,10 @@ async def capture_backend_source(
 
     try:
         async with asyncio.timeout(30):
-            if (
-                context.tenant_id != source.tenant_id
-                or context.account_id is None
-                or source.source is None
-            ):
+            if context.tenant_id != source.tenant_id or context.account_id is None:
                 raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
+            if source.source is None:
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="source")
             async with deps.sessionmaker() as db:
                 account = await get_account_with_tenant(db, account_id=context.account_id)
                 policy = await load_access_policy(db, tenant_id=context.tenant_id)
@@ -1662,7 +1660,7 @@ async def capture_backend_source(
                 request, fresh=True, capability_preview=True
             )
             if (captured.tenant_id, captured.agent_id) != (source.tenant_id, source.agent_id):
-                raise channel_backend.AgentBackendRefused("source_unavailable", detail="identity")
+                raise channel_backend.AgentBackendRefused("source_unavailable", detail="source")
             return captured
     except (APIError, TimeoutError) as error:
         raise channel_backend.AgentBackendRefused("source_unavailable") from error
