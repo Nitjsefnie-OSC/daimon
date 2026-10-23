@@ -31,6 +31,7 @@ from daimon.core.fleet_configuration import (
     fleet_worker_names,
     provider_preview_digest,
 )
+from daimon.core.stores.domain import BackendAgent
 from fastmcp import Context, FastMCP
 from fastmcp.exceptions import ToolError
 from mux.contracts.ids import Provider
@@ -85,6 +86,41 @@ def _actor(auth: AuthIdentity) -> BackendActor:
     )
 
 
+async def _capture_fleet_target(
+    runtime: McpRuntime, auth: AuthIdentity, source: BackendAgent
+) -> BackendAgent:
+    """Capture the TARGET agent's own source, by name, not the channel's default agent.
+
+    The explicit-target form of the backend-switch capture: the requester's tenant
+    and account, no channel, the named agent and its pinned native agent.
+    """
+    from daimon.core.authz import Place
+    from daimon.core.ma_resolver import new_resolver_cache
+    from daimon.core.scope import ScopeContext
+    from daimon.core.turn.admission import capture_backend_source
+    from daimon.core.turn.deps import build_turn_deps
+
+    deps = build_turn_deps(
+        runtime.settings,
+        runtime.client,
+        runtime.session_factory,
+        deployment_default=runtime.deployment_default,
+        resolver_cache=new_resolver_cache(),
+        billing_config=None,
+    )
+    return await capture_backend_source(
+        deps,
+        source,
+        context=ScopeContext(tenant_id=auth.tenant_id, account_id=auth.account_id, platform="cli"),
+        subject=mcp_subject(auth, is_admin=auth.is_admin),
+        place=Place(),
+        is_dm=False,
+        slack_turn_context_id=None,
+        private_dm_id=None,
+        explicit_target_name=source.name,
+    )
+
+
 async def _request_fleet_config_impl(
     runtime: McpRuntime,
     auth: AuthIdentity,
@@ -97,15 +133,11 @@ async def _request_fleet_config_impl(
     origin_context_id: str | None = None,
 ) -> FleetConfigInfo:
     await _require_chat(runtime, auth, origin_context_id, "request_fleet_config")
-    from daimon.adapters.mcp.tools.agents import (
-        _capture_backend_source,  # pyright: ignore[reportPrivateUsage]
-    )
-
     # The source capture lets a new grant's preview refuse an agent that can't run a fleet.
     service = make_backend_service(
         runtime.session_factory,
         runtime.settings.turn,
-        capture_source=partial(_capture_backend_source, runtime, auth, None),
+        capture_source=partial(_capture_fleet_target, runtime, auth),
     )
     now = datetime.now(UTC)
     try:

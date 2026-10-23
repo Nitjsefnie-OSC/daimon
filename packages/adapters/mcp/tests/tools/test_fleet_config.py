@@ -465,3 +465,41 @@ async def test_current_config_partial_edit_and_explicit_cap_removal(active_chat)
     assert stored.limits.provider_limits_usd is None and stored.limits.native_budget_usd is None
     assert stored.limits.budget_usd == Decimal("3") and stored.expires_at == value.expires_at
     assert not trace.replies and not trace.violations
+
+
+async def test_fleet_preview_checks_the_target_agent_not_the_channel_default(
+    active_chat, monkeypatch
+):
+    """The target (Researcher) is not this deployment's default agent (internal-test)."""
+    from daimon.core.scope import DeploymentDefault
+    from daimon.core.turn import admission
+
+    runtime, auth, origin, _, _, payload, frozen, gate, agent, _ = active_chat
+    runtime = replace(
+        runtime,
+        deployment_default=DeploymentDefault(
+            agent_name="internal-test", environment_name="default"
+        ),
+    )
+    captured = []
+    real = admission.capture_backend_source
+
+    async def spy(deps, source, **kwargs):
+        result = await real(deps, source, **kwargs)
+        captured.append((source.name, result.agent_id))
+        return result
+
+    monkeypatch.setattr(admission, "capture_backend_source", spy)
+    gates(payload, frozen)
+    gate()
+    agent()
+    preview = await _request_fleet_config_impl(
+        runtime,
+        auth,
+        agent_name="Researcher",
+        config=config(),
+        origin_context_id=str(origin.id),
+    )
+    assert preview.status == "preview"
+    agent_id = derive_agent_uuid(tenant_id=auth.tenant_id, ma_agent_id="agent_owned")
+    assert captured == [("Researcher", agent_id)]

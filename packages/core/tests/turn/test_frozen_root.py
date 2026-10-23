@@ -561,6 +561,24 @@ async def test_an_agent_that_cant_run_a_fleet_still_answers_with_fleet_off(root_
     assert fleet_root_obstacle(root_turn[1]._source) is None  # the plain agent can
 
 
+async def test_a_refusal_that_is_not_the_agents_setup_still_fails_the_turn(root_turn, monkeypatch):
+    from daimon.core import neutral_resources
+    from daimon.core.turn.runtime_manifest import root_refusal
+
+    deps, prepared, grants, intent, origin, scope, binding, transport = root_turn
+
+    def refused(*args, **kwargs):
+        # e.g. a backend the policy no longer allows; the agent itself could run one.
+        raise WorkerSpecRefused("backend", "unsupported")
+
+    monkeypatch.setattr(neutral_resources, "fleet_root_permissions", refused)
+    with pytest.raises(WorkerSpecRefused, match="backend"):
+        await freeze(root_turn)
+    assert root_refusal(origin.id) is None
+    async with deps.sessionmaker() as db:
+        assert await mux_state.get_fleet_root_operation(db, scope, intent_id=intent.id) is None
+
+
 async def test_fresh_channel_admission_reaches_root_freeze(root_turn):
     from daimon.core.authz import build_turn_place
 

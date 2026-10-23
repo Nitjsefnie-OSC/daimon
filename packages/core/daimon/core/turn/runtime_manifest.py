@@ -718,12 +718,18 @@ async def freeze_prepared_root(
             seal_ids=prepared.admission.origin_seal_ids,
         )
     except WorkerSpecRefused as error:
-        # The agent's own setup can't become worker authority (e.g. a connected tool
-        # with its own login). That must not fail the turn: it runs with fleet off,
-        # nothing is retained, and the fleet tools say why in plain words.
+        # Only when the agent's own setup can't become worker authority (e.g. a
+        # connected tool with its own login, or its very first turn, before its
+        # memory store exists) does the turn run with fleet off: nothing is
+        # retained and the fleet tools say why. Any other refusal (policy, grant,
+        # backend, budget, identity) still fails the turn as before.
         from daimon.core.neutral_resources import fleet_root_obstacle
 
-        obstacle = fleet_root_obstacle(source) or error.field
+        obstacle = fleet_root_obstacle(source)
+        if obstacle is None and error.field == "memory" and source.memory_store_id is None:
+            obstacle = "memory"
+        if obstacle is None:
+            raise
         log.warning(
             "fleet.root_freeze_refused",
             field=error.field,

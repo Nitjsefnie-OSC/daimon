@@ -462,6 +462,7 @@ def backend_refusal_causes(error: BaseException | None) -> list[dict[str, object
         "fleet_root_files",
         "fleet_root_repository",
         "fleet_root_tools",
+        "fleet_root_memory",
         "fleet_root_unsupported",
         "no_previous_revision",
         "owner_or_admin_required",
@@ -1195,10 +1196,19 @@ class AgentBackendService:
         if check_root and value is not None and self._capture_source is not None:
             from daimon.core.neutral_resources import FLEET_ROOT_OBSTACLES, fleet_root_obstacle
 
-            captured = await self._capture_source(agent)
-            if (captured.tenant_id, captured.agent_id) != (agent.tenant_id, agent.agent_id):
+            try:
+                captured = await self._capture_source(agent)
+            except AgentBackendRefused as error:
+                # No capture here, so no up-front answer; its turns still refuse
+                # a fleet plainly, with the turn answered (freeze_prepared_root).
+                log.warning("fleet.root_check_skipped", reason=error.reason)
+                captured = None
+            if captured is not None and (captured.tenant_id, captured.agent_id) != (
+                agent.tenant_id,
+                agent.agent_id,
+            ):
                 raise AgentBackendRefused("tenant_mismatch")
-            obstacle = fleet_root_obstacle(captured)
+            obstacle = fleet_root_obstacle(captured) if captured is not None else None
             if obstacle is not None:
                 raise AgentBackendRefused(
                     f"fleet_root_{obstacle}"
