@@ -415,6 +415,102 @@ async def test_fallback_alias_usage_is_preserved_as_pending_after_restart(host: 
     assert len(host.transport.requests) == 2 and not host.ancillary.requests
 
 
+async def test_each_tool_round_has_its_own_hold_and_settles_at_requires_action(
+    host: Host, tmp_path: Path
+) -> None:
+    import json
+    import sqlite3
+
+    from daimon.core.turn.gemini import GeminiTurnIO
+    from daimon.core.turn.gemini_state import SQLiteFlashAccounting
+
+    path = tmp_path / "holds.sqlite3"
+    accounting = SQLiteFlashAccounting(
+        path, namespace="n", hold_usd=Decimal("0.05"), cap_usd=Decimal("0.15")
+    )
+    runtime = host.deps.turn_runtimes[PROFILE]
+    assert isinstance(runtime.usage_store, GeminiUsageRuntime)
+    usage = replace(runtime.usage_store, accounting=accounting)
+    host.deps = replace(host.deps, turn_runtimes={PROFILE: replace(runtime, usage_store=usage)})
+    prepared = await prepare(host)
+    assert prepared.backend is not None and prepared.session_ref is not None
+    scope = Scope(
+        tenant_id=str(TENANT),
+        account_id=str(ACCOUNT),
+        principal_id="daimon",
+        authorization_id="admitted-turn",
+    )
+    persistence = await prepared_persistence(
+        host.deps,
+        prepared.admission,
+        tenant_id=TENANT,
+        platform="slack",
+        thread_id="thread",
+        session_id=prepared.ma_session_id,
+        mapping_id=None,
+        session_ref=prepared.session_ref,
+        operation_key="tool-rounds",
+    )
+    rounds = []
+    for name in ("round-1", "round-2"):
+        reply = interaction(name, status="requires_action")
+        reply["steps"] = [
+            {"type": "function_call", "id": f"{name}-call", "name": "weather", "arguments": {}}
+        ]
+        rounds.append(reply)
+    host.transport.responses.extend([*rounds, interaction("answer")])
+    io = GeminiTurnIO(prepared.backend, scope, prepared.session_ref, persistence=persistence)
+
+    async def drive() -> None:
+        await io.send([{"type": "user.message", "content": [{"type": "text", "text": "weather"}]}])
+        for _ in range(2):
+            frames = await io.replay_turn_events()
+            tool = [
+                f.native
+                for f in frames
+                if f.native is not None and f.native.type == "agent.custom_tool_use"
+            ][-1]
+            await io.send(
+                [
+                    {
+                        "type": "user.custom_tool_result",
+                        "custom_tool_use_id": tool.id,
+                        "content": [{"type": "text", "text": "cold"}],
+                    }
+                ]
+            )
+        await io.replay_turn_events()
+
+    await persistence.run(drive)
+
+    def ledger() -> list[dict]:
+        with sqlite3.connect(path) as connection:
+            (body,) = connection.execute("SELECT body FROM payloads").fetchone()
+        return sorted(json.loads(body).values(), key=lambda row: row["interaction_id"])
+
+    # Every round, continuation included, reserved its own hold on its own interaction.
+    assert [(row["interaction_id"], row["held_usd"]) for row in ledger()] == [
+        ("answer", "0.05"),
+        ("round-1", "0.05"),
+        ("round-2", "0.05"),
+    ]
+    observations = await prepared.backend.usage.reconcile(scope, prepared.session_ref)
+    # A requires_action interaction is final: its tool result continued as a new one.
+    assert sorted((o.id, o.final) for o in observations) == [
+        ("gemini:answer:usage", True),
+        ("gemini:round-1:usage", True),
+        ("gemini:round-2:usage", True),
+    ]
+    record = cast(ObservationRecorder, prepared._record)  # pyright: ignore[reportPrivateUsage]
+    for observation in observations:
+        await record(observation=observation)
+    assert [(row["interaction_id"], row["held_usd"], row["settled_usd"]) for row in ledger()] == [
+        ("answer", "0", "0.05"),
+        ("round-1", "0", "0.05"),
+        ("round-2", "0", "0.05"),
+    ]
+
+
 async def test_fenced_function_result_has_its_own_claim_and_preserves_root(host: Host) -> None:
     from daimon.core.turn.gemini import GeminiTurnIO
 

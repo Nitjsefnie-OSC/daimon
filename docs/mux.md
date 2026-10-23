@@ -1816,7 +1816,8 @@ estimates against the row's `cap_usd`, not actual spend, and leave the cap three
 ways. A definite 4xx refusal releases at once (nothing to bill). An accepted
 attempt settles when its interaction's terminal usage is recorded: only a
 `final` observation (status completed, failed, cancelled, incomplete or
-budget_exceeded) settles, never a running snapshot. Then `held_usd` becomes 0,
+budget_exceeded, or requires_action, since a tool-result round continues as a new
+interaction with its own hold) settles, never a running snapshot. Then `held_usd` becomes 0,
 `settled_usd` keeps the hold and `actual_usd` the token cost at the model's
 tariff (a later cumulative revision replaces `actual_usd` only, so nothing counts
 twice). Anything else (a lost response, a 503 fallback, a crash before usage, an

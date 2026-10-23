@@ -16,7 +16,8 @@ USAGE = {"total_input_tokens": 64, "total_cached_tokens": 16, "total_output_toke
     ("status", "final"),
     [
         ("in_progress", False),
-        ("requires_action", False),
+        # Tool results continue as a new interaction; this one is done.
+        ("requires_action", True),
         (None, False),
         ("completed", True),
         ("failed", True),

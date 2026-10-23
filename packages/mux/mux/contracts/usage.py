@@ -28,8 +28,7 @@ class UsageObservation(Contract):
     any, for audit only. `native_meter`
     keeps the provider's own usage record untouched, so a conversion can be
     audited against it. `final` is the provider saying the measured work has
-    ended (a terminal interaction): no later revision will add usage. A running
-    snapshot is never final.
+    ended: no later revision will add usage. A running snapshot is never final.
     """
 
     id: str
