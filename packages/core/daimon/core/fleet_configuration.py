@@ -146,7 +146,9 @@ def default_fleet_grant(policy: TenantBackendPolicy) -> AgentFleetGrant | None:
     choices: list[tuple[ResolvedBackend, ModelRef]] = []
     for entry in agent_catalog():
         model = ModelRef(provider=entry.model.provider, id=entry.model.id)
-        if "pro" in model.id.casefold().replace("_", "-").split("-"):
+        tokens = model.id.casefold().replace("_", "-").split("-")
+        if "pro" in tokens or "fast" in tokens:
+            # Never Pro; never a "-fast" speed preset (a local preset key, at a higher price).
             continue
         if not backend_is_enabled(model.provider, policy.enabled_backends):
             continue

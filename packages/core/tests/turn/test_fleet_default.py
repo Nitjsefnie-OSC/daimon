@@ -91,10 +91,15 @@ def test_default_never_offers_a_pro_model_even_if_the_catalog_had_one(monkeypatc
     monkeypatch.setattr(
         agent_model_names,
         "agent_catalog",
-        lambda: (*real, AgentModel(ModelRef(provider="gemini", id="gemini-3.8-pro"), "$")),
+        lambda: (
+            *real,
+            AgentModel(ModelRef(provider="gemini", id="gemini-3.8-pro"), "$"),
+            AgentModel(ModelRef(provider="anthropic", id="claude-opus-5-5-fast"), "$"),
+        ),
     )
     grant = default_fleet_grant(policy(*ALL))
     assert grant is not None and "gemini-3.8-pro" not in ids(grant)
+    assert "claude-opus-5-5-fast" not in ids(grant) and "claude-opus-5-5" in ids(grant)
 
 
 def test_default_reads_the_same_every_time_so_a_frozen_root_never_goes_stale():
